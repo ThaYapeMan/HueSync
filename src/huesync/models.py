@@ -19,7 +19,6 @@ log = logging.getLogger(__name__)
 # detection.  Keep in sync with ONSET_METHODS in web/src/lib/api.ts.
 ONSET_METHODS: frozenset[str] = frozenset({"combined", "multiband", "superflux"})
 
-
 class ColorMode(StrEnum):
     """How cava's spectrum bars are translated into a Hue colour.
 
@@ -32,6 +31,11 @@ class ColorMode(StrEnum):
     SPECTRUM_RGB = "spectrum_rgb"
     # Single colour; brightness follows overall loudness.
     MONO_PULSE = "mono_pulse"
+
+
+# Derived from ColorMode so it can never go out of sync with the enum.
+# Keep in sync with COLOUR_MODES in web/src/lib/api.ts.
+COLOUR_MODES: frozenset[str] = frozenset(cm.value for cm in ColorMode)
 
 
 @dataclass

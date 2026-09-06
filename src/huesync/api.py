@@ -970,7 +970,12 @@ async def patch_render_config(rc_id: str, request: Request, body: RenderConfigPa
     updates = body.model_dump(exclude_unset=True)
     for field, value in updates.items():
         if field == "color_mode":
-            value = ColorMode(value)
+            try:
+                value = ColorMode(value)
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=422, detail=f"Unknown color_mode: {value!r}"
+                ) from exc
         setattr(rc, field, value)
     storage.save_render_config(rc)
     # Trigger render/pcm update if the active coupling uses this RenderConfig.

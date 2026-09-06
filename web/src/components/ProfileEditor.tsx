@@ -18,6 +18,7 @@ import {
 } from '@/components/ui/select'
 import { SliderField } from '@/components/SliderField'
 import {
+  COLOUR_MODES,
   ONSET_METHODS,
   type Bridge,
   type EntertainmentArea,
@@ -337,8 +338,9 @@ export function ProfileEditor({ profile, bridges, onSave, onClose, open }: Props
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="spectrum_rgb">Spectrum RGB</SelectItem>
-                  <SelectItem value="mono_pulse">Mono pulse</SelectItem>
+                  {COLOUR_MODES.map((m) => (
+                    <SelectItem key={m.value} value={m.value}>{m.label}</SelectItem>
+                  ))}
                 </SelectContent>
               </Select>
             </FormRow>

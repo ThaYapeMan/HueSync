@@ -9,6 +9,16 @@ export const ONSET_METHODS = [
 
 export type OnsetMethod = typeof ONSET_METHODS[number]['value']
 
+// Canonical list of colour modes.  Derived from models.ColorMode in the backend;
+// any value not in this list raises 422 on POST and 500 on PATCH (until the
+// PATCH guard was added).  Keep in sync with COLOUR_MODES in models.py.
+export const COLOUR_MODES = [
+  { value: 'spectrum_rgb', label: 'Spectrum RGB' },
+  { value: 'mono_pulse',   label: 'Mono Pulse' },
+] as const
+
+export type ColourMode = typeof COLOUR_MODES[number]['value']
+
 export interface Bridge {
   id: string
   name: string

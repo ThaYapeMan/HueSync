@@ -26,6 +26,7 @@ import {
 } from '@/components/ui/select'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
 import {
+  COLOUR_MODES,
   type RenderConfig,
   getRenderConfigs,
   createRenderConfig,
@@ -220,11 +221,9 @@ export function RenderConfigs() {
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="spectrum_rgb">Spectrum RGB</SelectItem>
-                  <SelectItem value="spectrum_warm">Spectrum Warm</SelectItem>
-                  <SelectItem value="pulse_white">Pulse White</SelectItem>
-                  <SelectItem value="bass_pulse">Bass Pulse</SelectItem>
-                  <SelectItem value="classic_spectrum">Classic Spectrum</SelectItem>
+                  {COLOUR_MODES.map((m) => (
+                    <SelectItem key={m.value} value={m.value}>{m.label}</SelectItem>
+                  ))}
                 </SelectContent>
               </Select>
             </FormRow>
