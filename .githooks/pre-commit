@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Pre-commit hook: rebuild and stage the frontend bundle when web/src/ files
+# are staged for commit.
+#
+# Enable once per clone: git config core.hooksPath .githooks
+# Or run:               scripts/install-hooks.sh
+#
+# What it does:
+#   1. If no web/src/ files are staged, exits immediately (no-op for
+#      Python-only changes).
+#   2. Runs 'npm run build' in web/ (TypeScript typecheck + Vite bundle).
+#      A TypeScript compilation error aborts the commit immediately.
+#   3. Stages the rebuilt bundle (src/huesync/webui/) automatically so the
+#      committed bundle always matches the committed source — prevents the
+#      "stale bundle pushed to LXC" class of bugs.
+
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+
+# Step 1: any web/src/ files staged?
+if ! git -C "$REPO_ROOT" diff --cached --name-only | grep -q "^web/src/"; then
+  exit 0
+fi
+
+# Step 2: node_modules must exist; fail early with a clear message rather than
+# a confusing npm error.
+if [ ! -d "$REPO_ROOT/web/node_modules" ]; then
+  echo "[pre-commit] ERROR: web/node_modules not found."
+  echo "  Run: cd web && npm install"
+  exit 1
+fi
+
+echo "[pre-commit] Frontend source staged — building bundle..."
+cd "$REPO_ROOT/web"
+npm run build
+
+# Step 3: stage the rebuilt bundle so the commit includes the up-to-date files.
+echo "[pre-commit] Staging rebuilt bundle (src/huesync/webui/)..."
+cd "$REPO_ROOT"
+git add src/huesync/webui/
+
+echo "[pre-commit] Frontend build OK — bundle staged."

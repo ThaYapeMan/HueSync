@@ -28,3 +28,33 @@ jobs:
 
       - name: Test
         run: pytest -v
+
+  build-frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: web
+
+      - name: Build (TypeScript + Vite)
+        run: npm run build
+        working-directory: web
+
+      - name: Check bundle matches source
+        run: |
+          if ! git diff --exit-code src/huesync/webui/; then
+            echo ""
+            echo "ERROR: The committed bundle in src/huesync/webui/ does not match"
+            echo "a fresh build of the current web/src/ source."
+            echo "Run: cd web && npm run build, then commit src/huesync/webui/."
+            exit 1
+          fi
