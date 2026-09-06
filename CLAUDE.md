@@ -125,15 +125,38 @@ deliberately leaves the log in place.
 
 ### Two clipping ceilings, and how they interact (`sync_engine.py`)
 
-1. **`BandNormaliser._EXERTION_CLIP` (2.0×)** — a *musical scale choice*.
-   Exertion is clipped at 2× the band's rolling average and encoded as
-   0–255 (128 = at average, 255 = 2× average).
+1. **`BandNormaliser.exertion_clip` (default 3.0×)** — a *musical scale choice*.
+   Exertion is clipped at `exertion_clip`× the bar's rolling average and
+   encoded as 0–255. With the default 3.0, steady-state music (exertion ≈ 1×)
+   maps to byte ≈ 85 (≈ 33 % output). `BandNormaliser.update_exertion_clip()`
+   changes the ratio without resetting the EMA.
 2. **The clip at 1.0 before RGB conversion** — a *safety ceiling*, applied
    after multiplying by `profile.sensitivity`.
 
 Post-normalisation, `sensitivity = 1.0` is the correct default: steady-state
-music sits around half brightness with brief peaks at full. Above ~2.0 the
-steady state saturates and everything washes out.
+music sits around one-third brightness with brief peaks at full. Above ~3.0
+the steady state saturates.
+
+### Profile field updates route to the minimum necessary action (`api.py`, `player_manager.py`)
+
+`PATCH /api/profiles/{id}` categorises changed fields before deciding what to
+restart. **Do not collapse these categories back into "always deactivate"** —
+that was the original source of warmup-state interference in A/B comparisons.
+
+| Category | Fields | Action |
+|---|---|---|
+| player | `lms_host`, `lms_port`, `player_name`, `player_mac`, `alsa_device`, `bridge_id`, `entertainment_area_id` | Full deactivate |
+| cava | `bars`, `lower_cutoff_freq`, `higher_cutoff_freq` | `restart_cava()` |
+| pcm | `onset_method`, `onset_delta`, `onset_alpha`, `superflux_mu`, `superflux_lag`, `bass_hz`, `mid_hz` | `SyncEngine.update_onset_pipeline()` |
+| render | `color_mode`, `sensitivity`, `brightness_floor`, `exertion_clip`, `enabled`, `entertainment_area_name`, `light_count` | `SyncEngine.update_render()` |
+
+Priority: player > cava > pcm > render. For a mixed PATCH, deactivate wins if
+any player field changed; otherwise all applicable non-deactivating actions run.
+
+`update_onset_pipeline()` resets onset warmup state but NOT the BandNormaliser
+EMA. Switching onset_method live now takes ~0.3 s to re-warm rather than the
+full DTLS handshake time. See `docs/HueSync_analysis_and_player_architecture.md`
+for the full design record including the Phase 2 roadmap.
 
 ### Timing: lights run AHEAD of Sonos
 
@@ -175,8 +198,9 @@ because the directory is owned by `huesync` while git runs as root.
 | `src/huesync/sync_engine.py` | `FifoReader`, `BandNormaliser`, `CavaAnalyser`, `ColourModeEffect`, `SyncEngine` |
 | `src/huesync/hue_output.py` | **Only** file importing `hue_entertainment` for streaming: `HueDriver`, `ChannelInfo`, `get_channel_infos()` |
 | `src/huesync/hue_bridge.py` | Bridge pairing and Entertainment Area discovery |
-| `src/huesync/player_manager.py` | Process lifecycle: squeezelite + cava + output driver |
+| `src/huesync/player_manager.py` | Process lifecycle: squeezelite + cava + output driver; `update_onset_pipeline()`, `update_render()` |
 | `src/huesync/models.py` | `Profile`, `BridgeConfig`, `ColorMode` |
+| `docs/HueSync_analysis_and_player_architecture.md` | Session lifecycle, layered-update design (Phase 1 done), Phase 2 roadmap |
 | `src/huesync/lms_discovery.py` | UDP broadcast discovery of the LMS server |
 | `src/huesync/app.py` | FastAPI web UI |
 | `src/huesync/storage.py` | JSON config persistence |

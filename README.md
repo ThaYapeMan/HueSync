@@ -121,8 +121,19 @@ systemctl enable --now huesync
    listening player, exactly like multi-room playback.
 4. Play music. The lights react to the live spectrum.
 
-Editing a profile deactivates it if active; reactivate manually to apply
-changes.
+Editing a profile applies the minimum necessary action based on which fields
+changed:
+
+| Changed field(s) | Action |
+|---|---|
+| `lms_host`, `lms_port`, `player_name`, `player_mac`, `alsa_device`, `bridge_id`, `entertainment_area_id` | Full deactivate — squeezelite, cava, and the Hue DTLS session are torn down. Reactivate manually. |
+| `bars`, `lower_cutoff_freq`, `higher_cutoff_freq` | cava-only restart — squeezelite and the Hue DTLS session stay up. |
+| `onset_method`, `onset_delta`, `onset_alpha`, `superflux_mu`, `superflux_lag`, `bass_hz`, `mid_hz` | PCM pipeline rebuilt live — no process restart. |
+| `color_mode`, `sensitivity`, `brightness_floor`, `exertion_clip`, `enabled`, `entertainment_area_name`, `light_count` | Render update only — applied immediately, nothing restarts. |
+| `name` (profile name only) | Metadata only — no session action. |
+
+Only the most disruptive category in a given PATCH triggers a restart (player
+wins over cava, cava wins over PCM, etc.).
 
 ### Colour modes
 
@@ -141,8 +152,11 @@ changes.
 | `bars` | 30 | Number of frequency bins cava analyses. |
 | `lower_cutoff_freq` | 50 Hz | Low end of the analysed range. |
 | `higher_cutoff_freq` | 12000 Hz | High end. Music has almost no energy above ~12 kHz; cava's default 22 kHz Nyquist leaves the top third of the bar frame near zero. |
+| `onset_method` | `combined` | Onset detection algorithm. `combined` = full-spectrum spectral flux on cava bars (30 Hz). `multiband` = per-band flux on STFT data (100 Hz), giving separate bass/mid/treble onset flags. `superflux` = Böck & Widmer (2013) max-filter vibrato suppression on STFT data (100 Hz). Switching this field live-rebuilds the PCM pipeline without restarting cava or the Hue session. |
 | `onset_delta` | 0.1 | Margin above the local mean for onset detection (Dixon 2006). Higher = fewer, more confident onsets. |
 | `onset_alpha` | 0.9 | Per-frame decay of the suppression threshold after an onset. Higher = longer suppression before a second onset can fire. |
+| `superflux_mu` | 3 | SuperFlux only: max-filter half-width in FFT bins. Wider = more vibrato suppression. |
+| `superflux_lag` | 2 | SuperFlux only: compare current frame with the frame `lag` steps ago. |
 
 ### Player latency
 
