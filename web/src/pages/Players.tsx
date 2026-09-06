@@ -138,9 +138,9 @@ export function Players() {
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <h2 className="text-sm font-semibold">Players</h2>
+        <h2 className="text-sm font-semibold">Virtual Players</h2>
         <Button size="sm" onClick={openNew}>
-          New player
+          New virtual player
         </Button>
       </div>
 
@@ -190,7 +190,7 @@ export function Players() {
       <Dialog open={editorOpen} onOpenChange={(o) => { if (!o) setEditorOpen(false) }}>
         <DialogContent className="max-w-md">
           <DialogHeader>
-            <DialogTitle>{editingPlayer ? 'Edit player' : 'New player'}</DialogTitle>
+            <DialogTitle>{editingPlayer ? 'Edit virtual player' : 'New virtual player'}</DialogTitle>
           </DialogHeader>
 
           <div className="space-y-4">
