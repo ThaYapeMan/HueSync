@@ -158,6 +158,28 @@ EMA. Switching onset_method live now takes ~0.3 s to re-warm rather than the
 full DTLS handshake time. See `docs/HueSync_analysis_and_player_architecture.md`
 for the full design record including the Phase 2 roadmap.
 
+### Swapping AnalysisConfig on an active Coupling is a live operation (`api.py`, `player_manager.py`)
+
+`PATCH /api/couplings/{id}` with `analysis_config_id` changed to a different AC
+does **not** require a full session restart. It is intentionally live-updateable:
+
+1. `_apply_coupling_action()` routes `analysis_config_id` to `restart_cava()` +
+   `update_onset_pipeline()` — the same path as changing `bars` or `onset_method`
+   inline. The Hue DTLS session and squeezelite stay running.
+2. `restart_cava()` reloads `session.coupling` from storage before calling
+   `build_profile_from_coupling()` — so the new `analysis_config_id` (already
+   written to storage by `patch_coupling()`) is picked up, not the stale
+   in-memory reference.
+
+**Do not move `analysis_config_id` back into `_C_DEACTIVATE_FIELDS`.** It was
+there previously and caused lights to freeze (deactivate called, no re-activate).
+The fix is tested by `test_ac_swap_session_remains_active` in `tests/test_api.py`,
+which verifies routing, session liveness, and that the profile in storage reflects
+the new AC's settings — not the old AC's.
+
+Similarly, `render_config_id` routes to `update_render()` only (no cava restart,
+no deactivate).
+
 ### Timing: lights run AHEAD of Sonos
 
 `sonos-squeezebox` throttles its encoder to ~2 seconds of lookahead and Sonos

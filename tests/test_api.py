@@ -693,6 +693,54 @@ def test_patch_coupling_render_config_id_update_render_only(client: TestClient):
     assert saved is not None and saved.render_config_id == new_rc.id
 
 
+def test_ac_swap_session_remains_active(client: TestClient):
+    """After swapping analysis_config_id on an active coupling the session is
+    not deactivated, restart_cava + update_onset_pipeline are called once
+    (the live-update path), and the profile saved to storage is rebuilt from
+    the NEW AC's settings.
+
+    This is the canonical regression guard for the 'frozen lights' bug fixed
+    in the 2026-09-06 routing refactor: analysis_config_id was in
+    _C_DEACTIVATE_FIELDS (wrong) instead of _C_LIVE_FK_FIELDS, and
+    restart_cava() used stale session.coupling (wrong).
+    """
+    # AC1: default bars=30, onset_delta=0.1
+    coupling = _make_full_coupling(client._storage)
+    client._storage.set_active_coupling_id(coupling.id)
+
+    # AC2: deliberately different settings so we can distinguish old from new
+    # in the saved profile.
+    ac2 = AnalysisConfig(name="AC2", bars=50, onset_delta=0.5)
+    client._storage.save_analysis_config(ac2)
+
+    resp = client.patch(
+        f"/api/couplings/{coupling.id}",
+        json={"analysis_config_id": ac2.id},
+    )
+    assert resp.status_code == 200
+
+    # Session must still be active — deactivate() is the wrong path.
+    assert client._storage.get_active_coupling_id() == coupling.id
+    client._manager.deactivate.assert_not_awaited()
+
+    # Live-update path: cava restarted (picks up new bars) and onset pipeline
+    # rebuilt (picks up new onset_delta).
+    client._manager.restart_cava.assert_awaited_once()
+    client._manager.update_onset_pipeline.assert_called_once()
+
+    # Coupling in storage now points to AC2.
+    saved_coupling = client._storage.get_coupling(coupling.id)
+    assert saved_coupling is not None
+    assert saved_coupling.analysis_config_id == ac2.id
+
+    # Profile rebuilt from AC2's settings — verifies _apply_coupling_action()
+    # used the UPDATED coupling (new AC ID), not the stale in-memory one.
+    saved_profile = client._storage.get_profile(coupling.id)
+    assert saved_profile is not None
+    assert saved_profile.bars == 50          # AC2, not AC1's default 30
+    assert saved_profile.onset_delta == 0.5  # AC2, not AC1's default 0.1
+
+
 # ---------------------------------------------------------------------------
 # Clone coupling
 # ---------------------------------------------------------------------------
