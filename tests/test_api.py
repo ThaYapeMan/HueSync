@@ -13,7 +13,15 @@ import pytest
 from fastapi.testclient import TestClient
 
 from huesync.app import app
-from huesync.models import BridgeConfig, Profile
+from huesync.models import (
+    AnalysisConfig,
+    BridgeConfig,
+    Coupling,
+    LightProvider,
+    Player,
+    Profile,
+    RenderConfig,
+)
 from huesync.storage import Storage
 
 # ---------------------------------------------------------------------------
@@ -387,3 +395,252 @@ def test_patch_inactive_profile_no_session_action(client: TestClient):
     client._manager.restart_cava.assert_not_awaited()
     client._manager.update_onset_pipeline.assert_not_called()
     client._manager.update_render.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Controllers
+# ---------------------------------------------------------------------------
+
+
+def test_list_controllers_empty(client: TestClient):
+    resp = client.get("/api/controllers")
+    assert resp.status_code == 200
+    assert resp.json() == []
+
+
+def test_create_and_get_controller(client: TestClient):
+    payload = {"name": "Living Room Bridge", "host": "192.168.1.2", "type": "hue"}
+    resp = client.post("/api/controllers", json=payload)
+    assert resp.status_code == 201
+    body = resp.json()
+    assert body["name"] == "Living Room Bridge"
+    assert body["host"] == "192.168.1.2"
+    assert body["type"] == "hue"
+    controller_id = body["id"]
+
+    resp2 = client.get(f"/api/controllers/{controller_id}")
+    assert resp2.status_code == 200
+    assert resp2.json()["id"] == controller_id
+
+
+# ---------------------------------------------------------------------------
+# Players
+# ---------------------------------------------------------------------------
+
+
+def test_create_and_list_players(client: TestClient):
+    payload = {"name": "Main Player", "lms_host": "10.0.0.5"}
+    resp = client.post("/api/players", json=payload)
+    assert resp.status_code == 201
+
+    resp2 = client.get("/api/players")
+    assert resp2.status_code == 200
+    assert len(resp2.json()) == 1
+    assert resp2.json()[0]["lms_host"] == "10.0.0.5"
+
+
+def test_create_and_get_player(client: TestClient):
+    payload = {"name": "Bedroom", "lms_host": "10.0.0.6", "lms_port": 9000}
+    resp = client.post("/api/players", json=payload)
+    assert resp.status_code == 201
+    body = resp.json()
+    player_id = body["id"]
+    # MAC should be auto-generated if not provided
+    assert body["player_mac"] != ""
+
+    resp2 = client.get(f"/api/players/{player_id}")
+    assert resp2.status_code == 200
+    assert resp2.json()["name"] == "Bedroom"
+
+
+# ---------------------------------------------------------------------------
+# LightProviders
+# ---------------------------------------------------------------------------
+
+
+def test_create_and_get_light_provider(client: TestClient):
+    payload = {
+        "name": "Living Room EA",
+        "controller_id": "ctrl-1",
+        "entertainment_area_id": "ea-1",
+        "entertainment_area_name": "Living Room",
+        "light_count": 4,
+    }
+    resp = client.post("/api/light-providers", json=payload)
+    assert resp.status_code == 201
+    body = resp.json()
+    lp_id = body["id"]
+    assert body["name"] == "Living Room EA"
+    assert body["light_count"] == 4
+
+    resp2 = client.get(f"/api/light-providers/{lp_id}")
+    assert resp2.status_code == 200
+    assert resp2.json()["entertainment_area_name"] == "Living Room"
+
+
+# ---------------------------------------------------------------------------
+# AnalysisConfigs
+# ---------------------------------------------------------------------------
+
+
+def test_create_and_get_analysis_config(client: TestClient):
+    payload = {"name": "Fast Onset", "onset_method": "superflux", "bars": 20}
+    resp = client.post("/api/analysis-configs", json=payload)
+    assert resp.status_code == 201
+    body = resp.json()
+    ac_id = body["id"]
+    assert body["onset_method"] == "superflux"
+    assert body["bars"] == 20
+
+    resp2 = client.get(f"/api/analysis-configs/{ac_id}")
+    assert resp2.status_code == 200
+    assert resp2.json()["name"] == "Fast Onset"
+
+
+# ---------------------------------------------------------------------------
+# RenderConfigs
+# ---------------------------------------------------------------------------
+
+
+def test_create_and_get_render_config(client: TestClient):
+    payload = {"name": "Vivid", "color_mode": "spectrum_rgb", "sensitivity": 1.5}
+    resp = client.post("/api/render-configs", json=payload)
+    assert resp.status_code == 201
+    body = resp.json()
+    rc_id = body["id"]
+    assert body["sensitivity"] == 1.5
+
+    resp2 = client.get(f"/api/render-configs/{rc_id}")
+    assert resp2.status_code == 200
+    assert resp2.json()["name"] == "Vivid"
+
+
+# ---------------------------------------------------------------------------
+# Couplings
+# ---------------------------------------------------------------------------
+
+
+def _make_full_coupling(storage: Storage) -> Coupling:
+    """Create and persist all entities required for a Coupling, return the Coupling."""
+    player = Player(name="P", lms_host="10.0.0.1", player_mac="aa:bb:cc:dd:ee:ff")
+    lp = LightProvider(name="LP", controller_id="ctrl-1", entertainment_area_id="ea-1")
+    ac = AnalysisConfig(name="AC")
+    rc = RenderConfig(name="RC")
+    storage.save_player(player)
+    storage.save_light_provider(lp)
+    storage.save_analysis_config(ac)
+    storage.save_render_config(rc)
+    coupling = Coupling(
+        name="Test Coupling",
+        player_id=player.id,
+        light_provider_id=lp.id,
+        analysis_config_id=ac.id,
+        render_config_id=rc.id,
+    )
+    storage.save_coupling(coupling)
+    return coupling
+
+
+def test_create_coupling(client: TestClient):
+    player = Player(name="P", lms_host="10.0.0.1")
+    lp = LightProvider(name="LP", controller_id="c1", entertainment_area_id="ea-1")
+    ac = AnalysisConfig(name="AC")
+    rc = RenderConfig(name="RC")
+    client._storage.save_player(player)
+    client._storage.save_light_provider(lp)
+    client._storage.save_analysis_config(ac)
+    client._storage.save_render_config(rc)
+
+    payload = {
+        "name": "My Coupling",
+        "player_id": player.id,
+        "analysis_config_id": ac.id,
+        "light_provider_id": lp.id,
+        "render_config_id": rc.id,
+    }
+    resp = client.post("/api/couplings", json=payload)
+    assert resp.status_code == 201
+    body = resp.json()
+    assert body["name"] == "My Coupling"
+    assert body["player_id"] == player.id
+
+
+def test_get_coupling_not_found(client: TestClient):
+    resp = client.get("/api/couplings/no-such-id")
+    assert resp.status_code == 404
+
+
+def test_activate_coupling_missing_entities(client: TestClient):
+    """Activating a coupling with missing FK entities must return 422."""
+    coupling = Coupling(
+        name="Broken",
+        player_id="missing",
+        light_provider_id="missing",
+        analysis_config_id="missing",
+        render_config_id="missing",
+    )
+    client._storage.save_coupling(coupling)
+
+    resp = client.post(f"/api/couplings/{coupling.id}/activate")
+    assert resp.status_code == 422
+
+
+def test_activate_coupling_success(client: TestClient):
+    coupling = _make_full_coupling(client._storage)
+
+    resp = client.post(f"/api/couplings/{coupling.id}/activate")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["active_id"] == coupling.id
+    client._manager.activate.assert_awaited_once()
+
+
+def test_delete_coupling_deactivates_if_active(client: TestClient):
+    coupling = _make_full_coupling(client._storage)
+    client._storage.set_active_coupling_id(coupling.id)
+
+    resp = client.delete(f"/api/couplings/{coupling.id}")
+    assert resp.status_code == 204
+    client._manager.deactivate.assert_awaited_once()
+    assert client._storage.get_coupling(coupling.id) is None
+
+
+def test_deactivate_coupling_endpoint(client: TestClient):
+    coupling = _make_full_coupling(client._storage)
+    client._storage.set_active_coupling_id(coupling.id)
+
+    resp = client.post("/api/couplings/deactivate")
+    assert resp.status_code == 200
+    assert resp.json() == {"active_id": None}
+    client._manager.deactivate.assert_awaited_once()
+    assert client._storage.get_active_coupling_id() is None
+
+
+def test_patch_coupling_render_field_triggers_update_render(client: TestClient):
+    coupling = _make_full_coupling(client._storage)
+    client._storage.set_active_coupling_id(coupling.id)
+
+    resp = client.patch(f"/api/couplings/{coupling.id}", json={"sensitivity": 1.8})
+    assert resp.status_code == 200
+    client._manager.update_render.assert_called_once()
+    client._manager.deactivate.assert_not_awaited()
+    client._manager.restart_cava.assert_not_awaited()
+
+
+def test_patch_coupling_cava_field_triggers_restart_cava(client: TestClient):
+    coupling = _make_full_coupling(client._storage)
+    client._storage.set_active_coupling_id(coupling.id)
+
+    resp = client.patch(f"/api/couplings/{coupling.id}", json={"bars": 40})
+    assert resp.status_code == 200
+    client._manager.restart_cava.assert_awaited_once()
+    client._manager.deactivate.assert_not_awaited()
+
+
+def test_patch_coupling_deactivate_field_deactivates(client: TestClient):
+    coupling = _make_full_coupling(client._storage)
+    client._storage.set_active_coupling_id(coupling.id)
+
+    resp = client.patch(f"/api/couplings/{coupling.id}", json={"lms_host": "10.0.0.99"})
+    assert resp.status_code == 200
+    client._manager.deactivate.assert_awaited_once()
