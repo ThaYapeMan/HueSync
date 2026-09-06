@@ -196,3 +196,238 @@ class Profile:
 
 
 _PROFILE_FIELDS = frozenset(f.name for f in fields(Profile))
+
+
+# ---------------------------------------------------------------------------
+# Phase-2 entities: Controller, Player, LightProvider, AnalysisConfig,
+# RenderConfig, Coupling.
+# ---------------------------------------------------------------------------
+
+
+class ControllerType(StrEnum):
+    HUE = "hue"
+    WLED = "wled"
+
+
+_CONTROLLER_FIELDS: frozenset[str] = frozenset()  # filled after class
+
+
+@dataclass
+class Controller:
+    """One paired light controller (Hue Bridge, WLED device, …)."""
+
+    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    name: str = "Controller"
+    type: ControllerType = ControllerType.HUE
+    host: str = ""
+    app_key: str = ""
+    client_key: str = ""
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "type": self.type.value,
+            "host": self.host,
+            "app_key": self.app_key,
+            "client_key": self.client_key,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> Controller:
+        d = dict(d)
+        d["type"] = ControllerType(d.get("type", "hue"))
+        return cls(**{k: v for k, v in d.items() if k in _CONTROLLER_FIELDS})
+
+
+_CONTROLLER_FIELDS = frozenset(f.name for f in fields(Controller))
+
+
+_PLAYER_FIELDS: frozenset[str] = frozenset()  # filled after class
+
+
+@dataclass
+class Player:
+    """A squeezelite virtual player connected to LMS."""
+
+    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    name: str = "HueSync Player"
+    lms_host: str = "127.0.0.1"
+    lms_port: int = 3483
+    player_name: str = "HueSync"
+    player_mac: str = ""
+    alsa_device: str = ""
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "lms_host": self.lms_host,
+            "lms_port": self.lms_port,
+            "player_name": self.player_name,
+            "player_mac": self.player_mac,
+            "alsa_device": self.alsa_device,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> Player:
+        return cls(**{k: v for k, v in d.items() if k in _PLAYER_FIELDS})
+
+
+_PLAYER_FIELDS = frozenset(f.name for f in fields(Player))
+
+
+_LIGHT_PROVIDER_FIELDS: frozenset[str] = frozenset()  # filled after class
+
+
+@dataclass
+class LightProvider:
+    """One output target within a Controller (e.g., a Hue Entertainment Area)."""
+
+    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    name: str = "Light Provider"
+    controller_id: str = ""
+    entertainment_area_id: str = ""
+    entertainment_area_name: str = ""
+    light_count: int = 0
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "controller_id": self.controller_id,
+            "entertainment_area_id": self.entertainment_area_id,
+            "entertainment_area_name": self.entertainment_area_name,
+            "light_count": self.light_count,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> LightProvider:
+        return cls(**{k: v for k, v in d.items() if k in _LIGHT_PROVIDER_FIELDS})
+
+
+_LIGHT_PROVIDER_FIELDS = frozenset(f.name for f in fields(LightProvider))
+
+
+_ANALYSIS_CONFIG_FIELDS: frozenset[str] = frozenset()  # filled after class
+
+
+@dataclass
+class AnalysisConfig:
+    """cava spectrum + onset detection parameters, shared across Couplings."""
+
+    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    name: str = "Default Analysis"
+    onset_method: str = "combined"
+    onset_delta: float = 0.1
+    onset_alpha: float = 0.9
+    superflux_mu: int = 3
+    superflux_lag: int = 2
+    bars: int = 30
+    lower_cutoff_freq: int = 50
+    higher_cutoff_freq: int = 12000
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "onset_method": self.onset_method,
+            "onset_delta": self.onset_delta,
+            "onset_alpha": self.onset_alpha,
+            "superflux_mu": self.superflux_mu,
+            "superflux_lag": self.superflux_lag,
+            "bars": self.bars,
+            "lower_cutoff_freq": self.lower_cutoff_freq,
+            "higher_cutoff_freq": self.higher_cutoff_freq,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> AnalysisConfig:
+        return cls(**{k: v for k, v in d.items() if k in _ANALYSIS_CONFIG_FIELDS})
+
+
+_ANALYSIS_CONFIG_FIELDS = frozenset(f.name for f in fields(AnalysisConfig))
+
+
+_RENDER_CONFIG_FIELDS: frozenset[str] = frozenset()  # filled after class
+
+
+@dataclass
+class RenderConfig:
+    """Visual output parameters (colour mode, sensitivity, …), provider-neutral."""
+
+    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    name: str = "Default Render"
+    color_mode: ColorMode = ColorMode.SPECTRUM_RGB
+    sensitivity: float = 1.0
+    brightness_floor: float = 0.15
+    bass_hz: int = 250
+    mid_hz: int = 2000
+    exertion_clip: float = 3.0
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "color_mode": self.color_mode.value,
+            "sensitivity": self.sensitivity,
+            "brightness_floor": self.brightness_floor,
+            "bass_hz": self.bass_hz,
+            "mid_hz": self.mid_hz,
+            "exertion_clip": self.exertion_clip,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> RenderConfig:
+        d = dict(d)
+        if "color_mode" in d:
+            try:
+                d["color_mode"] = ColorMode(d["color_mode"])
+            except ValueError:
+                log.warning(
+                    "Unsupported color_mode %r in saved RenderConfig; falling back to spectrum_rgb",
+                    d["color_mode"],
+                )
+                d["color_mode"] = ColorMode.SPECTRUM_RGB
+        return cls(**{k: v for k, v in d.items() if k in _RENDER_CONFIG_FIELDS})
+
+
+_RENDER_CONFIG_FIELDS = frozenset(f.name for f in fields(RenderConfig))
+
+
+_COUPLING_FIELDS: frozenset[str] = frozenset()  # filled after class
+
+
+@dataclass
+class Coupling:
+    """Links a Player + AnalysisConfig + LightProvider + RenderConfig.
+
+    Activation happens on a Coupling. The linked entities can be shared
+    across multiple Couplings, but each Coupling runs its own cava process.
+    """
+
+    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    name: str = "New Coupling"
+    player_id: str = ""
+    analysis_config_id: str = ""
+    light_provider_id: str = ""
+    render_config_id: str = ""
+    enabled: bool = True
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "player_id": self.player_id,
+            "analysis_config_id": self.analysis_config_id,
+            "light_provider_id": self.light_provider_id,
+            "render_config_id": self.render_config_id,
+            "enabled": self.enabled,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> Coupling:
+        return cls(**{k: v for k, v in d.items() if k in _COUPLING_FIELDS})
+
+
+_COUPLING_FIELDS = frozenset(f.name for f in fields(Coupling))

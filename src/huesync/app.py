@@ -14,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 
 from . import __git_hash__, __version__
 from .api import router as api_router
+from .migration import migrate_profiles_to_entities
 from .player_manager import PlayerManager
 from .storage import Storage
 
@@ -42,8 +43,11 @@ async def on_startup() -> None:
     # squeezelite/cava process behind it anymore - clear the stale state
     # rather than pretending it's still running.
     storage.set_active_profile_id(None)
+    storage.set_active_coupling_id(None)
     # Remove any /dev/shm/squeezelite-* segments left by a previous crash.
     player_manager.cleanup_orphaned_shm()
+    # Migrate Profiles/Bridges to the five-entity model (idempotent).
+    migrate_profiles_to_entities(storage)
 
 
 @app.on_event("shutdown")
