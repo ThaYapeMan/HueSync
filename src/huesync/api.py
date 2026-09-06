@@ -7,6 +7,9 @@ used by the HTML routes in app.py.
 
 from __future__ import annotations
 
+import uuid
+from dataclasses import replace
+
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
@@ -1119,6 +1122,41 @@ async def delete_coupling(coupling_id: str, request: Request):
     if storage.get_active_coupling_id() == coupling_id:
         await manager.deactivate()
     storage.delete_coupling(coupling_id)
+
+
+@router.post("/couplings/{coupling_id}/clone", status_code=201)
+async def clone_coupling(coupling_id: str, request: Request):
+    """Deep-clone a Coupling with fresh AnalysisConfig and RenderConfig copies.
+
+    The Player and LightProvider references are shared (not cloned).
+    The new Coupling is named "<original name> (copy)".
+    """
+    storage = _storage(request)
+
+    coupling = storage.get_coupling(coupling_id)
+    if coupling is None:
+        raise HTTPException(status_code=404, detail="Coupling not found")
+
+    ac = storage.get_analysis_config(coupling.analysis_config_id)
+    rc = storage.get_render_config(coupling.render_config_id)
+    if ac is None or rc is None:
+        raise HTTPException(status_code=422, detail="Coupling has missing sub-entities")
+
+    new_ac = replace(ac, id=str(uuid.uuid4()))
+    new_rc = replace(rc, id=str(uuid.uuid4()))
+    new_coupling = replace(
+        coupling,
+        id=str(uuid.uuid4()),
+        name=f"{coupling.name} (copy)",
+        analysis_config_id=new_ac.id,
+        render_config_id=new_rc.id,
+    )
+
+    storage.save_analysis_config(new_ac)
+    storage.save_render_config(new_rc)
+    storage.save_coupling(new_coupling)
+
+    return new_coupling.to_dict()
 
 
 @router.post("/couplings/{coupling_id}/activate")

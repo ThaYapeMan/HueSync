@@ -268,3 +268,5 @@ export const activateCoupling = (id: string) =>
   request<{ active_id: string; warnings: string[] }>(`/api/couplings/${id}/activate`, { method: 'POST' })
 export const deactivateCoupling = () =>
   request<{ active_id: null }>('/api/couplings/deactivate', { method: 'POST' })
+export const cloneCoupling = (id: string) =>
+  request<Coupling>(`/api/couplings/${id}/clone`, { method: 'POST' })

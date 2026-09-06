@@ -41,6 +41,7 @@ import {
   updateCoupling,
   deleteCoupling,
   activateCoupling,
+  cloneCoupling,
   deactivateCoupling,
   getPlayers,
   createPlayer,
@@ -751,6 +752,16 @@ export function Couplings({ activeCouplingId: activeCouplingIdProp, onActivation
     await loadAll()
   }
 
+  async function handleClone(id: string) {
+    setActionError(null)
+    try {
+      await cloneCoupling(id)
+      await loadAll()
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : 'Clone failed')
+    }
+  }
+
   function openNew() {
     setEditingCoupling(undefined)
     setEditorOpen(true)
@@ -839,6 +850,9 @@ export function Couplings({ activeCouplingId: activeCouplingIdProp, onActivation
                       )}
                       <Button size="sm" variant="ghost" onClick={() => openEdit(c)}>
                         Edit
+                      </Button>
+                      <Button size="sm" variant="ghost" onClick={() => handleClone(c.id)}>
+                        Clone
                       </Button>
                       <ConfirmDialog
                         trigger={

@@ -646,3 +646,81 @@ def test_patch_coupling_deactivate_field_deactivates(client: TestClient):
     resp = client.patch(f"/api/couplings/{coupling.id}", json={"lms_host": "10.0.0.99"})
     assert resp.status_code == 200
     client._manager.deactivate.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# Clone coupling
+# ---------------------------------------------------------------------------
+
+
+def test_clone_coupling_returns_new_id(client: TestClient):
+    """The cloned Coupling must have a different ID than the original."""
+    coupling = _make_full_coupling(client._storage)
+
+    resp = client.post(f"/api/couplings/{coupling.id}/clone")
+    assert resp.status_code == 201
+    body = resp.json()
+    assert body["id"] != coupling.id
+    assert body["name"] == f"{coupling.name} (copy)"
+
+
+def test_clone_coupling_analysis_and_render_configs_are_independent(client: TestClient):
+    """Cloned AnalysisConfig and RenderConfig have new IDs but identical field values."""
+    coupling = _make_full_coupling(client._storage)
+    orig_ac = client._storage.get_analysis_config(coupling.analysis_config_id)
+    orig_rc = client._storage.get_render_config(coupling.render_config_id)
+
+    resp = client.post(f"/api/couplings/{coupling.id}/clone")
+    assert resp.status_code == 201
+    body = resp.json()
+
+    new_ac = client._storage.get_analysis_config(body["analysis_config_id"])
+    new_rc = client._storage.get_render_config(body["render_config_id"])
+
+    # New IDs — not the same sub-entity objects.
+    assert new_ac is not None
+    assert new_rc is not None
+    assert new_ac.id != orig_ac.id
+    assert new_rc.id != orig_rc.id
+
+    # All field values identical to the originals.
+    assert new_ac.onset_method == orig_ac.onset_method
+    assert new_ac.onset_delta == orig_ac.onset_delta
+    assert new_ac.onset_alpha == orig_ac.onset_alpha
+    assert new_ac.bars == orig_ac.bars
+    assert new_ac.lower_cutoff_freq == orig_ac.lower_cutoff_freq
+    assert new_ac.higher_cutoff_freq == orig_ac.higher_cutoff_freq
+    assert new_rc.color_mode == orig_rc.color_mode
+    assert new_rc.sensitivity == orig_rc.sensitivity
+    assert new_rc.brightness_floor == orig_rc.brightness_floor
+    assert new_rc.bass_hz == orig_rc.bass_hz
+    assert new_rc.mid_hz == orig_rc.mid_hz
+    assert new_rc.exertion_clip == orig_rc.exertion_clip
+
+    # Player and LightProvider are shared (same IDs).
+    assert body["player_id"] == coupling.player_id
+    assert body["light_provider_id"] == coupling.light_provider_id
+
+
+def test_clone_coupling_modifying_clone_does_not_affect_original(client: TestClient):
+    """Mutating the clone's AnalysisConfig must not change the original's."""
+    coupling = _make_full_coupling(client._storage)
+
+    resp = client.post(f"/api/couplings/{coupling.id}/clone")
+    assert resp.status_code == 201
+    clone_body = resp.json()
+
+    # Patch the clone's onset_method via the coupling PATCH endpoint.
+    patch_resp = client.patch(
+        f"/api/couplings/{clone_body['id']}",
+        json={"onset_method": "multiband"},
+    )
+    assert patch_resp.status_code == 200
+
+    # Clone's AnalysisConfig now has multiband.
+    clone_ac = client._storage.get_analysis_config(clone_body["analysis_config_id"])
+    assert clone_ac.onset_method == "multiband"
+
+    # Original's AnalysisConfig still has combined (unchanged).
+    orig_ac = client._storage.get_analysis_config(coupling.analysis_config_id)
+    assert orig_ac.onset_method == "combined"
