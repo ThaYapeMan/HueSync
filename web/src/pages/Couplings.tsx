@@ -817,7 +817,7 @@ export function Couplings({ activeCouplingId: activeCouplingIdProp, onActivation
               <TableHead>Name</TableHead>
               <TableHead>Player</TableHead>
               <TableHead>Area</TableHead>
-              <TableHead>Mode</TableHead>
+              <TableHead>Color Mode</TableHead>
               <TableHead>Status</TableHead>
               <TableHead className="text-right">Actions</TableHead>
             </TableRow>
