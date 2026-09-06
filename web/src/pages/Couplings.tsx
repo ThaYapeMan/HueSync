@@ -374,6 +374,7 @@ function NewRenderConfigDialog({ open, onClose, onCreated }: NewRenderConfigDial
         bass_hz: 250,
         mid_hz: 2000,
         exertion_clip: 3.0,
+        onset_flash_intensity: 0.0,
       })
       onCreated(cfg)
     } catch (e) {
