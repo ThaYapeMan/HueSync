@@ -738,6 +738,13 @@ class ColourModeEffect:
             g = max(g, floor)
             b = max(b, floor)
 
+        if features.onset:
+            fi = self.profile.onset_flash_intensity
+            if fi > 0.0:
+                r = r + fi * (1.0 - r)
+                g = g + fi * (1.0 - g)
+                b = b + fi * (1.0 - b)
+
         return UniformScene(Colour(r=r, g=g, b=b))
 
 

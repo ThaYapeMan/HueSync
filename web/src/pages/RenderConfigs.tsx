@@ -42,6 +42,7 @@ interface FormState {
   bass_hz: string
   mid_hz: string
   exertion_clip: string
+  onset_flash_intensity: string
 }
 
 function defaultForm(cfg?: RenderConfig): FormState {
@@ -53,6 +54,7 @@ function defaultForm(cfg?: RenderConfig): FormState {
     bass_hz: String(cfg?.bass_hz ?? 250),
     mid_hz: String(cfg?.mid_hz ?? 2000),
     exertion_clip: String(cfg?.exertion_clip ?? 3.0),
+    onset_flash_intensity: String(cfg?.onset_flash_intensity ?? 0.0),
   }
 }
 
@@ -121,6 +123,7 @@ export function RenderConfigs() {
         bass_hz: parseInt(form.bass_hz, 10),
         mid_hz: parseInt(form.mid_hz, 10),
         exertion_clip: parseFloat(form.exertion_clip),
+        onset_flash_intensity: parseFloat(form.onset_flash_intensity),
       }
       if (editingConfig) {
         await updateRenderConfig(editingConfig.id, body)
@@ -273,6 +276,16 @@ export function RenderConfigs() {
                 max={10}
                 value={form.exertion_clip}
                 onChange={(e) => set('exertion_clip', e.target.value)}
+              />
+            </FormRow>
+            <FormRow label="Onset flash intensity (0 = off, 1 = full white)">
+              <Input
+                type="number"
+                step={0.05}
+                min={0}
+                max={1}
+                value={form.onset_flash_intensity}
+                onChange={(e) => set('onset_flash_intensity', e.target.value)}
               />
             </FormRow>
           </div>

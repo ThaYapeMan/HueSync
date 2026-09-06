@@ -196,6 +196,7 @@ class RenderConfigCreateBody(BaseModel):
     bass_hz: int = 250
     mid_hz: int = 2000
     exertion_clip: float = 3.0
+    onset_flash_intensity: float = 0.0
 
 
 class RenderConfigPatchBody(BaseModel):
@@ -207,6 +208,7 @@ class RenderConfigPatchBody(BaseModel):
     bass_hz: int | None = None
     mid_hz: int | None = None
     exertion_clip: float | None = None
+    onset_flash_intensity: float | None = None
 
 
 class CouplingCreateBody(BaseModel):
@@ -257,6 +259,7 @@ class CouplingPatchBody(BaseModel):
     sensitivity: float | None = None
     brightness_floor: float | None = None
     exertion_clip: float | None = None
+    onset_flash_intensity: float | None = None
     # bass_hz/mid_hz: stored in RenderConfig but pcm-category for restart
     bass_hz: int | None = None
     mid_hz: int | None = None
@@ -293,8 +296,8 @@ _PCM_FIELDS: frozenset[str] = frozenset({
     "bass_hz", "mid_hz",  # also affect MultibandStftPipeline band boundaries
 })
 _RENDER_FIELDS: frozenset[str] = frozenset({
-    "color_mode", "sensitivity", "brightness_floor", "exertion_clip", "enabled",
-    "entertainment_area_name", "light_count",
+    "color_mode", "sensitivity", "brightness_floor", "exertion_clip",
+    "onset_flash_intensity", "enabled", "entertainment_area_name", "light_count",
 })
 _ALL_ACTIVE_FIELDS: frozenset[str] = (
     _PLAYER_FIELDS | _CAVA_FIELDS | _PCM_FIELDS | _RENDER_FIELDS
@@ -329,7 +332,7 @@ _C_PCM_FIELDS: frozenset[str] = frozenset({
 })
 _C_RENDER_FIELDS: frozenset[str] = frozenset({
     "color_mode", "sensitivity", "brightness_floor", "exertion_clip",
-    "entertainment_area_name", "light_count",
+    "onset_flash_intensity", "entertainment_area_name", "light_count",
 })
 
 # Which sub-entity owns each inline field in CouplingPatchBody
@@ -342,7 +345,7 @@ _C_AC_INLINE: frozenset[str] = frozenset({
 })
 _C_RC_INLINE: frozenset[str] = frozenset({
     "color_mode", "sensitivity", "brightness_floor", "exertion_clip",
-    "bass_hz", "mid_hz",
+    "onset_flash_intensity", "bass_hz", "mid_hz",
 })
 _C_LP_INLINE: frozenset[str] = frozenset({"entertainment_area_name", "light_count"})
 _C_FK_FIELDS: frozenset[str] = frozenset({
@@ -964,6 +967,7 @@ async def create_render_config(request: Request, body: RenderConfigCreateBody):
         bass_hz=body.bass_hz,
         mid_hz=body.mid_hz,
         exertion_clip=body.exertion_clip,
+        onset_flash_intensity=body.onset_flash_intensity,
     )
     storage.save_render_config(rc)
     return JSONResponse(content=rc.to_dict(), status_code=201)

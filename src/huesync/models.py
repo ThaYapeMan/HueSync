@@ -174,6 +174,10 @@ class Profile:
     #   3. Clip at 1.0 (in ColourModeEffect): safety ceiling before RGB
     #      conversion. Not a musical choice — do not touch for tuning.
     exertion_clip: float = 3.0
+    # White-flash strength applied to the Hue output on every onset frame.
+    # 0.0 = no flash (default). 1.0 = full white on onset.
+    # Lerps from the current colour toward white: c_out = c + fi*(1-c).
+    onset_flash_intensity: float = 0.0
 
     enabled: bool = True
 
@@ -374,6 +378,7 @@ class RenderConfig:
     bass_hz: int = 250
     mid_hz: int = 2000
     exertion_clip: float = 3.0
+    onset_flash_intensity: float = 0.0
 
     def to_dict(self) -> dict:
         return {
@@ -385,6 +390,7 @@ class RenderConfig:
             "bass_hz": self.bass_hz,
             "mid_hz": self.mid_hz,
             "exertion_clip": self.exertion_clip,
+            "onset_flash_intensity": self.onset_flash_intensity,
         }
 
     @classmethod

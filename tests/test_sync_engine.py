@@ -118,6 +118,75 @@ def test_colour_mode_effect_sensitivity_scales_output():
     assert high.r >= low.r
 
 
+def test_onset_flash_intensity_brightens_on_onset():
+    """onset_flash_intensity > 0 must produce brighter output when onset=True.
+
+    The flash lerps from the rendered colour toward white: c_out = c + fi*(1-c).
+    A non-zero intensity with onset=True must be strictly brighter than intensity=0.
+    """
+    bars = [0.2] * 30
+    features_onset = _make_features(bars)
+    features_onset.onset = True
+
+    profile_no_flash = Profile(
+        color_mode=ColorMode.SPECTRUM_RGB, onset_flash_intensity=0.0, bars=30
+    )
+    profile_flash = Profile(
+        color_mode=ColorMode.SPECTRUM_RGB, onset_flash_intensity=0.5, bars=30
+    )
+
+    no_flash = ColourModeEffect(profile_no_flash).render(features_onset, 0.0).color_at(_ORIGIN, 0.0)
+    with_flash = ColourModeEffect(profile_flash).render(features_onset, 0.0).color_at(_ORIGIN, 0.0)
+
+    assert with_flash.r > no_flash.r
+    assert with_flash.g > no_flash.g
+    assert with_flash.b > no_flash.b
+    assert with_flash.r <= 1.0
+    assert with_flash.g <= 1.0
+    assert with_flash.b <= 1.0
+
+
+def test_onset_flash_intensity_no_effect_without_onset():
+    """onset_flash_intensity must be ignored when onset=False."""
+    bars = [0.3] * 30
+    features_no_onset = _make_features(bars)
+    # onset defaults to False in AudioFeatures
+
+    profile_no_flash = Profile(
+        color_mode=ColorMode.MONO_PULSE, onset_flash_intensity=0.0, bars=30
+    )
+    profile_flash = Profile(
+        color_mode=ColorMode.MONO_PULSE, onset_flash_intensity=0.8, bars=30
+    )
+
+    no_flash = ColourModeEffect(profile_no_flash).render(
+        features_no_onset, 0.0
+    ).color_at(_ORIGIN, 0.0)
+    with_flash = ColourModeEffect(profile_flash).render(
+        features_no_onset, 0.0
+    ).color_at(_ORIGIN, 0.0)
+
+    assert with_flash.r == no_flash.r
+    assert with_flash.g == no_flash.g
+    assert with_flash.b == no_flash.b
+
+
+def test_onset_flash_intensity_full_white_at_1():
+    """onset_flash_intensity=1.0 with onset=True must produce RGB=(1,1,1)."""
+    bars = [0.1] * 30  # dark input
+    features_onset = _make_features(bars)
+    features_onset.onset = True
+
+    profile = Profile(
+        color_mode=ColorMode.SPECTRUM_RGB, onset_flash_intensity=1.0, sensitivity=1.0, bars=30
+    )
+    colour = ColourModeEffect(profile).render(features_onset, 0.0).color_at(_ORIGIN, 0.0)
+
+    assert colour.r == pytest.approx(1.0)
+    assert colour.g == pytest.approx(1.0)
+    assert colour.b == pytest.approx(1.0)
+
+
 # ---------------------------------------------------------------------------
 # BandNormaliser
 # ---------------------------------------------------------------------------

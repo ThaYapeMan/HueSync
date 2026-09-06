@@ -207,6 +207,7 @@ export interface RenderConfig {
   bass_hz: number
   mid_hz: number
   exertion_clip: number
+  onset_flash_intensity: number
 }
 
 export interface Coupling {
