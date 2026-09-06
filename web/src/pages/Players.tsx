@@ -19,11 +19,11 @@ import {
 } from '@/components/ui/dialog'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
 import {
-  type Player,
-  getPlayers,
-  createPlayer,
-  updatePlayer,
-  deletePlayer,
+  type VirtualPlayer,
+  getVirtualPlayers,
+  createVirtualPlayer,
+  updateVirtualPlayer,
+  deleteVirtualPlayer,
 } from '@/lib/api'
 
 interface FormState {
@@ -34,7 +34,7 @@ interface FormState {
   alsa_device: string
 }
 
-function defaultForm(player?: Player): FormState {
+function defaultForm(player?: VirtualPlayer): FormState {
   return {
     name: player?.name ?? '',
     lms_host: player?.lms_host ?? '',
@@ -54,18 +54,18 @@ function FormRow({ label, children }: { label: string; children: React.ReactNode
 }
 
 export function Players() {
-  const [players, setPlayers] = useState<Player[]>([])
+  const [players, setPlayers] = useState<VirtualPlayer[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [editorOpen, setEditorOpen] = useState(false)
-  const [editingPlayer, setEditingPlayer] = useState<Player | undefined>(undefined)
+  const [editingPlayer, setEditingPlayer] = useState<VirtualPlayer | undefined>(undefined)
   const [form, setForm] = useState<FormState>(defaultForm())
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
 
   async function load() {
     try {
-      const data = await getPlayers()
+      const data = await getVirtualPlayers()
       setPlayers(data)
       setError(null)
     } catch (e) {
@@ -86,7 +86,7 @@ export function Players() {
     setEditorOpen(true)
   }
 
-  function openEdit(player: Player) {
+  function openEdit(player: VirtualPlayer) {
     setEditingPlayer(player)
     setForm(defaultForm(player))
     setSaveError(null)
@@ -109,9 +109,9 @@ export function Players() {
         alsa_device: form.alsa_device,
       }
       if (editingPlayer) {
-        await updatePlayer(editingPlayer.id, body)
+        await updateVirtualPlayer(editingPlayer.id, body)
       } else {
-        await createPlayer(body)
+        await createVirtualPlayer(body)
       }
       setEditorOpen(false)
       await load()
@@ -123,7 +123,7 @@ export function Players() {
   }
 
   async function handleDelete(id: string) {
-    await deletePlayer(id)
+    await deleteVirtualPlayer(id)
     await load()
   }
 

@@ -19,47 +19,10 @@ export const COLOUR_MODES = [
 
 export type ColourMode = typeof COLOUR_MODES[number]['value']
 
-export interface Bridge {
-  id: string
-  name: string
-  host: string
-  app_key: string
-  client_key: string
-}
-
 export interface EntertainmentArea {
   id: string
   name: string
   light_count: number
-}
-
-export interface Profile {
-  id: string
-  name: string
-  lms_host: string
-  lms_port: number
-  player_name: string
-  player_mac: string
-  alsa_device: string
-  bridge_id: string
-  entertainment_area_id: string
-  entertainment_area_name: string
-  light_count: number
-  color_mode: string
-  sensitivity: number
-  brightness_floor: number
-  bars: number
-  lower_cutoff_freq: number
-  higher_cutoff_freq: number
-  bass_hz: number
-  mid_hz: number
-  onset_delta: number
-  onset_alpha: number
-  onset_method: string
-  superflux_mu: number
-  superflux_lag: number
-  exertion_clip: number
-  enabled: boolean
 }
 
 export interface PlayerLatency {
@@ -78,9 +41,8 @@ export interface LmsServer {
 
 export interface ApiStatus {
   version: string
-  active_profile_id: string | null
-  active_profile_name: string | null
   active_coupling_id: string | null
+  active_coupling_name: string | null
   sync_master: string | null
   sync_master_name: string | null
   applied_delay_ms: number
@@ -108,32 +70,16 @@ function json(method: string, body: unknown, options?: RequestInit): RequestInit
   }
 }
 
-// Bridges
-export const getBridges = () => request<Bridge[]>('/api/bridges')
-export const pairBridge = (host: string, name?: string) =>
-  request<Bridge>('/api/bridges/pair', json('POST', { host, name }))
-export const deleteBridge = (id: string) =>
-  request<void>(`/api/bridges/${id}`, { method: 'DELETE' })
-export const getBridgeAreas = (id: string) =>
-  request<EntertainmentArea[]>(`/api/bridges/${id}/areas`)
+// Controllers
+export const pairController = (host: string, name?: string) =>
+  request<Controller>('/api/controllers/pair', json('POST', { host, name }))
+export const getControllerAreas = (controllerId: string) =>
+  request<EntertainmentArea[]>(`/api/controllers/${controllerId}/areas`)
 
-// Profiles
-export const getProfiles = () => request<Profile[]>('/api/profiles')
-export const createProfile = (body: Omit<Profile, 'id' | 'player_mac'>) =>
-  request<Profile>('/api/profiles', json('POST', body))
-export const getProfile = (id: string) => request<Profile>(`/api/profiles/${id}`)
-export const updateProfile = (id: string, body: Partial<Profile>) =>
-  request<Profile>(`/api/profiles/${id}`, json('PATCH', body))
-export const deleteProfile = (id: string) =>
-  request<void>(`/api/profiles/${id}`, { method: 'DELETE' })
-export const activateProfile = (id: string) =>
-  request<{ active_id: string; warnings: string[] }>(`/api/profiles/${id}/activate`, { method: 'POST' })
-export const deactivateProfile = () =>
-  request<{ active_id: null }>('/api/profiles/deactivate', { method: 'POST' })
-export const restartCava = (
+export const restartCouplingCava = (
   id: string,
   body: { lower_cutoff_freq?: number; higher_cutoff_freq?: number; bass_hz?: number; mid_hz?: number } = {}
-) => request<{ ok: true }>(`/api/profiles/${id}/restart-cava`, json('POST', body))
+) => request<{ ok: true }>(`/api/couplings/${id}/restart-cava`, json('POST', body))
 
 // Player latencies
 export const getPlayerLatencies = () => request<PlayerLatency[]>('/api/player-latencies')
@@ -156,8 +102,6 @@ export const discoverLms = () => request<LmsServer[]>('/api/lms/discover')
 // Status
 export const getStatus = () => request<ApiStatus>('/api/status')
 
-// ---- Phase 2d entities ----
-
 export interface Controller {
   id: string
   name: string
@@ -166,7 +110,7 @@ export interface Controller {
   client_key: string
 }
 
-export interface Player {
+export interface VirtualPlayer {
   id: string
   name: string
   lms_host: string
@@ -220,17 +164,17 @@ export interface Coupling {
   enabled: boolean
 }
 
-// Controllers (Controller.id == Bridge.id, so getBridgeAreas() works with controller id)
+// Controllers
 export const getControllers = () => request<Controller[]>('/api/controllers')
 export const deleteController = (id: string) => request<void>(`/api/controllers/${id}`, { method: 'DELETE' })
 
-// Players
-export const getPlayers = () => request<Player[]>('/api/players')
-export const createPlayer = (body: Omit<Player, 'id' | 'player_mac'>) =>
-  request<Player>('/api/players', json('POST', body))
-export const updatePlayer = (id: string, body: Partial<Omit<Player, 'id'>>) =>
-  request<Player>(`/api/players/${id}`, json('PATCH', body))
-export const deletePlayer = (id: string) => request<void>(`/api/players/${id}`, { method: 'DELETE' })
+// VirtualPlayers
+export const getVirtualPlayers = () => request<VirtualPlayer[]>('/api/virtual-players')
+export const createVirtualPlayer = (body: Omit<VirtualPlayer, 'id' | 'player_mac'>) =>
+  request<VirtualPlayer>('/api/virtual-players', json('POST', body))
+export const updateVirtualPlayer = (id: string, body: Partial<Omit<VirtualPlayer, 'id'>>) =>
+  request<VirtualPlayer>(`/api/virtual-players/${id}`, json('PATCH', body))
+export const deleteVirtualPlayer = (id: string) => request<void>(`/api/virtual-players/${id}`, { method: 'DELETE' })
 
 // LightProviders
 export const getLightProviders = () => request<LightProvider[]>('/api/light-providers')

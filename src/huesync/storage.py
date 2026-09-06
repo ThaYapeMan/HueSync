@@ -1,9 +1,9 @@
 """Persistence layer.
 
 Deliberately a single JSON file rather than a database: HueSync manages at
-most a handful of profiles and bridges, so a flat file is easier to inspect,
-back up, and diff than a SQLite schema - and it's trivial to hand-edit if
-something ever needs fixing outside the GUI.
+most a handful of entities, so a flat file is easier to inspect, back up,
+and diff than a SQLite schema — and it's trivial to hand-edit if something
+ever needs fixing outside the GUI.
 
 A simple file lock avoids corruption if the API and a background task write
 concurrently (unlikely at this scale, but cheap to guard against).
@@ -17,14 +17,12 @@ from pathlib import Path
 
 from .models import (
     AnalysisConfig,
-    BridgeConfig,
     Controller,
     Coupling,
     LightProvider,
-    Player,
     PlayerLatency,
-    Profile,
     RenderConfig,
+    VirtualPlayer,
 )
 
 _lock = threading.Lock()
@@ -37,13 +35,10 @@ class Storage:
         if not self.path.exists():
             self._write(
                 {
-                    "bridges": [],
-                    "profiles": [],
                     "player_latencies": [],
-                    "active_profile_id": None,
-                    # Phase-2 collections
+                    # Five-entity model
                     "controllers": [],
-                    "players": [],
+                    "virtual_players": [],
                     "light_providers": [],
                     "analysis_configs": [],
                     "render_configs": [],
@@ -58,12 +53,17 @@ class Storage:
         # Back-fill any top-level keys added after the initial file was written.
         data.setdefault("player_latencies", [])
         data.setdefault("controllers", [])
-        data.setdefault("players", [])
         data.setdefault("light_providers", [])
         data.setdefault("analysis_configs", [])
         data.setdefault("render_configs", [])
         data.setdefault("couplings", [])
         data.setdefault("active_coupling_id", None)
+        # Migrate old "players" key to "virtual_players" if present.
+        if "players" in data and "virtual_players" not in data:
+            data["virtual_players"] = data.pop("players")
+        elif "players" in data:
+            data.pop("players")
+        data.setdefault("virtual_players", [])
         return data
 
     def _write(self, data: dict) -> None:
@@ -71,52 +71,6 @@ class Storage:
         with tmp.open("w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, sort_keys=True)
         tmp.replace(self.path)
-
-    # -- Bridges ----------------------------------------------------------
-
-    def list_bridges(self) -> list[BridgeConfig]:
-        with _lock:
-            return [BridgeConfig.from_dict(b) for b in self._read()["bridges"]]
-
-    def get_bridge(self, bridge_id: str) -> BridgeConfig | None:
-        return next((b for b in self.list_bridges() if b.id == bridge_id), None)
-
-    def save_bridge(self, bridge: BridgeConfig) -> None:
-        with _lock:
-            data = self._read()
-            data["bridges"] = [b for b in data["bridges"] if b["id"] != bridge.id]
-            data["bridges"].append(bridge.to_dict())
-            self._write(data)
-
-    def delete_bridge(self, bridge_id: str) -> None:
-        with _lock:
-            data = self._read()
-            data["bridges"] = [b for b in data["bridges"] if b["id"] != bridge_id]
-            self._write(data)
-
-    # -- Profiles -----------------------------------------------------------
-
-    def list_profiles(self) -> list[Profile]:
-        with _lock:
-            return [Profile.from_dict(p) for p in self._read()["profiles"]]
-
-    def get_profile(self, profile_id: str) -> Profile | None:
-        return next((p for p in self.list_profiles() if p.id == profile_id), None)
-
-    def save_profile(self, profile: Profile) -> None:
-        with _lock:
-            data = self._read()
-            data["profiles"] = [p for p in data["profiles"] if p["id"] != profile.id]
-            data["profiles"].append(profile.to_dict())
-            self._write(data)
-
-    def delete_profile(self, profile_id: str) -> None:
-        with _lock:
-            data = self._read()
-            data["profiles"] = [p for p in data["profiles"] if p["id"] != profile_id]
-            if data.get("active_profile_id") == profile_id:
-                data["active_profile_id"] = None
-            self._write(data)
 
     # -- Player latencies ---------------------------------------------------
 
@@ -147,18 +101,6 @@ class Storage:
             ]
             self._write(data)
 
-    # -- Active profile -----------------------------------------------------
-
-    def get_active_profile_id(self) -> str | None:
-        with _lock:
-            return self._read().get("active_profile_id")
-
-    def set_active_profile_id(self, profile_id: str | None) -> None:
-        with _lock:
-            data = self._read()
-            data["active_profile_id"] = profile_id
-            self._write(data)
-
     # -- Controllers --------------------------------------------------------
 
     def list_controllers(self) -> list[Controller]:
@@ -181,26 +123,26 @@ class Storage:
             data["controllers"] = [c for c in data["controllers"] if c["id"] != controller_id]
             self._write(data)
 
-    # -- Players ------------------------------------------------------------
+    # -- VirtualPlayers -----------------------------------------------------
 
-    def list_players(self) -> list[Player]:
+    def list_virtual_players(self) -> list[VirtualPlayer]:
         with _lock:
-            return [Player.from_dict(p) for p in self._read()["players"]]
+            return [VirtualPlayer.from_dict(p) for p in self._read()["virtual_players"]]
 
-    def get_player(self, player_id: str) -> Player | None:
-        return next((p for p in self.list_players() if p.id == player_id), None)
+    def get_virtual_player(self, player_id: str) -> VirtualPlayer | None:
+        return next((p for p in self.list_virtual_players() if p.id == player_id), None)
 
-    def save_player(self, player: Player) -> None:
+    def save_virtual_player(self, player: VirtualPlayer) -> None:
         with _lock:
             data = self._read()
-            data["players"] = [p for p in data["players"] if p["id"] != player.id]
-            data["players"].append(player.to_dict())
+            data["virtual_players"] = [p for p in data["virtual_players"] if p["id"] != player.id]
+            data["virtual_players"].append(player.to_dict())
             self._write(data)
 
-    def delete_player(self, player_id: str) -> None:
+    def delete_virtual_player(self, player_id: str) -> None:
         with _lock:
             data = self._read()
-            data["players"] = [p for p in data["players"] if p["id"] != player_id]
+            data["virtual_players"] = [p for p in data["virtual_players"] if p["id"] != player_id]
             self._write(data)
 
     # -- LightProviders -----------------------------------------------------

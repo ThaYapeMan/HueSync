@@ -57,11 +57,11 @@ Player  ──── AnalysisConfig ────── Coupling ──── Ren
 | Entity | Responsibility |
 |---|---|
 | **Controller** | A Hue Bridge: IP, app key, client key. Used for pairing and Entertainment Area queries. |
-| **Player** | A virtual squeezelite instance: LMS host, player name, MAC address, ALSA device. |
+| **VirtualPlayer** | A virtual squeezelite instance: LMS host, player name, MAC address, ALSA device. |
 | **LightProvider** | Links a Controller to one of its Entertainment Areas. |
 | **AnalysisConfig** | cava parameters (bars, cutoff freqs) and onset detection settings (method, delta, alpha). |
 | **RenderConfig** | Visual output parameters: colour mode, sensitivity, brightness floor, band boundaries. |
-| **Coupling** | Binds exactly one Player + AnalysisConfig + LightProvider + RenderConfig. Activate a Coupling to start the light show. |
+| **Coupling** | Binds exactly one VirtualPlayer + AnalysisConfig + LightProvider + RenderConfig. Activate a Coupling to start the light show. |
 
 A Coupling can be **cloned** (Clone button in the UI) — the new Coupling gets
 independent copies of its AnalysisConfig and RenderConfig (fresh IDs, same
@@ -71,7 +71,7 @@ copy, switch between them.
 
 ### Relationship rules
 
-- One Player → many Couplings (same squeezelite process, different analysis
+- One VirtualPlayer → many Couplings (same squeezelite process, different analysis
   or render settings).
 - One Controller → many LightProviders (one per Entertainment Area).
 - AnalysisConfig and RenderConfig can be shared across Couplings — or kept
@@ -79,20 +79,6 @@ copy, switch between them.
 - **One Entertainment Area can stream per bridge at a time** (Hue Bridge
   hardware limit). Activating a Coupling automatically stops whatever was
   running before.
-
-### Backward-compatibility layer (Profiles + Bridges)
-
-The original **Profile** and **Bridge** flat-model is still present as a
-backward-compatibility layer. The old *Profiles* tab and `/api/profiles`
-endpoints continue to work; the *Bridges* tab and `/api/bridges` endpoints
-are still the pairing entry point. During the transition the active-profile
-and active-coupling state are kept in sync — activating via either tab updates
-both.
-
-This layer will be removed in a planned cutover commit once the five-entity
-model has been fully validated in production. Until then, the *Profiles* tab
-shows a legacy warning and the five-entity tabs (Virtual Players, Analysis
-Configs, Render Configs, Couplings) are the primary interface.
 
 ---
 
@@ -238,10 +224,12 @@ changed:
 
 | Changed field(s) | Action |
 |---|---|
-| `player_id`, `analysis_config_id`, `light_provider_id`, `render_config_id`, `lms_host`, `lms_port`, `player_name`, `alsa_device` | Full deactivate — squeezelite, cava, and the Hue DTLS session are torn down. Reactivate manually. |
+| `player_id`, `light_provider_id`, `lms_host`, `lms_port`, `player_name`, `alsa_device` | Full deactivate — squeezelite, cava, and the Hue DTLS session are torn down. Reactivate manually. |
+| `analysis_config_id` | cava restart + PCM pipeline rebuild — new AnalysisConfig applied live, Hue session stays up. |
+| `render_config_id` | Render update only — new RenderConfig applied immediately. |
 | `bars`, `lower_cutoff_freq`, `higher_cutoff_freq` | cava-only restart — squeezelite and the Hue session stay up. |
 | `onset_method`, `onset_delta`, `onset_alpha`, `superflux_mu`, `superflux_lag`, `bass_hz`, `mid_hz` | PCM pipeline rebuilt live — no process restart, BandNormaliser EMA preserved. |
-| `color_mode`, `sensitivity`, `brightness_floor`, `exertion_clip`, `entertainment_area_name`, `light_count` | Render update only — applied immediately, nothing restarts. |
+| `color_mode`, `sensitivity`, `brightness_floor`, `exertion_clip`, `onset_flash_intensity`, `entertainment_area_name`, `light_count` | Render update only — applied immediately, nothing restarts. |
 | `name`, `enabled` | Metadata only — no session action. |
 
 Only the most disruptive category in a given PATCH triggers a restart.
@@ -298,15 +286,16 @@ The entry takes effect immediately — no reactivation needed.
 A REST API is available at `/api/*`. Interactive documentation (OpenAPI /
 Swagger) is at **`/docs`**.
 
-### Five-entity endpoints
+### Endpoints
 
 ```
+POST            /api/controllers/pair          pair a Hue Bridge (press link button first)
 GET/POST        /api/controllers
 GET/PATCH/DELETE /api/controllers/{id}
 GET             /api/controllers/{id}/areas    list Entertainment Areas
 
-GET/POST        /api/players
-GET/PATCH/DELETE /api/players/{id}
+GET/POST        /api/virtual-players
+GET/PATCH/DELETE /api/virtual-players/{id}
 
 GET/POST        /api/light-providers
 GET/PATCH/DELETE /api/light-providers/{id}
@@ -320,26 +309,15 @@ GET/PATCH/DELETE /api/render-configs/{id}
 GET/POST        /api/couplings
 GET/PATCH/DELETE /api/couplings/{id}
 POST            /api/couplings/{id}/activate
-POST            /api/couplings/{id}/clone      deep-clone with fresh AC + RC copies
+POST            /api/couplings/{id}/clone          deep-clone with fresh AC + RC copies
+POST            /api/couplings/{id}/restart-cava   restart cava for the active coupling
 POST            /api/couplings/deactivate
-```
-
-### Legacy endpoints (backward compatibility)
-
-```
-GET/POST        /api/bridges
-GET             /api/bridges/{id}/areas
-GET/POST        /api/profiles
-GET/PATCH/DELETE /api/profiles/{id}
-POST            /api/profiles/{id}/activate
-POST            /api/profiles/{id}/restart-cava
-POST            /api/profiles/deactivate
 ```
 
 ### Status and utilities
 
 ```
-GET             /api/status      version, active coupling/profile, sync master,
+GET             /api/status      version, active coupling, sync master,
                                  onset_method, color_mode, delay, process status
 GET             /api/player-latencies
 POST/PATCH/DELETE /api/player-latencies/{mac}
@@ -361,8 +339,8 @@ The WebSocket at `/ws/preview` sends typed JSON messages at up to 20 Hz:
 
 { "type": "status",
   "version": "0.2.0+abc1234",
-  "active_coupling_id": "…", "active_profile_id": "…",
-  "active_profile_name": "Zitkamer",
+  "active_coupling_id": "…",
+  "active_coupling_name": "Zitkamer",
   "color_mode": "spectrum_rgb", "onset_method": "combined",
   "sync_master": "aa:bb:…", "sync_master_name": "SONOS::Study",
   "bridge_connected": true,
@@ -442,10 +420,6 @@ and more. The effect engine spec is in
 - Colour mapping currently sends the same colour to every light in the area.
   Per-light spatial effects are the next planned effect-engine milestone.
 - No authentication on the web UI — intended for a trusted home LAN only.
-- The old Profiles/Bridges layer and the new five-entity layer coexist during
-  the transition period. They share `active_profile_id` state; activating
-  via either tab affects the same running session.
-
 ## License
 
 [PolyForm Noncommercial 1.0.0](LICENSE) — non-commercial use only.

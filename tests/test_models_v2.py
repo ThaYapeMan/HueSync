@@ -1,20 +1,17 @@
-"""Tests for the Phase-2 five-entity model: models, storage, and migration."""
+"""Tests for the five-entity model: models, storage CRUD, and storage backfill."""
 
 import tempfile
 from pathlib import Path
 
-from huesync.migration import migrate_profiles_to_entities
 from huesync.models import (
     AnalysisConfig,
-    BridgeConfig,
     ColorMode,
     Controller,
     ControllerType,
     Coupling,
     LightProvider,
-    Player,
-    Profile,
     RenderConfig,
+    VirtualPlayer,
 )
 from huesync.storage import Storage
 
@@ -26,50 +23,6 @@ from huesync.storage import Storage
 def make_storage() -> Storage:
     d = tempfile.mkdtemp()
     return Storage(Path(d) / "config.json")
-
-
-def make_profile(**kwargs) -> Profile:
-    defaults = dict(
-        name="Living room",
-        lms_host="192.168.1.10",
-        lms_port=9000,
-        player_name="HueSync",
-        player_mac="aa:bb:cc:dd:ee:ff",
-        alsa_device="hw:CARD=Dummy,DEV=0",
-        bridge_id="bridge-001",
-        entertainment_area_id="area-001",
-        entertainment_area_name="Living Room AE",
-        light_count=4,
-        color_mode=ColorMode.SPECTRUM_RGB,
-        sensitivity=1.5,
-        brightness_floor=0.2,
-        bars=24,
-        lower_cutoff_freq=40,
-        higher_cutoff_freq=10000,
-        bass_hz=200,
-        mid_hz=1800,
-        onset_method="superflux",
-        onset_delta=0.15,
-        onset_alpha=0.85,
-        superflux_mu=4,
-        superflux_lag=3,
-        exertion_clip=2.5,
-        enabled=True,
-    )
-    defaults.update(kwargs)
-    return Profile(**defaults)
-
-
-def make_bridge(**kwargs) -> BridgeConfig:
-    defaults = dict(
-        id="bridge-001",
-        name="Hue Bridge",
-        host="192.168.1.50",
-        app_key="app-key",
-        client_key="client-key",
-    )
-    defaults.update(kwargs)
-    return BridgeConfig(**defaults)
 
 
 # ---------------------------------------------------------------------------
@@ -103,14 +56,15 @@ def test_controller_from_dict_strips_unknown_keys():
 
 
 # ---------------------------------------------------------------------------
-# Player round-trip
+# VirtualPlayer round-trip
 # ---------------------------------------------------------------------------
 
 
 def test_player_roundtrip():
-    p = Player(name="Zone A", lms_host="10.0.0.5", lms_port=9000,
-               player_name="HueSync", player_mac="aa:bb:cc:dd:ee:01", alsa_device="hw:0")
-    p2 = Player.from_dict(p.to_dict())
+    p = VirtualPlayer(name="Zone A", lms_host="10.0.0.5", lms_port=9000,
+                      player_name="HueSync", player_mac="aa:bb:cc:dd:ee:01",
+                      alsa_device="hw:0")
+    p2 = VirtualPlayer.from_dict(p.to_dict())
     assert p2.id == p.id
     assert p2.lms_host == p.lms_host
     assert p2.player_mac == p.player_mac
@@ -118,9 +72,9 @@ def test_player_roundtrip():
 
 
 def test_player_from_dict_strips_unknown_keys():
-    d = Player().to_dict()
+    d = VirtualPlayer().to_dict()
     d["legacy"] = "gone"
-    p = Player.from_dict(d)
+    p = VirtualPlayer.from_dict(d)
     assert not hasattr(p, "legacy")
 
 
@@ -241,25 +195,25 @@ def test_storage_save_controller_is_upsert():
 
 
 # ---------------------------------------------------------------------------
-# Storage CRUD — Player
+# Storage CRUD — VirtualPlayer
 # ---------------------------------------------------------------------------
 
 
 def test_storage_save_and_get_player():
     s = make_storage()
-    p = Player(name="Zone A", player_mac="aa:bb:cc:dd:ee:01")
-    s.save_player(p)
-    fetched = s.get_player(p.id)
+    p = VirtualPlayer(name="Zone A", player_mac="aa:bb:cc:dd:ee:01")
+    s.save_virtual_player(p)
+    fetched = s.get_virtual_player(p.id)
     assert fetched is not None
     assert fetched.player_mac == "aa:bb:cc:dd:ee:01"
 
 
 def test_storage_delete_player():
     s = make_storage()
-    p = Player()
-    s.save_player(p)
-    s.delete_player(p.id)
-    assert s.get_player(p.id) is None
+    p = VirtualPlayer()
+    s.save_virtual_player(p)
+    s.delete_virtual_player(p.id)
+    assert s.get_virtual_player(p.id) is None
 
 
 # ---------------------------------------------------------------------------
@@ -376,151 +330,40 @@ def test_storage_backfills_new_collections_on_old_file():
     path = Path(d) / "config.json"
     # Write an old-style config with no Phase-2 keys.
     path.write_text(json.dumps({
-        "bridges": [],
-        "profiles": [],
         "player_latencies": [],
         "active_profile_id": None,
     }))
     s = Storage(path)
     # Must not raise; new collections must be empty lists / None.
     assert s.list_controllers() == []
-    assert s.list_players() == []
+    assert s.list_virtual_players() == []
     assert s.list_couplings() == []
     assert s.get_active_coupling_id() is None
 
 
-# ---------------------------------------------------------------------------
-# Migration — correctness
-# ---------------------------------------------------------------------------
+def test_storage_backfill_migrates_players_key_to_virtual_players():
+    """Old config with 'players' key is transparently migrated to 'virtual_players'."""
+    import json
 
-
-def test_migration_creates_one_set_of_entities_per_profile():
-    s = make_storage()
-    s.save_bridge(make_bridge())
-    s.save_profile(make_profile())
-
-    migrate_profiles_to_entities(s)
-
-    assert len(s.list_controllers()) == 1
-    assert len(s.list_players()) == 1
-    assert len(s.list_light_providers()) == 1
-    assert len(s.list_analysis_configs()) == 1
-    assert len(s.list_render_configs()) == 1
-    assert len(s.list_couplings()) == 1
-
-
-def test_migration_field_values_preserved():
-    s = make_storage()
-    s.save_bridge(make_bridge(id="bridge-001", host="192.168.1.50", app_key="ak",
-                               client_key="ck"))
-    profile = make_profile(
-        name="Living room",
-        lms_host="192.168.1.10",
-        player_mac="aa:bb:cc:dd:ee:ff",
-        sensitivity=1.5,
-        bars=24,
-        onset_method="superflux",
-        superflux_mu=4,
-        bass_hz=200,
-        exertion_clip=2.5,
-        enabled=True,
-    )
-    s.save_profile(profile)
-    migrate_profiles_to_entities(s)
-
-    player = s.list_players()[0]
-    assert player.lms_host == "192.168.1.10"
-    assert player.player_mac == "aa:bb:cc:dd:ee:ff"
-
-    controller = s.get_controller("bridge-001")
-    assert controller is not None
-    assert controller.host == "192.168.1.50"
-    assert controller.type == ControllerType.HUE
-
-    lp = s.list_light_providers()[0]
-    assert lp.controller_id == "bridge-001"
-    assert lp.entertainment_area_id == "area-001"
-    assert lp.light_count == 4
-
-    ac = s.list_analysis_configs()[0]
-    assert ac.onset_method == "superflux"
-    assert ac.superflux_mu == 4
-    assert ac.bars == 24
-
-    rc = s.list_render_configs()[0]
-    assert rc.sensitivity == 1.5
-    assert rc.bass_hz == 200
-    assert rc.exertion_clip == 2.5
-    assert rc.color_mode == ColorMode.SPECTRUM_RGB
-
-    coupling = s.list_couplings()[0]
-    assert coupling.id == profile.id  # ID preserved for active_profile_id continuity
-    assert coupling.name == "Living room"
-    assert coupling.enabled is True
-    assert coupling.player_id == player.id
-    assert coupling.analysis_config_id == ac.id
-    assert coupling.light_provider_id == lp.id
-    assert coupling.render_config_id == rc.id
-
-
-def test_migration_is_idempotent():
-    s = make_storage()
-    s.save_bridge(make_bridge())
-    s.save_profile(make_profile())
-
-    migrate_profiles_to_entities(s)
-    migrate_profiles_to_entities(s)  # second call must be a no-op
-
-    assert len(s.list_controllers()) == 1
-    assert len(s.list_players()) == 1
-    assert len(s.list_couplings()) == 1
-
-
-def test_migration_two_profiles_two_couplings():
-    s = make_storage()
-    s.save_bridge(make_bridge())
-    s.save_profile(make_profile(name="Zone A"))
-    s.save_profile(make_profile(name="Zone B", player_mac="aa:bb:cc:dd:ee:02"))
-
-    migrate_profiles_to_entities(s)
-
-    assert len(s.list_players()) == 2
-    assert len(s.list_couplings()) == 2
-    # One bridge → one controller
-    assert len(s.list_controllers()) == 1
-
-
-def test_migration_bridge_controller_id_matches_bridge_id():
-    """controller.id must equal bridge.id so LightProvider.controller_id resolves."""
-    s = make_storage()
-    bridge = make_bridge(id="test-bridge-id")
-    s.save_bridge(bridge)
-    s.save_profile(make_profile(bridge_id="test-bridge-id"))
-
-    migrate_profiles_to_entities(s)
-
-    controller = s.get_controller("test-bridge-id")
-    assert controller is not None
-    lp = s.list_light_providers()[0]
-    assert lp.controller_id == "test-bridge-id"
-
-
-def test_migration_no_bridge_no_controller():
-    """If no bridges are saved, no controllers are created."""
-    s = make_storage()
-    s.save_profile(make_profile())
-
-    migrate_profiles_to_entities(s)
-
-    assert len(s.list_controllers()) == 0
-    assert len(s.list_couplings()) == 1
-
-
-def test_migration_profile_with_no_bridge_id_gets_empty_controller_id():
-    s = make_storage()
-    s.save_profile(make_profile(bridge_id=""))
-
-    migrate_profiles_to_entities(s)
-
-    lp = s.list_light_providers()[0]
-    assert lp.controller_id == ""
+    d = tempfile.mkdtemp()
+    path = Path(d) / "config.json"
+    path.write_text(json.dumps({
+        "players": [
+            {
+                "id": "p-1",
+                "name": "Old Player",
+                "lms_host": "10.0.0.1",
+                "lms_port": 9000,
+                "player_name": "HueSync",
+                "player_mac": "aa:bb:cc:dd:ee:ff",
+                "alsa_device": "",
+            }
+        ],
+        "player_latencies": [],
+        "active_profile_id": None,
+    }))
+    s = Storage(path)
+    players = s.list_virtual_players()
+    assert len(players) == 1
+    assert players[0].name == "Old Player"
+    assert players[0].player_mac == "aa:bb:cc:dd:ee:ff"

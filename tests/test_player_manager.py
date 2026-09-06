@@ -18,11 +18,11 @@ from huesync.models import (
     ControllerType,
     Coupling,
     LightProvider,
-    Player,
     Profile,
     RenderConfig,
+    VirtualPlayer,
 )
-from huesync.player_manager import ActiveSession, PlayerManager, build_profile_from_coupling
+from huesync.player_manager import ActiveSession, PlayerManager, _build_engine_profile
 from huesync.storage import Storage
 
 
@@ -81,15 +81,12 @@ def test_teardown_skips_shm_when_mac_is_empty(tmp_path: Path) -> None:
 
 
 def test_cleanup_orphaned_shm_removes_known_mac(tmp_path: Path) -> None:
-    """cleanup_orphaned_shm() removes segments whose MAC matches a stored profile."""
+    """cleanup_orphaned_shm() removes squeezelite shm segments at startup."""
     mac = "02:ff:00:de:ad:03"
     shm_path = Path(f"/dev/shm/squeezelite-{mac}")
     shm_path.write_bytes(b"")
 
-    storage = Storage(tmp_path / "config.json")
-    storage.save_profile(Profile(player_mac=mac))
-    manager = PlayerManager(storage)
-
+    manager = _make_manager(tmp_path)
     manager.cleanup_orphaned_shm()
 
     assert not shm_path.exists()
@@ -206,11 +203,11 @@ def _make_full_storage(tmp_path: Path) -> tuple[Storage, Coupling]:
     )
     storage.save_controller(controller)
 
-    player = Player(
+    player = VirtualPlayer(
         id="player-1", name="Living Room", lms_host="192.168.1.10", lms_port=9000,
         player_name="HueSync", player_mac="aa:bb:cc:dd:ee:ff", alsa_device="",
     )
-    storage.save_player(player)
+    storage.save_virtual_player(player)
 
     lp = LightProvider(
         id="lp-1", name="Living AE", controller_id="ctrl-1",
@@ -250,7 +247,7 @@ def _make_full_storage(tmp_path: Path) -> tuple[Storage, Coupling]:
 
 def test_build_profile_from_coupling_maps_all_fields(tmp_path: Path) -> None:
     storage, coupling = _make_full_storage(tmp_path)
-    profile = build_profile_from_coupling(coupling, storage)
+    profile = _build_engine_profile(coupling, storage)
 
     assert profile is not None
     assert profile.id == "coupling-1"
@@ -272,26 +269,26 @@ def test_build_profile_from_coupling_maps_all_fields(tmp_path: Path) -> None:
 
 def test_build_profile_from_coupling_returns_none_on_missing_player(tmp_path: Path) -> None:
     storage, coupling = _make_full_storage(tmp_path)
-    storage.delete_player("player-1")
-    assert build_profile_from_coupling(coupling, storage) is None
+    storage.delete_virtual_player("player-1")
+    assert _build_engine_profile(coupling, storage) is None
 
 
 def test_build_profile_from_coupling_returns_none_on_missing_lp(tmp_path: Path) -> None:
     storage, coupling = _make_full_storage(tmp_path)
     storage.delete_light_provider("lp-1")
-    assert build_profile_from_coupling(coupling, storage) is None
+    assert _build_engine_profile(coupling, storage) is None
 
 
 def test_build_profile_from_coupling_returns_none_on_missing_ac(tmp_path: Path) -> None:
     storage, coupling = _make_full_storage(tmp_path)
     storage.delete_analysis_config("ac-1")
-    assert build_profile_from_coupling(coupling, storage) is None
+    assert _build_engine_profile(coupling, storage) is None
 
 
 def test_build_profile_from_coupling_returns_none_on_missing_rc(tmp_path: Path) -> None:
     storage, coupling = _make_full_storage(tmp_path)
     storage.delete_render_config("rc-1")
-    assert build_profile_from_coupling(coupling, storage) is None
+    assert _build_engine_profile(coupling, storage) is None
 
 
 # ---------------------------------------------------------------------------
@@ -301,10 +298,10 @@ def test_build_profile_from_coupling_returns_none_on_missing_rc(tmp_path: Path) 
 
 def test_activate_coupling_raises_on_missing_player(tmp_path: Path) -> None:
     storage, coupling = _make_full_storage(tmp_path)
-    storage.delete_player("player-1")
+    storage.delete_virtual_player("player-1")
     manager = PlayerManager(storage)
 
-    with pytest.raises(ValueError, match="missing Player"):
+    with pytest.raises(ValueError, match="missing VirtualPlayer"):
         asyncio.run(manager.activate_coupling(coupling))
 
 
@@ -377,7 +374,6 @@ def test_active_coupling_id_set_for_coupling_mode(tmp_path: Path) -> None:
 def test_deactivate_clears_active_coupling_id(tmp_path: Path) -> None:
     storage = Storage(tmp_path / "config.json")
     storage.set_active_coupling_id("coupling-1")
-    storage.set_active_profile_id("coupling-1")
 
     manager = PlayerManager(storage)
     profile = Profile(id="coupling-1", player_mac="aa:bb:cc:dd:ee:ff")
@@ -387,5 +383,4 @@ def test_deactivate_clears_active_coupling_id(tmp_path: Path) -> None:
     asyncio.run(manager.deactivate())
 
     assert storage.get_active_coupling_id() is None
-    assert storage.get_active_profile_id() is None
     assert manager.active_coupling_id is None

@@ -1,8 +1,6 @@
 import { useState } from 'react'
 import { usePreviewSocket } from '@/hooks/usePreviewSocket'
 import { NowPlaying } from '@/pages/NowPlaying'
-import { Profiles } from '@/pages/Profiles'
-import { Bridges } from '@/pages/Bridges'
 import { Latency } from '@/pages/Latency'
 import { Players } from '@/pages/Players'
 import { AnalysisConfigs } from '@/pages/AnalysisConfigs'
@@ -11,12 +9,10 @@ import { Couplings } from '@/pages/Couplings'
 import { Badge } from '@/components/ui/badge'
 import { cn } from '@/lib/utils'
 
-type Tab = 'now-playing' | 'profiles' | 'bridges' | 'latency' | 'players' | 'analysis-configs' | 'render-configs' | 'couplings'
+type Tab = 'now-playing' | 'latency' | 'players' | 'analysis-configs' | 'render-configs' | 'couplings'
 
 const NAV_ITEMS: { value: Tab; label: string }[] = [
   { value: 'now-playing',      label: 'Now Playing' },
-  { value: 'profiles',         label: 'Profiles' },
-  { value: 'bridges',          label: 'Bridges' },
   { value: 'latency',          label: 'Latency' },
   { value: 'players',          label: 'Virtual Players' },
   { value: 'analysis-configs', label: 'Analysis' },
@@ -76,13 +72,6 @@ export default function App() {
             {activeTab === 'now-playing' && (
               <NowPlaying colour={colour} onset={onset} onset_bass={onset_bass} onset_mid={onset_mid} onset_treble={onset_treble} bars={bars} status={status} />
             )}
-            {activeTab === 'profiles' && (
-              <Profiles
-                activeProfileId={status?.active_profile_id ?? null}
-                onActivationChange={() => {}}
-              />
-            )}
-            {activeTab === 'bridges' && <Bridges />}
             {activeTab === 'latency' && (
               <Latency
                 syncMaster={status?.sync_master ?? null}

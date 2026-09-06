@@ -1,7 +1,7 @@
 import tempfile
 from pathlib import Path
 
-from huesync.models import BridgeConfig, Profile
+from huesync.models import VirtualPlayer
 from huesync.storage import Storage
 
 
@@ -10,34 +10,53 @@ def make_storage() -> Storage:
     return Storage(Path(d) / "config.json")
 
 
-def test_save_and_get_profile_roundtrip():
+def test_save_and_get_virtual_player_roundtrip():
     storage = make_storage()
-    profile = Profile(name="Living room")
-    storage.save_profile(profile)
+    player = VirtualPlayer(name="Living room")
+    storage.save_virtual_player(player)
 
-    fetched = storage.get_profile(profile.id)
+    fetched = storage.get_virtual_player(player.id)
     assert fetched is not None
     assert fetched.name == "Living room"
-    assert fetched.id == profile.id
+    assert fetched.id == player.id
 
 
-def test_delete_profile_clears_active_id():
+def test_delete_virtual_player():
     storage = make_storage()
-    profile = Profile(name="Test")
-    storage.save_profile(profile)
-    storage.set_active_profile_id(profile.id)
-
-    storage.delete_profile(profile.id)
-
-    assert storage.get_profile(profile.id) is None
-    assert storage.get_active_profile_id() is None
+    player = VirtualPlayer(name="Test")
+    storage.save_virtual_player(player)
+    storage.delete_virtual_player(player.id)
+    assert storage.get_virtual_player(player.id) is None
 
 
-def test_save_bridge_roundtrip():
-    storage = make_storage()
-    bridge = BridgeConfig(name="Test bridge", host="192.168.1.50")
-    storage.save_bridge(bridge)
+def test_players_key_migrated_to_virtual_players(tmp_path: Path):
+    """Old config files with 'players' key are transparently migrated to 'virtual_players'."""
+    import json
 
-    fetched = storage.get_bridge(bridge.id)
-    assert fetched is not None
-    assert fetched.host == "192.168.1.50"
+    config = tmp_path / "config.json"
+    old_data = {
+        "player_latencies": [],
+        "players": [
+            {
+                "id": "p-1",
+                "name": "Old Player",
+                "lms_host": "10.0.0.1",
+                "lms_port": 9000,
+                "player_name": "HueSync",
+                "player_mac": "aa:bb:cc:dd:ee:ff",
+                "alsa_device": "",
+            }
+        ],
+        "controllers": [],
+        "light_providers": [],
+        "analysis_configs": [],
+        "render_configs": [],
+        "couplings": [],
+        "active_coupling_id": None,
+    }
+    config.write_text(json.dumps(old_data))
+
+    storage = Storage(config)
+    players = storage.list_virtual_players()
+    assert len(players) == 1
+    assert players[0].name == "Old Player"

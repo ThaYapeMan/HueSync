@@ -30,7 +30,7 @@ import { ConfirmDialog } from '@/components/ConfirmDialog'
 import {
   COLOUR_MODES,
   type Coupling,
-  type Player,
+  type VirtualPlayer,
   type LightProvider,
   type AnalysisConfig,
   type RenderConfig,
@@ -43,8 +43,8 @@ import {
   activateCoupling,
   cloneCoupling,
   deactivateCoupling,
-  getPlayers,
-  createPlayer,
+  getVirtualPlayers,
+  createVirtualPlayer,
   getLightProviders,
   createLightProvider,
   getAnalysisConfigs,
@@ -52,7 +52,7 @@ import {
   getRenderConfigs,
   createRenderConfig,
   getControllers,
-  getBridgeAreas,
+  getControllerAreas,
   getStatus,
 } from '@/lib/api'
 
@@ -66,7 +66,7 @@ interface Props {
 interface NewPlayerDialogProps {
   open: boolean
   onClose: () => void
-  onCreated: (player: Player) => void
+  onCreated: (player: VirtualPlayer) => void
 }
 
 function NewPlayerDialog({ open, onClose, onCreated }: NewPlayerDialogProps) {
@@ -91,7 +91,7 @@ function NewPlayerDialog({ open, onClose, onCreated }: NewPlayerDialogProps) {
     setSaving(true)
     setError(null)
     try {
-      const player = await createPlayer({
+      const player = await createVirtualPlayer({
         name,
         lms_host: lmsHost,
         lms_port: 9000,
@@ -183,7 +183,7 @@ function NewLightProviderDialog({ open, onClose, onCreated }: NewLightProviderDi
       return
     }
     setLoadingAreas(true)
-    getBridgeAreas(selectedControllerId)
+    getControllerAreas(selectedControllerId)
       .then(setAreas)
       .catch(() => setAreas([]))
       .finally(() => setLoadingAreas(false))
@@ -224,7 +224,7 @@ function NewLightProviderDialog({ open, onClose, onCreated }: NewLightProviderDi
         </DialogHeader>
         <div className="space-y-3">
           <div className="space-y-1">
-            <Label className="text-sm">Controller (bridge)</Label>
+            <Label className="text-sm">Controller</Label>
             {loadingControllers ? (
               <p className="text-sm text-muted-foreground">Loading…</p>
             ) : (
@@ -425,13 +425,13 @@ function NewRenderConfigDialog({ open, onClose, onCreated }: NewRenderConfigDial
 interface CouplingEditorProps {
   open: boolean
   coupling?: Coupling
-  players: Player[]
+  players: VirtualPlayer[]
   lightProviders: LightProvider[]
   analysisConfigs: AnalysisConfig[]
   renderConfigs: RenderConfig[]
   onSave: () => void
   onClose: () => void
-  onPlayersChanged: (players: Player[]) => void
+  onPlayersChanged: (players: VirtualPlayer[]) => void
   onLightProvidersChanged: (lps: LightProvider[]) => void
   onAnalysisConfigsChanged: (cfgs: AnalysisConfig[]) => void
   onRenderConfigsChanged: (cfgs: RenderConfig[]) => void
@@ -505,9 +505,9 @@ function CouplingEditor({
     }
   }
 
-  async function handlePlayerCreated(player: Player) {
+  async function handlePlayerCreated(player: VirtualPlayer) {
     setNewPlayerOpen(false)
-    const updated = await getPlayers().catch(() => players)
+    const updated = await getVirtualPlayers().catch(() => players)
     onPlayersChanged(updated)
     setPlayerId(player.id)
   }
@@ -686,7 +686,7 @@ function CouplingEditor({
 
 export function Couplings({ activeCouplingId: activeCouplingIdProp, onActivationChange }: Props) {
   const [couplings, setCouplings] = useState<Coupling[]>([])
-  const [players, setPlayers] = useState<Player[]>([])
+  const [players, setPlayers] = useState<VirtualPlayer[]>([])
   const [lightProviders, setLightProviders] = useState<LightProvider[]>([])
   const [analysisConfigs, setAnalysisConfigs] = useState<AnalysisConfig[]>([])
   const [renderConfigs, setRenderConfigs] = useState<RenderConfig[]>([])
@@ -701,7 +701,7 @@ export function Couplings({ activeCouplingId: activeCouplingIdProp, onActivation
     try {
       const [cs, ps, lps, acs, rcs, st] = await Promise.all([
         getCouplings(),
-        getPlayers(),
+        getVirtualPlayers(),
         getLightProviders(),
         getAnalysisConfigs(),
         getRenderConfigs(),

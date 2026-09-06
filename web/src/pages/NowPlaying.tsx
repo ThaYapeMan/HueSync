@@ -12,7 +12,7 @@ import {
   activateCoupling,
   deactivateCoupling,
   getCouplings,
-  restartCava,
+  restartCouplingCava,
 } from '@/lib/api'
 
 const LOG_MIN = Math.log10(20)
@@ -55,8 +55,8 @@ function StatusGrid({ status }: { status: SocketStatus | null }) {
   return (
     <dl className="grid grid-cols-[auto_1fr] gap-x-8 gap-y-2 text-sm items-start">
       <StatusRow label="Active">
-        {status.active_profile_name ? (
-          <span className="font-medium">{status.active_profile_name}</span>
+        {status.active_coupling_name ? (
+          <span className="font-medium">{status.active_coupling_name}</span>
         ) : (
           <span className="text-muted-foreground">None</span>
         )}
@@ -230,7 +230,7 @@ function CouplingSelector({
 type Props = Pick<PreviewState, 'colour' | 'onset' | 'onset_bass' | 'onset_mid' | 'onset_treble' | 'bars' | 'status'>
 
 export function NowPlaying({ colour, onset, onset_bass, onset_mid, onset_treble, bars, status }: Props) {
-  const profileId = status?.active_profile_id ?? null
+  const couplingId = status?.active_coupling_id ?? null
 
   const initializedForRef = useRef<string | null>(null)
 
@@ -250,16 +250,16 @@ export function NowPlaying({ colour, onset, onset_bass, onset_mid, onset_treble,
   const [reloadKey, setReloadKey] = useState(0)
 
   useEffect(() => {
-    if (!profileId || profileId === initializedForRef.current) return
+    if (!couplingId || couplingId === initializedForRef.current) return
     if (!status) return
-    initializedForRef.current = profileId
+    initializedForRef.current = couplingId
     if (status.lower_cutoff_freq != null) setLowSlider(hzToSlider(status.lower_cutoff_freq))
     if (status.higher_cutoff_freq != null) setHighSlider(hzToSlider(status.higher_cutoff_freq))
     if (status.bass_hz != null) setBassSlider(hzToSlider(status.bass_hz))
     if (status.mid_hz != null) setMidSlider(hzToSlider(status.mid_hz))
     setApplyResult(null)
     setBandResult(null)
-  }, [profileId, status])
+  }, [couplingId, status])
 
   const appliedLower  = status?.lower_cutoff_freq  ?? 50
   const appliedHigher = status?.higher_cutoff_freq ?? 12000
@@ -309,12 +309,12 @@ export function NowPlaying({ colour, onset, onset_bass, onset_mid, onset_treble,
   }
 
   async function handleApply() {
-    if (!profileId) return
+    if (!couplingId) return
     setApplying(true)
     setApplyResult(null)
     setApplyError(false)
     try {
-      await restartCava(profileId, { lower_cutoff_freq: pendingLower, higher_cutoff_freq: pendingHigher })
+      await restartCouplingCava(couplingId, { lower_cutoff_freq: pendingLower, higher_cutoff_freq: pendingHigher })
       setApplyResult('Applied.')
     } catch (e) {
       setApplyResult(e instanceof Error ? e.message : 'Failed')
@@ -335,12 +335,12 @@ export function NowPlaying({ colour, onset, onset_bass, onset_mid, onset_treble,
   }
 
   async function handleApplyBands() {
-    if (!profileId) return
+    if (!couplingId) return
     setApplyingBands(true)
     setBandResult(null)
     setBandError(false)
     try {
-      await restartCava(profileId, { bass_hz: pendingBass, mid_hz: pendingMid })
+      await restartCouplingCava(couplingId, { bass_hz: pendingBass, mid_hz: pendingMid })
       setBandResult('Applied.')
     } catch (e) {
       setBandResult(e instanceof Error ? e.message : 'Failed')
@@ -401,7 +401,7 @@ export function NowPlaying({ colour, onset, onset_bass, onset_mid, onset_treble,
             onsetTreble={onset_treble}
           />
 
-          {profileId && (
+          {couplingId && (
             <>
               <Separator />
               <p className="text-xs text-muted-foreground font-medium uppercase tracking-wider">
@@ -446,7 +446,7 @@ export function NowPlaying({ colour, onset, onset_bass, onset_mid, onset_treble,
                     size="sm" variant="outline"
                     onClick={handleResetBands}
                     disabled={applyingBands || !hasBandChanges}
-                    title="Reset to saved profile value"
+                    title="Reset to saved value"
                     data-testid="reset-bands"
                   >
                     Reset to saved
@@ -475,7 +475,7 @@ export function NowPlaying({ colour, onset, onset_bass, onset_mid, onset_treble,
         </CardContent>
       </Card>
 
-      {profileId && (
+      {couplingId && (
         <Card>
           <CardHeader className="pb-3">
             <CardTitle className="text-xs text-muted-foreground uppercase tracking-wider">
@@ -521,7 +521,7 @@ export function NowPlaying({ colour, onset, onset_bass, onset_mid, onset_treble,
                 size="sm" variant="outline"
                 onClick={handleReset}
                 disabled={applying || !hasChanges}
-                title="Reset to saved profile value"
+                title="Reset to saved value"
                 data-testid="reset-cutoffs"
               >
                 Reset to saved

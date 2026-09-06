@@ -257,11 +257,11 @@ class Controller:
 _CONTROLLER_FIELDS = frozenset(f.name for f in fields(Controller))
 
 
-_PLAYER_FIELDS: frozenset[str] = frozenset()  # filled after class
+_VIRTUAL_PLAYER_FIELDS: frozenset[str] = frozenset()  # filled after class
 
 
 @dataclass
-class Player:
+class VirtualPlayer:
     """A squeezelite virtual player connected to LMS."""
 
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
@@ -284,11 +284,11 @@ class Player:
         }
 
     @classmethod
-    def from_dict(cls, d: dict) -> Player:
-        return cls(**{k: v for k, v in d.items() if k in _PLAYER_FIELDS})
+    def from_dict(cls, d: dict) -> VirtualPlayer:
+        return cls(**{k: v for k, v in d.items() if k in _VIRTUAL_PLAYER_FIELDS})
 
 
-_PLAYER_FIELDS = frozenset(f.name for f in fields(Player))
+_VIRTUAL_PLAYER_FIELDS = frozenset(f.name for f in fields(VirtualPlayer))
 
 
 _LIGHT_PROVIDER_FIELDS: frozenset[str] = frozenset()  # filled after class

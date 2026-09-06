@@ -7,7 +7,7 @@
  *
  * Non-default applied values are used so that a faulty "reset to hardcoded
  * default" produces the wrong assertion value and catches the regression.
- * Factory defaults must match models.py and ProfileEditor.defaultForm().
+ * Factory defaults must match DEFAULT_* constants in NowPlaying.tsx and models.py.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen } from '@testing-library/react'
@@ -21,7 +21,7 @@ const DEFAULT_HIGH = 12000
 const DEFAULT_BASS = 250
 const DEFAULT_MID  = 2000
 
-// Applied (saved profile) values — all non-default so any mix-up is caught.
+// Applied (saved coupling) values — all non-default so any mix-up is caught.
 const APPLIED_LOW  = 120   // ≠ DEFAULT_LOW
 const APPLIED_HIGH = 14000 // ≠ DEFAULT_HIGH
 const APPLIED_BASS = 400   // ≠ DEFAULT_BASS
@@ -35,9 +35,8 @@ const PENDING_MID  = 5000
 
 const MOCK_STATUS: SocketStatus = {
   version: '0.0.0+test',
-  active_profile_id: 'test-profile-1',
-  active_profile_name: 'Test Profile',
-  active_coupling_id: null,
+  active_coupling_id: 'test-coupling-1',
+  active_coupling_name: 'Test Coupling',
   sync_master: null,
   sync_master_name: null,
   applied_delay_ms: 0,
@@ -53,7 +52,7 @@ const MOCK_STATUS: SocketStatus = {
 }
 
 vi.mock('../lib/api', () => ({
-  restartCava: vi.fn().mockResolvedValue({ ok: true }),
+  restartCouplingCava: vi.fn().mockResolvedValue({ ok: true }),
   getCouplings: vi.fn().mockResolvedValue([]),
   activateCoupling: vi.fn().mockResolvedValue({ active_id: 'test', warnings: [] }),
   deactivateCoupling: vi.fn().mockResolvedValue({ active_id: null }),
@@ -82,7 +81,7 @@ describe('NowPlaying — Reset to saved & Restore factory defaults', () => {
   // ── Initialisation ────────────────────────────────────────────────────────
 
   describe('Initialisation', () => {
-    it('all four fields initialise from profile values, not from factory defaults', () => {
+    it('all four fields initialise from saved coupling values, not from factory defaults', () => {
       renderNowPlaying()
       expect(screen.getByTestId('low-cut-hz')).toHaveValue(APPLIED_LOW)
       expect(screen.getByTestId('high-cut-hz')).toHaveValue(APPLIED_HIGH)
@@ -143,7 +142,7 @@ describe('NowPlaying — Reset to saved & Restore factory defaults', () => {
   // ── Cutoffs: Restore factory defaults ────────────────────────────────────
 
   describe('Cutoffs — Restore factory defaults', () => {
-    it('Low cut: Restore defaults goes to DEFAULT value, not applied profile value', async () => {
+    it('Low cut: Restore defaults goes to DEFAULT value, not applied coupling value', async () => {
       renderNowPlaying()
       const input = screen.getByTestId('low-cut-hz')
 
@@ -154,7 +153,7 @@ describe('NowPlaying — Reset to saved & Restore factory defaults', () => {
       expect(input).not.toHaveValue(APPLIED_LOW)
     })
 
-    it('High cut: Restore defaults goes to DEFAULT value, not applied profile value', async () => {
+    it('High cut: Restore defaults goes to DEFAULT value, not applied coupling value', async () => {
       renderNowPlaying()
       const input = screen.getByTestId('high-cut-hz')
 
@@ -224,7 +223,7 @@ describe('NowPlaying — Reset to saved & Restore factory defaults', () => {
   // ── Bands: Restore factory defaults ──────────────────────────────────────
 
   describe('Bands — Restore factory defaults', () => {
-    it('Bass/mid: Restore defaults goes to DEFAULT value, not applied profile value', async () => {
+    it('Bass/mid: Restore defaults goes to DEFAULT value, not applied coupling value', async () => {
       renderNowPlaying()
       const input = screen.getByTestId('bass-hz')
 
@@ -235,7 +234,7 @@ describe('NowPlaying — Reset to saved & Restore factory defaults', () => {
       expect(input).not.toHaveValue(APPLIED_BASS)
     })
 
-    it('Mid/treble: Restore defaults goes to DEFAULT value, not applied profile value', async () => {
+    it('Mid/treble: Restore defaults goes to DEFAULT value, not applied coupling value', async () => {
       renderNowPlaying()
       const input = screen.getByTestId('mid-hz')
 

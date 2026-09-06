@@ -14,7 +14,6 @@ from fastapi.staticfiles import StaticFiles
 
 from . import __git_hash__, __version__
 from .api import router as api_router
-from .migration import migrate_profiles_to_entities
 from .player_manager import PlayerManager
 from .storage import Storage
 
@@ -39,15 +38,12 @@ app.include_router(api_router)
 
 @app.on_event("startup")
 async def on_startup() -> None:
-    # A previously "active" profile from before a restart has no real
-    # squeezelite/cava process behind it anymore - clear the stale state
+    # A previously "active" coupling from before a restart has no real
+    # squeezelite/cava process behind it anymore — clear the stale state
     # rather than pretending it's still running.
-    storage.set_active_profile_id(None)
     storage.set_active_coupling_id(None)
     # Remove any /dev/shm/squeezelite-* segments left by a previous crash.
     player_manager.cleanup_orphaned_shm()
-    # Migrate Profiles/Bridges to the five-entity model (idempotent).
-    migrate_profiles_to_entities(storage)
 
 
 @app.on_event("shutdown")
@@ -91,9 +87,8 @@ async def ws_preview(websocket: WebSocket):
             status_dict = {
                 "type": "status",
                 "version": f"{__version__}+{__git_hash__}",
-                "active_profile_id": player_manager.active_profile_id,
-                "active_profile_name": player_manager.active_profile_name,
                 "active_coupling_id": player_manager.active_coupling_id,
+                "active_coupling_name": player_manager.active_coupling_name,
                 "sync_master": player_manager.detected_sync_master,
                 "sync_master_name": player_manager.detected_sync_master_name,
                 "applied_delay_ms": player_manager.applied_delay_ms,
