@@ -12,6 +12,7 @@ export interface SocketStatus {
   processes: { squeezelite: boolean; cava: boolean }
   bridge_connected: boolean
   color_mode: string | null
+  onset_method: string | null
   lower_cutoff_freq: number | null
   higher_cutoff_freq: number | null
   bass_hz: number | null

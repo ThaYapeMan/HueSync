@@ -101,6 +101,7 @@ async def ws_preview(websocket: WebSocket):
                 "processes": player_manager.process_status,
                 "bridge_connected": player_manager.bridge_connected,
                 "color_mode": player_manager.active_color_mode,
+                "onset_method": player_manager.active_onset_method,
                 "lower_cutoff_freq": player_manager.active_lower_cutoff_freq,
                 "higher_cutoff_freq": player_manager.active_higher_cutoff_freq,
                 "bass_hz": player_manager.active_bass_hz,

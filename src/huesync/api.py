@@ -681,6 +681,8 @@ async def get_status(request: Request):
         "latency_warning": manager.latency_warning,
         "processes": manager.process_status,
         "bridge_connected": manager.bridge_connected,
+        "color_mode": manager.active_color_mode,
+        "onset_method": manager.active_onset_method,
         "bars_stats": bars_stats,
     }
 

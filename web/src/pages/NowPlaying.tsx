@@ -7,13 +7,17 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Separator } from '@/components/ui/separator'
 import type { PreviewState, SocketStatus } from '@/hooks/usePreviewSocket'
-import { restartCava } from '@/lib/api'
+import {
+  type Coupling,
+  activateCoupling,
+  deactivateCoupling,
+  getCouplings,
+  restartCava,
+} from '@/lib/api'
 
 const LOG_MIN = Math.log10(20)
 const LOG_MAX = Math.log10(20000)
 
-// Factory defaults — must match models.py Profile field defaults and
-// ProfileEditor.defaultForm() so there is one canonical source of truth.
 const DEFAULT_LOW  = 50
 const DEFAULT_HIGH = 12000
 const DEFAULT_BASS = 250
@@ -50,13 +54,25 @@ function StatusGrid({ status }: { status: SocketStatus | null }) {
   }
   return (
     <dl className="grid grid-cols-[auto_1fr] gap-x-8 gap-y-2 text-sm items-start">
-      <StatusRow label="Profile">
+      <StatusRow label="Active">
         {status.active_profile_name ? (
           <span className="font-medium">{status.active_profile_name}</span>
         ) : (
           <span className="text-muted-foreground">None</span>
         )}
       </StatusRow>
+
+      {status.color_mode && (
+        <StatusRow label="Colour mode">
+          <code className="text-xs font-mono">{status.color_mode}</code>
+        </StatusRow>
+      )}
+
+      {status.onset_method && (
+        <StatusRow label="Onset method">
+          <code className="text-xs font-mono">{status.onset_method}</code>
+        </StatusRow>
+      )}
 
       <StatusRow label="Sync master">
         {status.sync_master ? (
@@ -100,33 +116,132 @@ function StatusGrid({ status }: { status: SocketStatus | null }) {
   )
 }
 
+function CouplingSelector({
+  status,
+  onChanged,
+}: {
+  status: SocketStatus | null
+  onChanged: () => void
+}) {
+  const [couplings, setCouplings] = useState<Coupling[]>([])
+  const [selected, setSelected] = useState<string>('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    getCouplings().then(setCouplings).catch(() => {})
+  }, [])
+
+  // When couplings load and one is already active, pre-select it.
+  useEffect(() => {
+    if (!selected && status?.active_coupling_id) {
+      setSelected(status.active_coupling_id)
+    }
+  }, [status?.active_coupling_id, couplings, selected])
+
+  const isActive = !!status?.active_coupling_id
+  const selectedIsActive = status?.active_coupling_id === selected
+
+  async function handleActivate() {
+    if (!selected) return
+    setBusy(true)
+    setError(null)
+    try {
+      await activateCoupling(selected)
+      onChanged()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function handleStop() {
+    setBusy(true)
+    setError(null)
+    try {
+      await deactivateCoupling()
+      onChanged()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="text-xs text-muted-foreground uppercase tracking-wider">
+          Active coupling
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <div className="flex items-center gap-3">
+          <select
+            className="flex-1 rounded-md border border-input bg-background px-3 py-1.5 text-sm shadow-sm focus:outline-none focus:ring-1 focus:ring-ring"
+            value={selected}
+            onChange={(e) => setSelected(e.target.value)}
+            disabled={busy}
+          >
+            <option value="">— select a coupling —</option>
+            {couplings.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.name}
+              </option>
+            ))}
+          </select>
+
+          <Button
+            size="sm"
+            onClick={handleActivate}
+            disabled={busy || !selected || selectedIsActive}
+          >
+            {busy && !isActive ? 'Activating…' : 'Activate'}
+          </Button>
+
+          {isActive && (
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={handleStop}
+              disabled={busy}
+            >
+              {busy && isActive ? 'Stopping…' : 'Stop'}
+            </Button>
+          )}
+        </div>
+
+        {error && (
+          <p className="text-sm text-destructive">{error}</p>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
 type Props = Pick<PreviewState, 'colour' | 'onset' | 'onset_bass' | 'onset_mid' | 'onset_treble' | 'bars' | 'status'>
 
 export function NowPlaying({ colour, onset, onset_bass, onset_mid, onset_treble, bars, status }: Props) {
   const profileId = status?.active_profile_id ?? null
 
-  // Track which profileId the sliders were last initialized for, so we
-  // initialize exactly once per profile activation even if status arrives
-  // in a later render than the profileId change.
   const initializedForRef = useRef<string | null>(null)
 
-  // Cutoff sliders — reset only when the active profile changes.
   const [lowSlider, setLowSlider] = useState<number>(hzToSlider(50))
   const [highSlider, setHighSlider] = useState<number>(hzToSlider(12000))
   const [applying, setApplying] = useState(false)
   const [applyResult, setApplyResult] = useState<string | null>(null)
   const [applyError, setApplyError] = useState(false)
 
-  // Band boundary sliders — reset only when the active profile changes.
   const [bassSlider, setBassSlider] = useState<number>(hzToSlider(250))
   const [midSlider, setMidSlider] = useState<number>(hzToSlider(2000))
   const [applyingBands, setApplyingBands] = useState(false)
   const [bandResult, setBandResult] = useState<string | null>(null)
   const [bandError, setBandError] = useState(false)
 
-  // Initialize sliders once per profile. Depends on both profileId and status
-  // so it fires as soon as status arrives with the profile's stored values,
-  // regardless of whether profileId or status arrived first.
+  // Reload coupling selector when activation changes.
+  const [reloadKey, setReloadKey] = useState(0)
+
   useEffect(() => {
     if (!profileId || profileId === initializedForRef.current) return
     if (!status) return
@@ -139,13 +254,11 @@ export function NowPlaying({ colour, onset, onset_bass, onset_mid, onset_treble,
     setBandResult(null)
   }, [profileId, status])
 
-  // Applied values (what cava is actually using) — drive the spectrum display.
   const appliedLower  = status?.lower_cutoff_freq  ?? 50
   const appliedHigher = status?.higher_cutoff_freq ?? 12000
   const appliedBass   = status?.bass_hz            ?? 250
   const appliedMid    = status?.mid_hz             ?? 2000
 
-  // Pending values from the sliders.
   const pendingLower  = sliderToHz(lowSlider)
   const pendingHigher = sliderToHz(highSlider)
   const pendingBass   = sliderToHz(bassSlider)
@@ -156,22 +269,20 @@ export function NowPlaying({ colour, onset, onset_bass, onset_mid, onset_treble,
   const hasDefaultChanges     = pendingLower !== DEFAULT_LOW  || pendingHigher !== DEFAULT_HIGH
   const hasDefaultBandChanges = pendingBass  !== DEFAULT_BASS || pendingMid    !== DEFAULT_MID
 
-  // Constraint: bass_hz < mid_hz; both within the applied cutoff range.
   function handleBassChange(v: number) {
     const hz = sliderToHz(v)
-    if (hz >= pendingMid) return           // would violate bass < mid
-    if (hz <= appliedLower) return         // below low cut
+    if (hz >= pendingMid) return
+    if (hz <= appliedLower) return
     setBassSlider(v)
   }
 
   function handleMidChange(v: number) {
     const hz = sliderToHz(v)
-    if (hz <= pendingBass) return          // would violate bass < mid
-    if (hz >= appliedHigher) return        // above high cut
+    if (hz <= pendingBass) return
+    if (hz >= appliedHigher) return
     setMidSlider(v)
   }
 
-  // Input commit handlers: enforce the same constraints as the sliders.
   function handleLowCommit(hz: number) {
     setLowSlider(hzToSlider(Math.max(20, Math.min(pendingHigher - 1, hz))))
   }
@@ -244,6 +355,12 @@ export function NowPlaying({ colour, onset, onset_bass, onset_mid, onset_treble,
 
   return (
     <div className="space-y-4">
+      <CouplingSelector
+        key={reloadKey}
+        status={status}
+        onChanged={() => setReloadKey((k) => k + 1)}
+      />
+
       <Card>
         <CardHeader className="pb-3">
           <CardTitle className="text-xs text-muted-foreground uppercase tracking-wider">

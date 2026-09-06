@@ -37,6 +37,7 @@ const MOCK_STATUS: SocketStatus = {
   version: '0.0.0+test',
   active_profile_id: 'test-profile-1',
   active_profile_name: 'Test Profile',
+  active_coupling_id: null,
   sync_master: null,
   sync_master_name: null,
   applied_delay_ms: 0,
@@ -44,6 +45,7 @@ const MOCK_STATUS: SocketStatus = {
   processes: { squeezelite: true, cava: true },
   bridge_connected: false,
   color_mode: 'spectrum_rgb',
+  onset_method: 'combined',
   lower_cutoff_freq: APPLIED_LOW,
   higher_cutoff_freq: APPLIED_HIGH,
   bass_hz: APPLIED_BASS,
@@ -52,6 +54,9 @@ const MOCK_STATUS: SocketStatus = {
 
 vi.mock('../lib/api', () => ({
   restartCava: vi.fn().mockResolvedValue({ ok: true }),
+  getCouplings: vi.fn().mockResolvedValue([]),
+  activateCoupling: vi.fn().mockResolvedValue({ active_id: 'test', warnings: [] }),
+  deactivateCoupling: vi.fn().mockResolvedValue({ active_id: null }),
 }))
 
 function renderNowPlaying() {

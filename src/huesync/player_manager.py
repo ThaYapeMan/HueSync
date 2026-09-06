@@ -251,6 +251,14 @@ class PlayerManager:
             return self._active.profile.color_mode.value
         return None
 
+    @property
+    def active_onset_method(self) -> str | None:
+        return self._active.profile.onset_method if self._active else None
+
+    @property
+    def active_sensitivity(self) -> float | None:
+        return self._active.profile.sensitivity if self._active else None
+
     async def activate(self, profile: Profile) -> None:
         """Stop whatever is currently active, then start this profile.
 
