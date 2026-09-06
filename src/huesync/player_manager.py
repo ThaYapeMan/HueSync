@@ -557,8 +557,13 @@ class PlayerManager:
         session = self._active
 
         if session.coupling:
-            # Coupling mode: reload entities from storage and rebuild profile.
-            profile = build_profile_from_coupling(session.coupling, self.storage)
+            # Reload coupling from storage so any FK changes (e.g. analysis_config_id
+            # swapped via PATCH) are reflected when rebuilding the profile.
+            fresh = self.storage.get_coupling(session.coupling.id)
+            if fresh is None:
+                raise RuntimeError("Active coupling has been deleted from storage")
+            session.coupling = fresh
+            profile = build_profile_from_coupling(fresh, self.storage)
             if profile is None:
                 raise RuntimeError("Active coupling has broken FK references")
             self.storage.save_profile(profile)

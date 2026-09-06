@@ -308,8 +308,17 @@ _ALL_ACTIVE_FIELDS: frozenset[str] = (
 # Priority: deactivate > cava > pcm > render.
 
 _C_DEACTIVATE_FIELDS: frozenset[str] = frozenset({
-    "player_id", "analysis_config_id", "light_provider_id", "render_config_id",
+    # Changing these requires a full squeezelite + cava + DTLS restart because
+    # a new process (player_id) or a new Entertainment Area (light_provider_id)
+    # cannot be hot-swapped into a running session.
+    "player_id", "light_provider_id",
     "lms_host", "lms_port", "player_name", "alsa_device",
+})
+# FK fields that do NOT require a full restart — handled via lighter live-update
+# paths in _apply_coupling_action().
+_C_LIVE_FK_FIELDS: frozenset[str] = frozenset({
+    "analysis_config_id",  # → cava restart + PCM pipeline rebuild
+    "render_config_id",    # → update_render only
 })
 _C_CAVA_FIELDS: frozenset[str] = frozenset({
     "bars", "lower_cutoff_freq", "higher_cutoff_freq",
@@ -360,9 +369,12 @@ async def _apply_coupling_action(
     if changed & _C_DEACTIVATE_FIELDS:
         await manager.deactivate()
         return
-    if changed & _C_CAVA_FIELDS:
+    # analysis_config_id swap: treat as cava + PCM change (new AC replaces all
+    # its fields: bars, cutoffs, onset params).  render_config_id alone falls
+    # through to update_render() only.
+    if changed & (_C_CAVA_FIELDS | {"analysis_config_id"}):
         await manager.restart_cava()
-    if changed & _C_PCM_FIELDS:
+    if changed & (_C_PCM_FIELDS | {"analysis_config_id"}):
         manager.update_onset_pipeline(profile)
     manager.update_render(profile)
 
@@ -1109,7 +1121,11 @@ async def patch_coupling(coupling_id: str, request: Request, body: CouplingPatch
 
     if was_active:
         changed = set(updates.keys())
-        if changed & (_C_DEACTIVATE_FIELDS | _C_CAVA_FIELDS | _C_PCM_FIELDS | _C_RENDER_FIELDS):
+        actionable = (
+            _C_DEACTIVATE_FIELDS | _C_LIVE_FK_FIELDS
+            | _C_CAVA_FIELDS | _C_PCM_FIELDS | _C_RENDER_FIELDS
+        )
+        if changed & actionable:
             await _apply_coupling_action(coupling, storage, manager, changed)
 
     return coupling.to_dict()

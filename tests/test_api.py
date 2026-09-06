@@ -648,6 +648,51 @@ def test_patch_coupling_deactivate_field_deactivates(client: TestClient):
     client._manager.deactivate.assert_awaited_once()
 
 
+def test_patch_coupling_analysis_config_id_restarts_cava_not_deactivate(client: TestClient):
+    """Swapping analysis_config_id on an active coupling must restart cava and
+    rebuild the onset pipeline, but must NOT call deactivate()."""
+    coupling = _make_full_coupling(client._storage)
+    client._storage.set_active_coupling_id(coupling.id)
+
+    new_ac = AnalysisConfig(name="AC2")
+    client._storage.save_analysis_config(new_ac)
+
+    resp = client.patch(
+        f"/api/couplings/{coupling.id}",
+        json={"analysis_config_id": new_ac.id},
+    )
+    assert resp.status_code == 200
+    client._manager.deactivate.assert_not_awaited()
+    client._manager.restart_cava.assert_awaited_once()
+    client._manager.update_onset_pipeline.assert_called_once()
+    client._manager.update_render.assert_called_once()
+
+    saved = client._storage.get_coupling(coupling.id)
+    assert saved is not None and saved.analysis_config_id == new_ac.id
+
+
+def test_patch_coupling_render_config_id_update_render_only(client: TestClient):
+    """Swapping render_config_id must call update_render only — no cava restart,
+    no deactivate."""
+    coupling = _make_full_coupling(client._storage)
+    client._storage.set_active_coupling_id(coupling.id)
+
+    new_rc = RenderConfig(name="RC2")
+    client._storage.save_render_config(new_rc)
+
+    resp = client.patch(
+        f"/api/couplings/{coupling.id}",
+        json={"render_config_id": new_rc.id},
+    )
+    assert resp.status_code == 200
+    client._manager.deactivate.assert_not_awaited()
+    client._manager.restart_cava.assert_not_awaited()
+    client._manager.update_render.assert_called_once()
+
+    saved = client._storage.get_coupling(coupling.id)
+    assert saved is not None and saved.render_config_id == new_rc.id
+
+
 # ---------------------------------------------------------------------------
 # Clone coupling
 # ---------------------------------------------------------------------------
