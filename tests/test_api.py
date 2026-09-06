@@ -46,6 +46,7 @@ def _make_mock_manager() -> MagicMock:
     type(manager).last_bars = PropertyMock(return_value=[])
     # Async methods
     manager.activate = AsyncMock()
+    manager.activate_coupling = AsyncMock()
     manager.deactivate = AsyncMock()
     manager.restart_cava = AsyncMock()
     manager.refresh_probe = AsyncMock()
@@ -580,6 +581,7 @@ def test_activate_coupling_missing_entities(client: TestClient):
         render_config_id="missing",
     )
     client._storage.save_coupling(coupling)
+    client._manager.activate_coupling.side_effect = ValueError("missing Player")
 
     resp = client.post(f"/api/couplings/{coupling.id}/activate")
     assert resp.status_code == 422
@@ -592,7 +594,7 @@ def test_activate_coupling_success(client: TestClient):
     assert resp.status_code == 200
     body = resp.json()
     assert body["active_id"] == coupling.id
-    client._manager.activate.assert_awaited_once()
+    client._manager.activate_coupling.assert_awaited_once()
 
 
 def test_delete_coupling_deactivates_if_active(client: TestClient):

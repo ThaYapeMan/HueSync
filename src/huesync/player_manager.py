@@ -23,7 +23,7 @@ from .hue_output import HueDriver, HueOutputConfig, get_channel_infos
 from .latency import FixedLatencyProbe, NoLatencyProbe
 from .lms_discovery import discover_lms
 from .lms_status import query_lms_status, query_lms_sync_peers
-from .models import Profile
+from .models import BridgeConfig, Controller, Coupling, Profile
 from .pcm_source import SqueezeliteShmSource
 from .storage import Storage
 from .sync_engine import SyncEngine
@@ -31,6 +31,61 @@ from .types import Colour, LatencyProbe
 from .util import generate_locally_administered_mac
 
 log = logging.getLogger(__name__)
+
+
+def _controller_to_bridge(controller: Controller) -> BridgeConfig:
+    """Convert a Controller entity to the BridgeConfig that Hue functions expect."""
+    return BridgeConfig(
+        id=controller.id,
+        name=controller.name,
+        host=controller.host,
+        app_key=controller.app_key,
+        client_key=controller.client_key,
+    )
+
+
+def build_profile_from_coupling(coupling: Coupling, storage: Storage) -> Profile | None:
+    """Build a Profile from a Coupling's linked entities.
+
+    Returns None if any referenced entity is missing (broken FK).  Used as a
+    bridge in Phase 2b/2c so that SyncEngine and cava keep speaking Profile
+    while the rest of the stack transitions to Coupling + entities.  Removed
+    in the cutover commit after Phase 2d.
+    """
+    player = storage.get_player(coupling.player_id)
+    lp = storage.get_light_provider(coupling.light_provider_id)
+    ac = storage.get_analysis_config(coupling.analysis_config_id)
+    rc = storage.get_render_config(coupling.render_config_id)
+    if not all([player, lp, ac, rc]):
+        return None
+    return Profile(
+        id=coupling.id,
+        name=coupling.name,
+        lms_host=player.lms_host,
+        lms_port=player.lms_port,
+        player_name=player.player_name,
+        player_mac=player.player_mac,
+        alsa_device=player.alsa_device,
+        bridge_id=lp.controller_id,
+        entertainment_area_id=lp.entertainment_area_id,
+        entertainment_area_name=lp.entertainment_area_name,
+        light_count=lp.light_count,
+        color_mode=rc.color_mode,
+        sensitivity=rc.sensitivity,
+        brightness_floor=rc.brightness_floor,
+        bass_hz=rc.bass_hz,
+        mid_hz=rc.mid_hz,
+        exertion_clip=rc.exertion_clip,
+        onset_method=ac.onset_method,
+        onset_delta=ac.onset_delta,
+        onset_alpha=ac.onset_alpha,
+        superflux_mu=ac.superflux_mu,
+        superflux_lag=ac.superflux_lag,
+        bars=ac.bars,
+        lower_cutoff_freq=ac.lower_cutoff_freq,
+        higher_cutoff_freq=ac.higher_cutoff_freq,
+        enabled=coupling.enabled,
+    )
 
 
 def _log_task_failure(task: asyncio.Task) -> None:
@@ -57,8 +112,9 @@ _UNSET: str | None = _Unset()  # type: ignore[assignment]
 
 
 class ActiveSession:
-    def __init__(self, profile: Profile):
+    def __init__(self, profile: Profile, coupling: Coupling | None = None):
         self.profile = profile
+        self.coupling = coupling
         self.squeezelite: subprocess.Popen | None = None
         self.cava: subprocess.Popen | None = None
         self.fifo_path: Path = _RUN_DIR / f"{profile.id}.fifo"
@@ -92,6 +148,12 @@ class PlayerManager:
     @property
     def active_profile_id(self) -> str | None:
         return self._active.profile.id if self._active else None
+
+    @property
+    def active_coupling_id(self) -> str | None:
+        if self._active and self._active.coupling:
+            return self._active.coupling.id
+        return None
 
     @property
     def last_colours(self) -> list[Colour]:
@@ -279,6 +341,131 @@ class PlayerManager:
         self.storage.set_active_profile_id(profile.id)
         log.info("Activated profile %s (%s)", profile.name, profile.id)
 
+    async def activate_coupling(self, coupling: Coupling) -> None:
+        """Activate a Coupling, resolving all linked entities natively.
+
+        Controller is used directly for Hue calls instead of the old BridgeConfig
+        lookup.  A Profile is still built internally and persisted so that
+        SyncEngine, cava config, and restart_cava() keep working unchanged.
+        Both active_profile_id and active_coupling_id are set in storage.
+        """
+        await self.deactivate()
+
+        player = self.storage.get_player(coupling.player_id)
+        lp = self.storage.get_light_provider(coupling.light_provider_id)
+        ac = self.storage.get_analysis_config(coupling.analysis_config_id)
+        rc = self.storage.get_render_config(coupling.render_config_id)
+
+        if not player:
+            raise ValueError(f"Coupling references missing Player {coupling.player_id!r}")
+        if not lp:
+            raise ValueError(
+                f"Coupling references missing LightProvider {coupling.light_provider_id!r}"
+            )
+        if not ac:
+            raise ValueError(
+                f"Coupling references missing AnalysisConfig {coupling.analysis_config_id!r}"
+            )
+        if not rc:
+            raise ValueError(
+                f"Coupling references missing RenderConfig {coupling.render_config_id!r}"
+            )
+
+        controller = self.storage.get_controller(lp.controller_id)
+        if not controller:
+            raise ValueError(
+                f"LightProvider references missing Controller {lp.controller_id!r}"
+            )
+
+        bridge = _controller_to_bridge(controller)
+        areas = await list_entertainment_areas(bridge)
+        area = next((a for a in areas if a.id == lp.entertainment_area_id), None)
+        if area is None:
+            raise ValueError("Configured Entertainment Area no longer exists on the controller")
+
+        channels = await get_channel_infos(bridge, lp.entertainment_area_id)
+
+        output_config = HueOutputConfig(
+            bridge=bridge,
+            area_id=lp.entertainment_area_id,
+            area_name=area.name,
+        )
+
+        profile = Profile(
+            id=coupling.id,
+            name=coupling.name,
+            lms_host=player.lms_host,
+            lms_port=player.lms_port,
+            player_name=player.player_name,
+            player_mac=player.player_mac,
+            alsa_device=player.alsa_device,
+            bridge_id=lp.controller_id,
+            entertainment_area_id=lp.entertainment_area_id,
+            entertainment_area_name=lp.entertainment_area_name,
+            light_count=lp.light_count,
+            color_mode=rc.color_mode,
+            sensitivity=rc.sensitivity,
+            brightness_floor=rc.brightness_floor,
+            bass_hz=rc.bass_hz,
+            mid_hz=rc.mid_hz,
+            exertion_clip=rc.exertion_clip,
+            onset_method=ac.onset_method,
+            onset_delta=ac.onset_delta,
+            onset_alpha=ac.onset_alpha,
+            superflux_mu=ac.superflux_mu,
+            superflux_lag=ac.superflux_lag,
+            bars=ac.bars,
+            lower_cutoff_freq=ac.lower_cutoff_freq,
+            higher_cutoff_freq=ac.higher_cutoff_freq,
+            enabled=coupling.enabled,
+        )
+        # Persist so restart_cava() (which reloads from storage) sees correct values.
+        self.storage.save_profile(profile)
+
+        self.latency_warning = None
+        self._detected_sync_master = None
+
+        session = ActiveSession(profile, coupling=coupling)
+        try:
+            self._start_squeezelite(session, profile)
+
+            engine = SyncEngine(str(session.fifo_path), profile, probe=session.probe)
+            session.sync_engine = engine
+
+            self._create_fifo(session)
+            engine.start()
+            self._start_cava(session, profile)
+
+            shm_source = SqueezeliteShmSource()
+            try:
+                shm_source.open(profile.player_mac)
+                session.shm_source = shm_source
+                engine.attach_shm_source(shm_source)
+                log.debug("PCM tap SHM source opened for coupling %s", coupling.name)
+            except Exception as exc:
+                log.warning(
+                    "Could not open squeezelite SHM for PCM onset tap "
+                    "(cava-based onset still active): %s",
+                    exc,
+                )
+
+            hue_driver = HueDriver(output_config, channels)
+            await hue_driver.start()
+            session.hue_driver = hue_driver
+
+            session.task = asyncio.create_task(engine.run(hue_driver))
+            session.task.add_done_callback(_log_task_failure)
+            session.poller_task = asyncio.create_task(self._poll_sync_master(session))
+            session.poller_task.add_done_callback(_log_task_failure)
+        except Exception:
+            await self._teardown_session(session)
+            raise
+
+        self._active = session
+        self.storage.set_active_profile_id(coupling.id)
+        self.storage.set_active_coupling_id(coupling.id)
+        log.info("Activated coupling %s (%s)", coupling.name, coupling.id)
+
     async def deactivate(self) -> None:
         if not self._active:
             return
@@ -289,7 +476,11 @@ class PlayerManager:
         self._detected_sync_master_name = None
         await self._teardown_session(session)
         self.storage.set_active_profile_id(None)
-        log.info("Deactivated profile %s", session.profile.name)
+        self.storage.set_active_coupling_id(None)
+        if session.coupling:
+            log.info("Deactivated coupling %s", session.coupling.name)
+        else:
+            log.info("Deactivated profile %s", session.profile.name)
 
     async def _teardown_session(self, session: ActiveSession) -> None:
         if session.poller_task:
@@ -357,9 +548,16 @@ class PlayerManager:
             raise RuntimeError("No active session")
         session = self._active
 
-        profile = self.storage.get_profile(session.profile.id)
-        if profile is None:
-            raise RuntimeError("Active profile no longer in storage")
+        if session.coupling:
+            # Coupling mode: reload entities from storage and rebuild profile.
+            profile = build_profile_from_coupling(session.coupling, self.storage)
+            if profile is None:
+                raise RuntimeError("Active coupling has broken FK references")
+            self.storage.save_profile(profile)
+        else:
+            profile = self.storage.get_profile(session.profile.id)
+            if profile is None:
+                raise RuntimeError("Active profile no longer in storage")
         session.profile = profile
         if session.sync_engine is not None:
             session.sync_engine.update_profile(profile)
@@ -579,8 +777,13 @@ class PlayerManager:
         if not profile.player_mac:
             profile.player_mac = generate_locally_administered_mac()
             self.storage.save_profile(profile)
+            if session.coupling:
+                player = self.storage.get_player(session.coupling.player_id)
+                if player:
+                    player.player_mac = profile.player_mac
+                    self.storage.save_player(player)
             log.info(
-                "Generated missing player_mac %s for profile %s",
+                "Generated missing player_mac %s for %s",
                 profile.player_mac, profile.name,
             )
 

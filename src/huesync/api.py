@@ -25,7 +25,7 @@ from .models import (
     Profile,
     RenderConfig,
 )
-from .player_manager import PlayerManager
+from .player_manager import PlayerManager, build_profile_from_coupling
 from .storage import Storage
 from .util import generate_locally_administered_mac
 
@@ -338,49 +338,6 @@ _C_FK_FIELDS: frozenset[str] = frozenset({
 })
 
 
-def _build_profile_from_coupling(coupling: Coupling, storage: Storage) -> Profile | None:
-    """Build a Profile from a Coupling's linked entities.
-
-    Bridge for Phase 2b: PlayerManager still speaks Profile.  Replaced in
-    Phase 2c when PlayerManager is adapted to work with Coupling + entities.
-    Returns None if any linked entity is missing (broken FK).
-    """
-    player = storage.get_player(coupling.player_id)
-    lp = storage.get_light_provider(coupling.light_provider_id)
-    ac = storage.get_analysis_config(coupling.analysis_config_id)
-    rc = storage.get_render_config(coupling.render_config_id)
-    if not all([player, lp, ac, rc]):
-        return None
-    return Profile(
-        id=coupling.id,
-        name=coupling.name,
-        lms_host=player.lms_host,
-        lms_port=player.lms_port,
-        player_name=player.player_name,
-        player_mac=player.player_mac,
-        alsa_device=player.alsa_device,
-        bridge_id=lp.controller_id,
-        entertainment_area_id=lp.entertainment_area_id,
-        entertainment_area_name=lp.entertainment_area_name,
-        light_count=lp.light_count,
-        color_mode=rc.color_mode,
-        sensitivity=rc.sensitivity,
-        brightness_floor=rc.brightness_floor,
-        bass_hz=rc.bass_hz,
-        mid_hz=rc.mid_hz,
-        exertion_clip=rc.exertion_clip,
-        onset_method=ac.onset_method,
-        onset_delta=ac.onset_delta,
-        onset_alpha=ac.onset_alpha,
-        superflux_mu=ac.superflux_mu,
-        superflux_lag=ac.superflux_lag,
-        bars=ac.bars,
-        lower_cutoff_freq=ac.lower_cutoff_freq,
-        higher_cutoff_freq=ac.higher_cutoff_freq,
-        enabled=coupling.enabled,
-    )
-
-
 async def _apply_coupling_action(
     coupling: Coupling,
     storage: Storage,
@@ -390,8 +347,9 @@ async def _apply_coupling_action(
     """Rebuild Profile from entities and call the right PlayerManager action.
 
     Called after entity saves so the Profile reflects the updated values.
+    Uses build_profile_from_coupling from player_manager (single source of truth).
     """
-    profile = _build_profile_from_coupling(coupling, storage)
+    profile = build_profile_from_coupling(coupling, storage)
     if not profile:
         return
     storage.save_profile(profile)
@@ -1157,12 +1115,7 @@ async def delete_coupling(coupling_id: str, request: Request):
 
 @router.post("/couplings/{coupling_id}/activate")
 async def activate_coupling(coupling_id: str, request: Request):
-    """Activate a Coupling.
-
-    Bridge implementation: builds a Profile from the linked entities and
-    activates via the existing PlayerManager.  Replaced in Phase 2c when
-    PlayerManager is adapted to work with Coupling natively.
-    """
+    """Activate a Coupling via PlayerManager.activate_coupling()."""
     storage = _storage(request)
     manager = _manager(request)
 
@@ -1170,21 +1123,11 @@ async def activate_coupling(coupling_id: str, request: Request):
     if coupling is None:
         raise HTTPException(status_code=404, detail="Coupling not found")
 
-    profile = _build_profile_from_coupling(coupling, storage)
-    if profile is None:
-        raise HTTPException(
-            status_code=422,
-            detail="Coupling has broken foreign-key references; ensure all linked entities exist.",
-        )
-
-    # Persist profile so that restart_cava() (which reloads from storage) sees
-    # the correct values for this coupling.
-    storage.save_profile(profile)
-
     try:
-        await manager.activate(profile)
+        await manager.activate_coupling(coupling)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    storage.set_active_coupling_id(coupling_id)
     return {"active_id": coupling_id, "warnings": []}

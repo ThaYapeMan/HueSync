@@ -9,8 +9,20 @@ import asyncio
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from huesync.models import Profile
-from huesync.player_manager import ActiveSession, PlayerManager
+import pytest
+
+from huesync.models import (
+    AnalysisConfig,
+    ColorMode,
+    Controller,
+    ControllerType,
+    Coupling,
+    LightProvider,
+    Player,
+    Profile,
+    RenderConfig,
+)
+from huesync.player_manager import ActiveSession, PlayerManager, build_profile_from_coupling
 from huesync.storage import Storage
 
 
@@ -177,3 +189,203 @@ def test_cleanup_orphaned_shm_removes_multiple(tmp_path: Path) -> None:
     assert not any(p.exists() for p in paths), (
         "cleanup_orphaned_shm() should have removed all three segments"
     )
+
+
+# ---------------------------------------------------------------------------
+# Helpers for Phase-2c tests
+# ---------------------------------------------------------------------------
+
+
+def _make_full_storage(tmp_path: Path) -> tuple[Storage, Coupling]:
+    """Create a Storage pre-populated with one complete set of linked entities."""
+    storage = Storage(tmp_path / "config.json")
+
+    controller = Controller(
+        id="ctrl-1", name="Hue Bridge", type=ControllerType.HUE,
+        host="192.168.1.50", app_key="app-key", client_key="client-key",
+    )
+    storage.save_controller(controller)
+
+    player = Player(
+        id="player-1", name="Living Room", lms_host="192.168.1.10", lms_port=9000,
+        player_name="HueSync", player_mac="aa:bb:cc:dd:ee:ff", alsa_device="",
+    )
+    storage.save_player(player)
+
+    lp = LightProvider(
+        id="lp-1", name="Living AE", controller_id="ctrl-1",
+        entertainment_area_id="ae-001", entertainment_area_name="Living Room AE",
+        light_count=4,
+    )
+    storage.save_light_provider(lp)
+
+    ac = AnalysisConfig(
+        id="ac-1", name="Default", onset_method="combined", onset_delta=0.1,
+        onset_alpha=0.9, superflux_mu=3, superflux_lag=2, bars=30,
+        lower_cutoff_freq=50, higher_cutoff_freq=12000,
+    )
+    storage.save_analysis_config(ac)
+
+    rc = RenderConfig(
+        id="rc-1", name="Default", color_mode=ColorMode.SPECTRUM_RGB,
+        sensitivity=1.0, brightness_floor=0.15, bass_hz=250, mid_hz=2000,
+        exertion_clip=3.0,
+    )
+    storage.save_render_config(rc)
+
+    coupling = Coupling(
+        id="coupling-1", name="Living Room",
+        player_id="player-1", analysis_config_id="ac-1",
+        light_provider_id="lp-1", render_config_id="rc-1", enabled=True,
+    )
+    storage.save_coupling(coupling)
+
+    return storage, coupling
+
+
+# ---------------------------------------------------------------------------
+# build_profile_from_coupling
+# ---------------------------------------------------------------------------
+
+
+def test_build_profile_from_coupling_maps_all_fields(tmp_path: Path) -> None:
+    storage, coupling = _make_full_storage(tmp_path)
+    profile = build_profile_from_coupling(coupling, storage)
+
+    assert profile is not None
+    assert profile.id == "coupling-1"
+    assert profile.name == "Living Room"
+    assert profile.lms_host == "192.168.1.10"
+    assert profile.player_mac == "aa:bb:cc:dd:ee:ff"
+    assert profile.bridge_id == "ctrl-1"
+    assert profile.entertainment_area_id == "ae-001"
+    assert profile.entertainment_area_name == "Living Room AE"
+    assert profile.light_count == 4
+    assert profile.color_mode == ColorMode.SPECTRUM_RGB
+    assert profile.sensitivity == 1.0
+    assert profile.bass_hz == 250
+    assert profile.onset_method == "combined"
+    assert profile.bars == 30
+    assert profile.lower_cutoff_freq == 50
+    assert profile.enabled is True
+
+
+def test_build_profile_from_coupling_returns_none_on_missing_player(tmp_path: Path) -> None:
+    storage, coupling = _make_full_storage(tmp_path)
+    storage.delete_player("player-1")
+    assert build_profile_from_coupling(coupling, storage) is None
+
+
+def test_build_profile_from_coupling_returns_none_on_missing_lp(tmp_path: Path) -> None:
+    storage, coupling = _make_full_storage(tmp_path)
+    storage.delete_light_provider("lp-1")
+    assert build_profile_from_coupling(coupling, storage) is None
+
+
+def test_build_profile_from_coupling_returns_none_on_missing_ac(tmp_path: Path) -> None:
+    storage, coupling = _make_full_storage(tmp_path)
+    storage.delete_analysis_config("ac-1")
+    assert build_profile_from_coupling(coupling, storage) is None
+
+
+def test_build_profile_from_coupling_returns_none_on_missing_rc(tmp_path: Path) -> None:
+    storage, coupling = _make_full_storage(tmp_path)
+    storage.delete_render_config("rc-1")
+    assert build_profile_from_coupling(coupling, storage) is None
+
+
+# ---------------------------------------------------------------------------
+# activate_coupling — validation (before Hue calls)
+# ---------------------------------------------------------------------------
+
+
+def test_activate_coupling_raises_on_missing_player(tmp_path: Path) -> None:
+    storage, coupling = _make_full_storage(tmp_path)
+    storage.delete_player("player-1")
+    manager = PlayerManager(storage)
+
+    with pytest.raises(ValueError, match="missing Player"):
+        asyncio.run(manager.activate_coupling(coupling))
+
+
+def test_activate_coupling_raises_on_missing_light_provider(tmp_path: Path) -> None:
+    storage, coupling = _make_full_storage(tmp_path)
+    storage.delete_light_provider("lp-1")
+    manager = PlayerManager(storage)
+
+    with pytest.raises(ValueError, match="missing LightProvider"):
+        asyncio.run(manager.activate_coupling(coupling))
+
+
+def test_activate_coupling_raises_on_missing_analysis_config(tmp_path: Path) -> None:
+    storage, coupling = _make_full_storage(tmp_path)
+    storage.delete_analysis_config("ac-1")
+    manager = PlayerManager(storage)
+
+    with pytest.raises(ValueError, match="missing AnalysisConfig"):
+        asyncio.run(manager.activate_coupling(coupling))
+
+
+def test_activate_coupling_raises_on_missing_render_config(tmp_path: Path) -> None:
+    storage, coupling = _make_full_storage(tmp_path)
+    storage.delete_render_config("rc-1")
+    manager = PlayerManager(storage)
+
+    with pytest.raises(ValueError, match="missing RenderConfig"):
+        asyncio.run(manager.activate_coupling(coupling))
+
+
+def test_activate_coupling_raises_on_missing_controller(tmp_path: Path) -> None:
+    storage, coupling = _make_full_storage(tmp_path)
+    storage.delete_controller("ctrl-1")
+    manager = PlayerManager(storage)
+
+    with pytest.raises(ValueError, match="missing Controller"):
+        asyncio.run(manager.activate_coupling(coupling))
+
+
+# ---------------------------------------------------------------------------
+# active_coupling_id property
+# ---------------------------------------------------------------------------
+
+
+def test_active_coupling_id_none_when_inactive(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    assert manager.active_coupling_id is None
+
+
+def test_active_coupling_id_none_for_profile_mode(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    profile = Profile(player_mac="aa:bb:cc:dd:ee:ff")
+    manager._active = ActiveSession(profile, coupling=None)
+    assert manager.active_coupling_id is None
+
+
+def test_active_coupling_id_set_for_coupling_mode(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    profile = Profile(id="coupling-1", player_mac="aa:bb:cc:dd:ee:ff")
+    coupling = Coupling(id="coupling-1", name="Test")
+    manager._active = ActiveSession(profile, coupling=coupling)
+    assert manager.active_coupling_id == "coupling-1"
+
+
+# ---------------------------------------------------------------------------
+# deactivate clears both active IDs in storage
+# ---------------------------------------------------------------------------
+
+
+def test_deactivate_clears_active_coupling_id(tmp_path: Path) -> None:
+    storage = Storage(tmp_path / "config.json")
+    storage.set_active_coupling_id("coupling-1")
+    storage.set_active_profile_id("coupling-1")
+
+    manager = PlayerManager(storage)
+    profile = Profile(id="coupling-1", player_mac="aa:bb:cc:dd:ee:ff")
+    coupling = Coupling(id="coupling-1", name="Test")
+    manager._active = ActiveSession(profile, coupling=coupling)
+
+    asyncio.run(manager.deactivate())
+
+    assert storage.get_active_coupling_id() is None
+    assert storage.get_active_profile_id() is None
+    assert manager.active_coupling_id is None
