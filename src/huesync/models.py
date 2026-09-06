@@ -14,6 +14,12 @@ from enum import StrEnum
 log = logging.getLogger(__name__)
 
 
+# Canonical set of onset detection method identifiers.  SyncEngine switches on
+# these exact strings; any other value silently falls through to cava-based
+# detection.  Keep in sync with ONSET_METHODS in web/src/lib/api.ts.
+ONSET_METHODS: frozenset[str] = frozenset({"combined", "multiband", "superflux"})
+
+
 class ColorMode(StrEnum):
     """How cava's spectrum bars are translated into a Hue colour.
 

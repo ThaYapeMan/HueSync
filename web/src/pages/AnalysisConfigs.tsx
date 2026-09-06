@@ -26,6 +26,7 @@ import {
 } from '@/components/ui/select'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
 import {
+  ONSET_METHODS,
   type AnalysisConfig,
   getAnalysisConfigs,
   createAnalysisConfig,
@@ -228,9 +229,9 @@ export function AnalysisConfigs() {
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="combined">Combined</SelectItem>
-                  <SelectItem value="superflux">SuperFlux</SelectItem>
-                  <SelectItem value="hfc">HFC</SelectItem>
+                  {ONSET_METHODS.map((m) => (
+                    <SelectItem key={m.value} value={m.value}>{m.label}</SelectItem>
+                  ))}
                 </SelectContent>
               </Select>
             </FormRow>

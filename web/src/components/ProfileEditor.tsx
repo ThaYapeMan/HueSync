@@ -18,6 +18,7 @@ import {
 } from '@/components/ui/select'
 import { SliderField } from '@/components/SliderField'
 import {
+  ONSET_METHODS,
   type Bridge,
   type EntertainmentArea,
   type LmsServer,
@@ -387,9 +388,9 @@ export function ProfileEditor({ profile, bridges, onSave, onClose, open }: Props
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="combined">Combined (cava, 30 Hz)</SelectItem>
-                  <SelectItem value="multiband">Multiband (PCM tap, 100 Hz)</SelectItem>
-                  <SelectItem value="superflux">SuperFlux (PCM tap, 100 Hz)</SelectItem>
+                  {ONSET_METHODS.map((m) => (
+                    <SelectItem key={m.value} value={m.value}>{m.label}</SelectItem>
+                  ))}
                 </SelectContent>
               </Select>
               <p className="text-xs text-muted-foreground mt-1">

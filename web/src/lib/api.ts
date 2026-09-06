@@ -1,3 +1,14 @@
+// Canonical list of onset detection methods accepted by the backend.
+// sync_engine.py switches on these exact string values; any value not in this
+// list silently falls through to cava-based onset (combined behaviour).
+export const ONSET_METHODS = [
+  { value: 'combined',  label: 'Combined (cava, 30 Hz)' },
+  { value: 'multiband', label: 'Multiband (PCM tap, 100 Hz)' },
+  { value: 'superflux', label: 'SuperFlux (PCM tap, 100 Hz)' },
+] as const
+
+export type OnsetMethod = typeof ONSET_METHODS[number]['value']
+
 export interface Bridge {
   id: string
   name: string
