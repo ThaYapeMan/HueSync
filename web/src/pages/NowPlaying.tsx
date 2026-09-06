@@ -212,6 +212,13 @@ function CouplingSelector({
           )}
         </div>
 
+        <p className="text-xs text-muted-foreground italic leading-snug">
+          Not for analysis purposes — switching couplings restarts the session
+          (squeezelite, cava, DTLS) and resets the BandNormaliser EMA. For a
+          live A/B comparison of analysis settings, edit the active Coupling
+          directly and change only the onset_method field.
+        </p>
+
         {error && (
           <p className="text-sm text-destructive">{error}</p>
         )}
