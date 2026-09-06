@@ -448,4 +448,13 @@ and more. The effect engine spec is in
 
 ## License
 
-MIT, see [LICENSE](LICENSE).
+[PolyForm Noncommercial 1.0.0](LICENSE) — non-commercial use only.
+
+**Attribution is required for all use**, including non-commercial use. Anyone
+who receives a copy of this software (fork, download, redistribution) must
+preserve and pass on the following notice:
+
+> Required Notice: Copyright (c) 2026 Jaap van Vliet
+
+This is not optional — the license explicitly mandates it in the Notices
+section.
