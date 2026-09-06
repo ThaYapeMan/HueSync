@@ -786,6 +786,7 @@ class SyncEngine:
         self._last_onset_bass: bool = False
         self._last_onset_mid: bool = False
         self._last_onset_treble: bool = False
+        self._diag_frame: int = 0
 
     def attach_shm_source(self, source: SqueezeliteShmSource) -> None:
         """Connect a SHM source for the PCM-tap onset pipeline.
@@ -920,6 +921,15 @@ class SyncEngine:
                 self._last_bars = features.bars
                 scene: Scene = self._effect.render(features, t)
                 self._delay_buffer.append(scene)
+                self._diag_frame += 1
+                if self._diag_frame % 300 == 0:
+                    bars = features.bars
+                    log.info(
+                        "[diag] onset_method=%s bars_mean=%.3f bars_max=%.3f",
+                        self.profile.onset_method,
+                        sum(bars) / len(bars) if bars else 0.0,
+                        max(bars) if bars else 0.0,
+                    )
             else:
                 # None slot: advances the buffer in time without sending,
                 # so the delay stays consistent even during silent passages.

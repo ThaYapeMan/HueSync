@@ -387,6 +387,12 @@ async def lms_discover():
 @router.get("/status")
 async def get_status(request: Request):
     manager = _manager(request)
+    bars = manager.last_bars
+    bars_stats = {
+        "mean": round(sum(bars) / len(bars), 4) if bars else None,
+        "max": round(max(bars), 4) if bars else None,
+        "n": len(bars),
+    }
     return {
         "version": _VERSION_STRING,
         "active_profile_id": manager.active_profile_id,
@@ -397,4 +403,5 @@ async def get_status(request: Request):
         "latency_warning": manager.latency_warning,
         "processes": manager.process_status,
         "bridge_connected": manager.bridge_connected,
+        "bars_stats": bars_stats,
     }
