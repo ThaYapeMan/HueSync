@@ -481,3 +481,88 @@ def test_sync_engine_update_profile_takes_effect():
 
     assert colour_before.r > colour_after.r, "After update_profile, red should decrease"
     assert colour_after.g > colour_before.g, "After update_profile, green should increase"
+
+
+# ---------------------------------------------------------------------------
+# SyncEngine.update_onset_pipeline and update_render
+# ---------------------------------------------------------------------------
+
+
+def test_update_onset_pipeline_clears_state():
+    """update_onset_pipeline() resets all onset flags regardless of shm source."""
+    from huesync.sync_engine import SyncEngine
+
+    fifo = "/tmp/_nonexistent_fifo_for_test_pipeline"
+    profile = Profile(onset_method="combined")
+    engine = SyncEngine(fifo, profile)
+    # Manually set flags as if a detection had fired.
+    engine._last_pcm_onset = True
+    engine._last_onset_bass = True
+    engine._last_onset_mid = True
+    engine._last_onset_treble = True
+
+    engine.update_onset_pipeline(profile)
+
+    assert not engine._last_pcm_onset
+    assert not engine._last_onset_bass
+    assert not engine._last_onset_mid
+    assert not engine._last_onset_treble
+
+
+def test_update_onset_pipeline_without_shm_nulls_pipelines():
+    """Without a SHM source attached, all PCM pipelines are None after update."""
+    from huesync.sync_engine import SyncEngine
+
+    fifo = "/tmp/_nonexistent_fifo_for_test_pipeline2"
+    engine = SyncEngine(fifo, Profile(onset_method="combined"))
+
+    engine.update_onset_pipeline(Profile(onset_method="multiband"))
+    assert engine._pcm_onset is None
+    assert engine._pcm_multiband is None
+    assert engine._pcm_superflux is None
+
+
+def test_update_render_updates_exertion_clip():
+    """update_render() must propagate the new exertion_clip to BandNormaliser."""
+    from huesync.sync_engine import CavaAnalyser, SyncEngine
+
+    fifo = "/tmp/_nonexistent_fifo_for_test_render"
+    profile = Profile(exertion_clip=3.0)
+    engine = SyncEngine(fifo, profile)
+
+    new_profile = Profile(exertion_clip=2.0)
+    engine.update_render(new_profile)
+
+    assert isinstance(engine._analyser, CavaAnalyser)
+    assert engine._analyser.normaliser.exertion_clip == pytest.approx(2.0)
+
+
+def test_update_render_replaces_effect():
+    """update_render() must create a new ColourModeEffect with the updated profile."""
+    from huesync.sync_engine import SyncEngine
+
+    fifo = "/tmp/_nonexistent_fifo_for_test_render2"
+    profile = Profile(sensitivity=1.0)
+    engine = SyncEngine(fifo, profile)
+    old_effect = engine._effect
+
+    engine.update_render(Profile(sensitivity=2.0))
+
+    assert engine._effect is not old_effect
+    assert engine._effect.profile.sensitivity == pytest.approx(2.0)
+
+
+def test_band_normaliser_update_exertion_clip_preserves_ema():
+    """update_exertion_clip() changes the clip ratio without touching EMA state."""
+    from huesync.sync_engine import BandNormaliser
+
+    norm = BandNormaliser(exertion_clip=3.0)
+    # Warm up EMA with a frame so _ema is no longer None.
+    frame = bytes([100, 100, 100, 100])
+    norm.normalise(frame)
+    ema_before = list(norm._ema)  # type: ignore[arg-type]
+
+    norm.update_exertion_clip(2.0)
+
+    assert norm.exertion_clip == pytest.approx(2.0)
+    assert norm._ema == ema_before  # EMA unchanged

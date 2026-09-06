@@ -173,6 +173,14 @@ class BandNormaliser:
         # known at construction time.
         self._ema: list[float] | None = None
 
+    def update_exertion_clip(self, clip: float) -> None:
+        """Update exertion_clip without resetting the EMA.
+
+        Changing the clip only affects how exertion ratios are encoded to bytes;
+        the rolling average state remains valid and warmup is not lost.
+        """
+        self.exertion_clip = clip
+
     def normalise(self, frame: bytes) -> bytes:
         """Return an exertion-normalised copy of *frame* as bytes (0-255).
 
@@ -635,6 +643,10 @@ class CavaAnalyser:
     def stop(self) -> None:
         self._reader.stop()
 
+    @property
+    def normaliser(self) -> BandNormaliser:
+        return self._normaliser
+
     def latest(self) -> AudioFeatures | None:
         frame = self._reader.latest_frame()
         if frame is None:
@@ -832,6 +844,70 @@ class SyncEngine:
         """Rebuild the effect with a new profile. Call after saving band/cutoff changes."""
         self.profile = profile
         self._effect = ColourModeEffect(profile)
+
+    def update_onset_pipeline(self, profile: Profile) -> None:
+        """Switch the PCM-tap onset detection method without restarting any process.
+
+        Tears down the current onset pipeline and builds a new one from
+        profile.onset_method.  squeezelite, cava, and the Hue Entertainment
+        session continue running without interruption.
+
+        Side effect: onset warmup state (_last_pcm_onset, _last_onset_bass/mid/
+        treble) resets to False.  The new pipeline's OnsetDetector needs ~30
+        frames (~0.3 s at 100 Hz) to accumulate enough history for reliable
+        detections.  This is a much smaller disturbance than a full
+        deactivate/reactivate cycle (which resets BandNormaliser EMA and the
+        Hue DTLS session too), but it is not zero — when measuring A/B
+        differences between onset methods, wait at least 5 s after switching
+        before comparing bars_mean values.
+        """
+        # Reset state before rebuilding.  All assignments are atomic under the
+        # GIL; run() is a coroutine in the same event-loop thread, so there is
+        # no concurrent access to these attributes.
+        self._pcm_onset = None
+        self._pcm_multiband = None
+        self._pcm_superflux = None
+        self._last_pcm_onset = False
+        self._last_onset_bass = False
+        self._last_onset_mid = False
+        self._last_onset_treble = False
+        self.profile = profile
+
+        if self._shm_source is not None:
+            method = profile.onset_method
+            if method == "multiband":
+                self._pcm_multiband = MultibandStftPipeline(
+                    self._shm_source.sample_rate,
+                    bass_hz=profile.bass_hz,
+                    mid_hz=profile.mid_hz,
+                    delta=profile.onset_delta,
+                    alpha=profile.onset_alpha,
+                )
+            elif method == "superflux":
+                self._pcm_superflux = SuperfluxStftPipeline(
+                    self._shm_source.sample_rate,
+                    mu=profile.superflux_mu,
+                    lag=profile.superflux_lag,
+                    delta=profile.onset_delta,
+                    alpha=profile.onset_alpha,
+                )
+            else:
+                self._pcm_onset = StftOnsetPipeline(
+                    self._shm_source.sample_rate,
+                    delta=profile.onset_delta,
+                    alpha=profile.onset_alpha,
+                )
+
+    def update_render(self, profile: Profile) -> None:
+        """Apply render-only profile changes without restarting any process.
+
+        Updates ColourModeEffect and BandNormaliser.exertion_clip live.
+        Safe to call while run() is active.
+        """
+        self.profile = profile
+        self._effect = ColourModeEffect(profile)
+        if isinstance(self._analyser, CavaAnalyser):
+            self._analyser.normaliser.update_exertion_clip(profile.exertion_clip)
 
     @property
     def last_onset(self) -> bool:

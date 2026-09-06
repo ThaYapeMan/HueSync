@@ -375,6 +375,16 @@ class PlayerManager:
         self._start_cava(session, profile)
         log.info("cava restarted for profile %s", profile.name)
 
+    def update_onset_pipeline(self, profile: Profile) -> None:
+        """Switch PCM onset method live on the active session."""
+        if self._active and self._active.sync_engine:
+            self._active.sync_engine.update_onset_pipeline(profile)
+
+    def update_render(self, profile: Profile) -> None:
+        """Apply render-only changes live on the active session."""
+        if self._active and self._active.sync_engine:
+            self._active.sync_engine.update_render(profile)
+
     async def refresh_probe(self) -> None:
         """Re-evaluate the latency probe for the current sync master.
 

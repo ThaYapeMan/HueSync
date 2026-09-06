@@ -39,7 +39,11 @@ def _make_mock_manager() -> MagicMock:
     # Async methods
     manager.activate = AsyncMock()
     manager.deactivate = AsyncMock()
+    manager.restart_cava = AsyncMock()
     manager.refresh_probe = AsyncMock()
+    # Sync live-update methods
+    manager.update_onset_pipeline = MagicMock()
+    manager.update_render = MagicMock()
     return manager
 
 
@@ -271,3 +275,115 @@ def test_get_status_returns_correct_shape(client: TestClient):
     assert "squeezelite" in body["processes"]
     assert "cava" in body["processes"]
     assert "bridge_connected" in body
+
+
+# ---------------------------------------------------------------------------
+# patch_profile routing — smart session update
+# ---------------------------------------------------------------------------
+
+
+def test_patch_player_field_deactivates_session(client: TestClient):
+    """Changing a player-level field (lms_host) must trigger deactivate."""
+    profile = Profile(name="R", lms_host="10.0.0.1")
+    client._storage.save_profile(profile)
+    client._manager.active_profile_id = profile.id
+
+    resp = client.patch(f"/api/profiles/{profile.id}", json={"lms_host": "10.0.0.2"})
+    assert resp.status_code == 200
+    client._manager.deactivate.assert_awaited_once()
+    client._manager.restart_cava.assert_not_awaited()
+    client._manager.update_onset_pipeline.assert_not_called()
+
+
+def test_patch_cava_field_restarts_cava_not_deactivate(client: TestClient):
+    """Changing a cava-level field (lower_cutoff_freq) must restart cava, not deactivate."""
+    profile = Profile(name="R", lower_cutoff_freq=50)
+    client._storage.save_profile(profile)
+    client._manager.active_profile_id = profile.id
+
+    resp = client.patch(f"/api/profiles/{profile.id}", json={"lower_cutoff_freq": 80})
+    assert resp.status_code == 200
+    client._manager.restart_cava.assert_awaited_once()
+    client._manager.deactivate.assert_not_awaited()
+    client._manager.update_onset_pipeline.assert_not_called()
+
+
+def test_patch_pcm_field_updates_onset_pipeline_not_cava_not_deactivate(client: TestClient):
+    """Changing onset_method must call update_onset_pipeline, not deactivate or restart_cava."""
+    profile = Profile(name="R", onset_method="combined")
+    client._storage.save_profile(profile)
+    client._manager.active_profile_id = profile.id
+
+    resp = client.patch(f"/api/profiles/{profile.id}", json={"onset_method": "multiband"})
+    assert resp.status_code == 200
+    client._manager.update_onset_pipeline.assert_called_once()
+    client._manager.deactivate.assert_not_awaited()
+    client._manager.restart_cava.assert_not_awaited()
+
+
+def test_patch_render_field_calls_update_render_only(client: TestClient):
+    """Changing sensitivity (render-only) must call update_render and nothing else."""
+    profile = Profile(name="R", sensitivity=1.0)
+    client._storage.save_profile(profile)
+    client._manager.active_profile_id = profile.id
+
+    resp = client.patch(f"/api/profiles/{profile.id}", json={"sensitivity": 1.5})
+    assert resp.status_code == 200
+    client._manager.update_render.assert_called_once()
+    client._manager.deactivate.assert_not_awaited()
+    client._manager.restart_cava.assert_not_awaited()
+    client._manager.update_onset_pipeline.assert_not_called()
+
+
+def test_patch_player_field_wins_over_render(client: TestClient):
+    """When player and render fields change together, deactivate wins (player > render)."""
+    profile = Profile(name="R", lms_host="10.0.0.1", sensitivity=1.0)
+    client._storage.save_profile(profile)
+    client._manager.active_profile_id = profile.id
+
+    resp = client.patch(
+        f"/api/profiles/{profile.id}",
+        json={"lms_host": "10.0.0.2", "sensitivity": 1.5},
+    )
+    assert resp.status_code == 200
+    client._manager.deactivate.assert_awaited_once()
+    client._manager.restart_cava.assert_not_awaited()
+    client._manager.update_onset_pipeline.assert_not_called()
+
+
+def test_patch_cava_wins_over_pcm(client: TestClient):
+    """When cava and pcm fields change together, restart_cava is called (cava > pcm).
+
+    update_onset_pipeline is ALSO called — cava restart handles the cava process
+    but the PCM pipeline still needs rebuilding for onset_method changes.
+    """
+    profile = Profile(name="R", lower_cutoff_freq=50, onset_method="combined")
+    client._storage.save_profile(profile)
+    client._manager.active_profile_id = profile.id
+
+    resp = client.patch(
+        f"/api/profiles/{profile.id}",
+        json={"lower_cutoff_freq": 80, "onset_method": "multiband"},
+    )
+    assert resp.status_code == 200
+    client._manager.restart_cava.assert_awaited_once()
+    client._manager.deactivate.assert_not_awaited()
+    # PCM pipeline rebuild runs in addition to cava restart.
+    client._manager.update_onset_pipeline.assert_called_once()
+
+
+def test_patch_inactive_profile_no_session_action(client: TestClient):
+    """Patching an inactive profile must not call deactivate or any live-update method."""
+    profile = Profile(name="R", lms_host="10.0.0.1", onset_method="combined", sensitivity=1.0)
+    client._storage.save_profile(profile)
+    # manager.active_profile_id stays None — profile is not active.
+
+    resp = client.patch(
+        f"/api/profiles/{profile.id}",
+        json={"lms_host": "10.0.0.2", "onset_method": "multiband", "sensitivity": 1.5},
+    )
+    assert resp.status_code == 200
+    client._manager.deactivate.assert_not_awaited()
+    client._manager.restart_cava.assert_not_awaited()
+    client._manager.update_onset_pipeline.assert_not_called()
+    client._manager.update_render.assert_not_called()

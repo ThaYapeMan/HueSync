@@ -105,6 +105,37 @@ class PlayerLatencyPatchBody(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Field categories for patch_profile routing
+# ---------------------------------------------------------------------------
+#
+# Priority order (most to least disruptive):
+#   _PLAYER_FIELDS > _CAVA_FIELDS > _PCM_FIELDS > _RENDER_FIELDS
+#
+# A field not listed in any set (e.g. "name") is treated as pure metadata:
+# it is saved to storage but triggers no process-level action on an active
+# session.
+
+_PLAYER_FIELDS: frozenset[str] = frozenset({
+    "lms_host", "lms_port", "player_name", "player_mac", "alsa_device",
+    "bridge_id", "entertainment_area_id",
+})
+_CAVA_FIELDS: frozenset[str] = frozenset({
+    "bars", "lower_cutoff_freq", "higher_cutoff_freq",
+})
+_PCM_FIELDS: frozenset[str] = frozenset({
+    "onset_method", "onset_delta", "onset_alpha", "superflux_mu", "superflux_lag",
+    "bass_hz", "mid_hz",  # also affect MultibandStftPipeline band boundaries
+})
+_RENDER_FIELDS: frozenset[str] = frozenset({
+    "color_mode", "sensitivity", "brightness_floor", "exertion_clip", "enabled",
+    "entertainment_area_name", "light_count",
+})
+_ALL_ACTIVE_FIELDS: frozenset[str] = (
+    _PLAYER_FIELDS | _CAVA_FIELDS | _PCM_FIELDS | _RENDER_FIELDS
+)
+
+
 def _storage(request: Request) -> Storage:
     return request.app.state.storage
 
@@ -224,7 +255,6 @@ async def patch_profile(profile_id: str, request: Request, body: ProfilePatchBod
         raise HTTPException(status_code=404, detail="Profile not found")
 
     updates = body.model_dump(exclude_unset=True)
-
     was_active = manager.active_profile_id == profile_id
 
     if updates:
@@ -233,10 +263,29 @@ async def patch_profile(profile_id: str, request: Request, body: ProfilePatchBod
                 value = ColorMode(value)
             setattr(profile, field, value)
 
-        if was_active:
-            await manager.deactivate()
-
+        # Save before taking any action so that restart_cava() — which reads
+        # the profile from storage — sees the updated values.
         storage.save_profile(profile)
+
+        if was_active:
+            changed = set(updates.keys())
+            if changed & _ALL_ACTIVE_FIELDS:
+                if changed & _PLAYER_FIELDS:
+                    # Full teardown: squeezelite, cava, and the Hue DTLS
+                    # session must all be rebuilt with the new player params.
+                    await manager.deactivate()
+                else:
+                    # Non-deactivating updates: apply the appropriate restart
+                    # for the most disruptive changed field, then always sync
+                    # render settings.  update_render() is always called so
+                    # that exertion_clip reaches BandNormaliser and so that
+                    # bass_hz/mid_hz (which affect both the PCM pipeline and
+                    # ColourModeEffect) are applied to both layers.
+                    if changed & _CAVA_FIELDS:
+                        await manager.restart_cava()
+                    if changed & _PCM_FIELDS:
+                        manager.update_onset_pipeline(profile)
+                    manager.update_render(profile)
 
     return profile.to_dict()
 
