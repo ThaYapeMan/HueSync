@@ -897,6 +897,12 @@ class SyncEngine:
                     delta=profile.onset_delta,
                     alpha=profile.onset_alpha,
                 )
+        log.info(
+            "[diag] update_onset_pipeline: method=%s (BandNormaliser EMA preserved, "
+            "frame counter=%d)",
+            profile.onset_method,
+            self._diag_frame,
+        )
 
     def update_render(self, profile: Profile) -> None:
         """Apply render-only profile changes without restarting any process.
@@ -998,13 +1004,34 @@ class SyncEngine:
                 scene: Scene = self._effect.render(features, t)
                 self._delay_buffer.append(scene)
                 self._diag_frame += 1
-                if self._diag_frame % 300 == 0:
+                if self._diag_frame % 60 == 0:
                     bars = features.bars
+                    n = len(bars)
+                    bars_mean = sum(bars) / n if bars else 0.0
+                    bars_max = max(bars) if bars else 0.0
+                    bass_frac = _hz_to_frac(
+                        self.profile.bass_hz,
+                        self.profile.lower_cutoff_freq,
+                        self.profile.higher_cutoff_freq,
+                    )
+                    mid_frac = _hz_to_frac(
+                        self.profile.mid_hz,
+                        self.profile.lower_cutoff_freq,
+                        self.profile.higher_cutoff_freq,
+                    )
+                    bass_hi = int(bass_frac * n)
+                    mid_hi = int(mid_frac * n)
                     log.info(
-                        "[diag] onset_method=%s bars_mean=%.3f bars_max=%.3f",
+                        "[diag] method=%s frame=%d "
+                        "bars_mean=%.3f bars_max=%.3f "
+                        "bass_mean=%.3f mid_mean=%.3f treble_mean=%.3f",
                         self.profile.onset_method,
-                        sum(bars) / len(bars) if bars else 0.0,
-                        max(bars) if bars else 0.0,
+                        self._diag_frame,
+                        bars_mean,
+                        bars_max,
+                        _band_avg(bars, 0, bass_hi),
+                        _band_avg(bars, bass_hi, mid_hi),
+                        _band_avg(bars, mid_hi, n),
                     )
             else:
                 # None slot: advances the buffer in time without sending,
