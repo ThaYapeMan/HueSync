@@ -4,6 +4,7 @@ export interface SocketStatus {
   version: string | null
   active_profile_id: string | null
   active_profile_name: string | null
+  active_coupling_id: string | null
   sync_master: string | null
   sync_master_name: string | null
   applied_delay_ms: number

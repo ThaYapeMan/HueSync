@@ -4,16 +4,24 @@ import { NowPlaying } from '@/pages/NowPlaying'
 import { Profiles } from '@/pages/Profiles'
 import { Bridges } from '@/pages/Bridges'
 import { Latency } from '@/pages/Latency'
+import { Players } from '@/pages/Players'
+import { AnalysisConfigs } from '@/pages/AnalysisConfigs'
+import { RenderConfigs } from '@/pages/RenderConfigs'
+import { Couplings } from '@/pages/Couplings'
 import { Badge } from '@/components/ui/badge'
 import { cn } from '@/lib/utils'
 
-type Tab = 'now-playing' | 'profiles' | 'bridges' | 'latency'
+type Tab = 'now-playing' | 'profiles' | 'bridges' | 'latency' | 'players' | 'analysis-configs' | 'render-configs' | 'couplings'
 
 const NAV_ITEMS: { value: Tab; label: string }[] = [
-  { value: 'now-playing', label: 'Now Playing' },
-  { value: 'profiles',    label: 'Profiles' },
-  { value: 'bridges',     label: 'Bridges' },
-  { value: 'latency',     label: 'Latency' },
+  { value: 'now-playing',      label: 'Now Playing' },
+  { value: 'profiles',         label: 'Profiles' },
+  { value: 'bridges',          label: 'Bridges' },
+  { value: 'latency',          label: 'Latency' },
+  { value: 'players',          label: 'Players' },
+  { value: 'analysis-configs', label: 'Analysis' },
+  { value: 'render-configs',   label: 'Rendering' },
+  { value: 'couplings',        label: 'Couplings' },
 ]
 
 function ConnectionBadge({ connected, attempt }: { connected: boolean; attempt: number }) {
@@ -79,6 +87,15 @@ export default function App() {
               <Latency
                 syncMaster={status?.sync_master ?? null}
                 syncMasterName={status?.sync_master_name ?? null}
+              />
+            )}
+            {activeTab === 'players' && <Players />}
+            {activeTab === 'analysis-configs' && <AnalysisConfigs />}
+            {activeTab === 'render-configs' && <RenderConfigs />}
+            {activeTab === 'couplings' && (
+              <Couplings
+                activeCouplingId={status?.active_coupling_id ?? null}
+                onActivationChange={() => {}}
               />
             )}
           </div>

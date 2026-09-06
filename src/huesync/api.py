@@ -674,6 +674,7 @@ async def get_status(request: Request):
         "version": _VERSION_STRING,
         "active_profile_id": manager.active_profile_id,
         "active_profile_name": manager.active_profile_name,
+        "active_coupling_id": manager.active_coupling_id,
         "sync_master": manager.detected_sync_master,
         "sync_master_name": manager.detected_sync_master_name,
         "applied_delay_ms": manager.applied_delay_ms,

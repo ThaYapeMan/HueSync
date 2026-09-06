@@ -93,6 +93,7 @@ async def ws_preview(websocket: WebSocket):
                 "version": f"{__version__}+{__git_hash__}",
                 "active_profile_id": player_manager.active_profile_id,
                 "active_profile_name": player_manager.active_profile_name,
+                "active_coupling_id": player_manager.active_coupling_id,
                 "sync_master": player_manager.detected_sync_master,
                 "sync_master_name": player_manager.detected_sync_master_name,
                 "applied_delay_ms": player_manager.applied_delay_ms,
