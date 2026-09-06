@@ -386,6 +386,75 @@ def test_colour_mode_effect_bass_hz_shifts_red_green_boundary():
     assert colour_low_bass.g > colour_default.g, "Lowering bass_hz should increase green"
 
 
+def test_colour_mode_effect_onset_signals_do_not_affect_brightness():
+    """ColourModeEffect.render() must produce identical output regardless of onset
+    signal values in AudioFeatures.
+
+    ColourModeEffect derives brightness solely from features.bars.  The onset
+    fields (onset, onset_bass, onset_mid, onset_treble) are stored for the GUI
+    indicator and for future stateful effects, but must not alter the rendered
+    colour in the current implementation.  If they did, multiband onset_method
+    (which sets three onset flags simultaneously) would produce structurally
+    brighter output than combined (which does not set any onset flag at all),
+    causing a persistent brightness difference that cannot be tuned away.
+    """
+    profile = Profile(
+        color_mode=ColorMode.SPECTRUM_RGB,
+        sensitivity=1.0,
+        brightness_floor=0.0,
+        bars=30,
+    )
+    effect = ColourModeEffect(profile)
+    bars = [0.4] * 30
+    n = len(bars)
+    total = sum(bars)
+    centroid = sum(i * v for i, v in enumerate(bars)) / total / n
+
+    base = AudioFeatures(
+        bars=bars,
+        bass=bars[0],
+        mid=bars[0],
+        full=bars[0],
+        centroid=centroid,
+        onset=False,
+        onset_bass=False,
+        onset_mid=False,
+        onset_treble=False,
+        onset_strength=0.0,
+        onset_bass_strength=0.0,
+        onset_mid_strength=0.0,
+        onset_treble_strength=0.0,
+    )
+    all_onset = AudioFeatures(
+        bars=bars,
+        bass=bars[0],
+        mid=bars[0],
+        full=bars[0],
+        centroid=centroid,
+        onset=True,
+        onset_bass=True,
+        onset_mid=True,
+        onset_treble=True,
+        onset_strength=9.9,
+        onset_bass_strength=9.9,
+        onset_mid_strength=9.9,
+        onset_treble_strength=9.9,
+    )
+
+    colour_no_onset = effect.render(base, 0.0).color_at(_ORIGIN, 0.0)
+    colour_all_onset = effect.render(all_onset, 0.0).color_at(_ORIGIN, 0.0)
+
+    assert colour_no_onset.r == colour_all_onset.r, (
+        "onset flags must not affect red channel brightness"
+    )
+    assert colour_no_onset.g == colour_all_onset.g, (
+        "onset flags must not affect green channel brightness"
+    )
+    assert colour_no_onset.b == colour_all_onset.b, (
+        "onset flags must not affect blue channel brightness"
+    )
+
+
 def test_sync_engine_update_profile_takes_effect():
     """update_profile() must replace the ColourModeEffect so that a new bass_hz
     is immediately reflected in the rendered colour without restarting the engine.
