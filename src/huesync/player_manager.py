@@ -580,8 +580,14 @@ class PlayerManager:
             "-m", profile.player_mac,
             "-o", profile.alsa_device or self.DEFAULT_ALSA_DEVICE,
             "-v",
-            "-s", f"{profile.lms_host}:{profile.lms_port}",
         ]
+        # Pass only the host address, never a port.  squeezelite's -s flag
+        # expects the slimproto port (3483); profile.lms_port is the LMS
+        # web/JSON-RPC port (typically 9000) and must not be passed here.
+        # Without an explicit port squeezelite connects to 3483 by default.
+        # Without -s at all it falls back to UDP broadcast discovery.
+        if profile.lms_host:
+            cmd += ["-s", profile.lms_host]
         session.squeezelite = subprocess.Popen(
             cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
         )

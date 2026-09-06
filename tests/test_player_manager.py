@@ -1,4 +1,4 @@
-"""Tests for PlayerManager shm lifecycle.
+"""Tests for PlayerManager shm lifecycle and squeezelite command assembly.
 
 These tests create real files under /dev/shm to verify that teardown and
 startup cleanup actually remove them — the same path the production code
@@ -7,6 +7,7 @@ uses, so there is no seam between test and production behaviour.
 
 import asyncio
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 from huesync.models import Profile
 from huesync.player_manager import ActiveSession, PlayerManager
@@ -96,6 +97,70 @@ def test_cleanup_orphaned_shm_removes_unknown_mac(tmp_path: Path) -> None:
     assert not shm_path.exists(), (
         "cleanup_orphaned_shm() should remove ALL squeezelite-* segments at startup, "
         "not just those matching a known profile MAC"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Squeezelite command assembly
+# ---------------------------------------------------------------------------
+
+
+def test_squeezelite_server_arg_omits_lms_port(tmp_path: Path) -> None:
+    """_start_squeezelite must NOT pass lms_port to squeezelite's -s flag.
+
+    profile.lms_port stores the LMS web/JSON-RPC port (typically 9000, as
+    returned by the Discover button and UDP discovery's json_port field).
+    squeezelite's -s expects the slimproto host; without an explicit port it
+    connects to 3483 by default.  Passing ":9000" routes squeezelite to the
+    web interface, where it can never register as a Slimproto player.
+
+    This is a pre-existing design bug that surfaces whenever a user fills in
+    lms_port via the Discover button (which sets it to the json_port = 9000).
+    """
+    manager = _make_manager(tmp_path)
+    profile = Profile(
+        player_mac="02:ff:00:de:ad:08",
+        player_name="HueSync",
+        lms_host="192.168.178.23",
+        lms_port=9000,
+        alsa_device="hw:CARD=Dummy,DEV=0",
+    )
+    session = ActiveSession(profile)
+
+    with patch("shutil.which", return_value="/usr/bin/squeezelite"), \
+         patch("subprocess.Popen") as mock_popen:
+        mock_popen.return_value = MagicMock()
+        manager._start_squeezelite(session, profile)
+
+    cmd: list[str] = mock_popen.call_args[0][0]
+
+    s_idx = cmd.index("-s")
+    server_arg = cmd[s_idx + 1]
+
+    assert ":9000" not in server_arg, (
+        f"squeezelite -s must not contain the web port 9000; got {server_arg!r}. "
+        "Pass only the host so squeezelite uses the slimproto port 3483."
+    )
+    assert server_arg == "192.168.178.23", (
+        f"squeezelite -s should be just the host address; got {server_arg!r}"
+    )
+
+
+def test_squeezelite_omits_server_flag_when_host_empty(tmp_path: Path) -> None:
+    """When lms_host is empty, -s is omitted so squeezelite uses UDP discovery."""
+    manager = _make_manager(tmp_path)
+    profile = Profile(player_mac="02:ff:00:de:ad:09", lms_host="")
+    session = ActiveSession(profile)
+
+    with patch("shutil.which", return_value="/usr/bin/squeezelite"), \
+         patch("subprocess.Popen") as mock_popen:
+        mock_popen.return_value = MagicMock()
+        manager._start_squeezelite(session, profile)
+
+    cmd: list[str] = mock_popen.call_args[0][0]
+    assert "-s" not in cmd, (
+        "When lms_host is empty, -s should be absent so squeezelite discovers "
+        f"LMS via UDP broadcast. Got cmd: {cmd}"
     )
 
 
