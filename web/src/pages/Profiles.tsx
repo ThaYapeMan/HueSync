@@ -104,6 +104,12 @@ export function Profiles({ activeProfileId, onActivationChange }: Props) {
 
   return (
     <div className="space-y-4">
+      <div className="rounded-md border border-yellow-500/40 bg-yellow-500/10 px-4 py-3 text-sm text-yellow-700 dark:text-yellow-400">
+        <strong>Legacy tab.</strong> Profiles are replaced by the new Couplings system. Use the{' '}
+        <strong>Couplings</strong> tab instead. Activating a profile here and a coupling simultaneously
+        will cause them to overwrite each other's data.
+      </div>
+
       <div className="flex items-center justify-between">
         <h2 className="text-sm font-semibold">Profiles</h2>
         <Button size="sm" onClick={openNew}>

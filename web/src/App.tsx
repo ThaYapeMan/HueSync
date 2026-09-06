@@ -18,7 +18,7 @@ const NAV_ITEMS: { value: Tab; label: string }[] = [
   { value: 'profiles',         label: 'Profiles' },
   { value: 'bridges',          label: 'Bridges' },
   { value: 'latency',          label: 'Latency' },
-  { value: 'players',          label: 'Players' },
+  { value: 'players',          label: 'Virtual Players' },
   { value: 'analysis-configs', label: 'Analysis' },
   { value: 'render-configs',   label: 'Rendering' },
   { value: 'couplings',        label: 'Couplings' },
