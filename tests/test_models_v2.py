@@ -61,11 +61,12 @@ def test_controller_from_dict_strips_unknown_keys():
 
 
 def test_player_roundtrip():
-    p = VirtualPlayer(name="Zone A", lms_host="10.0.0.5", lms_port=9000,
+    p = VirtualPlayer(lms_host="10.0.0.5", lms_port=9000,
                       player_name="HueSync", player_mac="aa:bb:cc:dd:ee:01",
                       alsa_device="hw:0")
     p2 = VirtualPlayer.from_dict(p.to_dict())
     assert p2.id == p.id
+    assert p2.type == p.type
     assert p2.lms_host == p.lms_host
     assert p2.player_mac == p.player_mac
     assert p2.alsa_device == p.alsa_device
@@ -232,7 +233,7 @@ def test_storage_save_controller_is_upsert():
 
 def test_storage_save_and_get_player():
     s = make_storage()
-    p = VirtualPlayer(name="Zone A", player_mac="aa:bb:cc:dd:ee:01")
+    p = VirtualPlayer(player_mac="aa:bb:cc:dd:ee:01")
     s.save_virtual_player(p)
     fetched = s.get_virtual_player(p.id)
     assert fetched is not None
@@ -398,7 +399,10 @@ def test_storage_backfills_new_collections_on_old_file():
 
 
 def test_storage_backfill_migrates_players_key_to_virtual_players():
-    """Old config with 'players' key is transparently migrated to 'virtual_players'."""
+    """Old config with 'players' key is transparently migrated to 'virtual_players'.
+
+    Legacy 'name' field is silently dropped; other fields are preserved.
+    """
     import json
 
     d = tempfile.mkdtemp()
@@ -421,5 +425,8 @@ def test_storage_backfill_migrates_players_key_to_virtual_players():
     s = Storage(path)
     players = s.list_virtual_players()
     assert len(players) == 1
-    assert players[0].name == "Old Player"
+    assert players[0].id == "p-1"
+    assert players[0].lms_host == "10.0.0.1"
+    assert players[0].player_mac == "aa:bb:cc:dd:ee:ff"
+    assert not hasattr(players[0], "name")
     assert players[0].player_mac == "aa:bb:cc:dd:ee:ff"

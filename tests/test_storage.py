@@ -13,18 +13,19 @@ def make_storage() -> Storage:
 
 def test_save_and_get_virtual_player_roundtrip():
     storage = make_storage()
-    player = VirtualPlayer(name="Living room")
+    player = VirtualPlayer(lms_host="192.168.0.10")
     storage.save_virtual_player(player)
 
     fetched = storage.get_virtual_player(player.id)
     assert fetched is not None
-    assert fetched.name == "Living room"
+    assert fetched.lms_host == "192.168.0.10"
     assert fetched.id == player.id
+    assert fetched.type.value == "LMS"
 
 
 def test_delete_virtual_player():
     storage = make_storage()
-    player = VirtualPlayer(name="Test")
+    player = VirtualPlayer()
     storage.save_virtual_player(player)
     storage.delete_virtual_player(player.id)
     assert storage.get_virtual_player(player.id) is None
@@ -244,7 +245,10 @@ def test_players_key_migrated_to_virtual_players(tmp_path: Path):
     storage = Storage(config)
     players = storage.list_virtual_players()
     assert len(players) == 1
-    assert players[0].name == "Old Player"
+    assert players[0].id == "p-1"
+    assert players[0].lms_host == "10.0.0.1"
+    assert players[0].player_mac == "aa:bb:cc:dd:ee:ff"
+    assert not hasattr(players[0], "name")
 
 
 def test_light_providers_key_migrated_to_zones(tmp_path: Path):

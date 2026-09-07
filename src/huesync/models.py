@@ -19,6 +19,14 @@ log = logging.getLogger(__name__)
 # detection.  Keep in sync with ONSET_METHODS in web/src/lib/api.ts.
 ONSET_METHODS: frozenset[str] = frozenset({"combined", "multiband", "superflux"})
 
+# Virtual-player source type.  Only "LMS" exists now; "Sonos" will be added
+# when sonos-squeezebox with OPT_VIS becomes a supported PCM source.
+# Keep in sync with PLAYER_TYPES in web/src/lib/api.ts.
+class VirtualPlayerType(StrEnum):
+    LMS = "LMS"
+
+VIRTUAL_PLAYER_TYPES: frozenset[str] = frozenset(t.value for t in VirtualPlayerType)
+
 class ColorMode(StrEnum):
     """Legacy colour mode enum — kept for migration code only.
 
@@ -289,7 +297,7 @@ class VirtualPlayer:
     """A squeezelite virtual player connected to LMS."""
 
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
-    name: str = "HueSync Player"
+    type: VirtualPlayerType = VirtualPlayerType.LMS
     lms_host: str = "127.0.0.1"
     lms_port: int = 3483
     player_name: str = "HueSync"
@@ -299,7 +307,7 @@ class VirtualPlayer:
     def to_dict(self) -> dict:
         return {
             "id": self.id,
-            "name": self.name,
+            "type": self.type.value,
             "lms_host": self.lms_host,
             "lms_port": self.lms_port,
             "player_name": self.player_name,
@@ -309,6 +317,9 @@ class VirtualPlayer:
 
     @classmethod
     def from_dict(cls, d: dict) -> VirtualPlayer:
+        d = dict(d)
+        d.pop("name", None)  # silently drop legacy name field
+        d["type"] = VirtualPlayerType(d.get("type", VirtualPlayerType.LMS))
         return cls(**{k: v for k, v in d.items() if k in _VIRTUAL_PLAYER_FIELDS})
 
 

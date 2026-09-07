@@ -15,12 +15,12 @@ type Tab = 'now-playing' | 'players' | 'analysis-configs' | 'scenes' | 'crossfad
 
 const NAV_ITEMS: { value: Tab; label: string }[] = [
   { value: 'now-playing',      label: 'Now Playing' },
-  { value: 'players',          label: 'Virtual Players' },
   { value: 'analysis-configs', label: 'Analysis' },
   { value: 'scenes',           label: 'Scenes' },
   { value: 'crossfaders',      label: 'Crossfaders' },
   { value: 'zones',            label: 'Zones' },
   { value: 'couplings',        label: 'Couplings' },
+  { value: 'players',          label: 'Virtual Players' },
   { value: 'latency',          label: 'Latency' },
 ]
 

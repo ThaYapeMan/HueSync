@@ -170,7 +170,7 @@ def test_create_and_get_controller(client: TestClient):
 
 
 def test_create_and_list_virtual_players(client: TestClient):
-    payload = {"name": "Main Player", "lms_host": "10.0.0.5"}
+    payload = {"lms_host": "10.0.0.5"}
     resp = client.post("/api/virtual-players", json=payload)
     assert resp.status_code == 201
 
@@ -181,17 +181,32 @@ def test_create_and_list_virtual_players(client: TestClient):
 
 
 def test_create_and_get_virtual_player(client: TestClient):
-    payload = {"name": "Bedroom", "lms_host": "10.0.0.6", "lms_port": 9000}
+    payload = {"lms_host": "10.0.0.6", "lms_port": 9000}
     resp = client.post("/api/virtual-players", json=payload)
     assert resp.status_code == 201
     body = resp.json()
     player_id = body["id"]
     # MAC should be auto-generated if not provided
     assert body["player_mac"] != ""
+    # type defaults to LMS
+    assert body["type"] == "LMS"
 
     resp2 = client.get(f"/api/virtual-players/{player_id}")
     assert resp2.status_code == 200
-    assert resp2.json()["name"] == "Bedroom"
+    assert resp2.json()["type"] == "LMS"
+
+
+def test_virtual_player_rejects_unknown_type(client: TestClient):
+    payload = {"lms_host": "10.0.0.7", "type": "WLED"}
+    resp = client.post("/api/virtual-players", json=payload)
+    assert resp.status_code == 422
+
+
+def test_virtual_player_has_no_name_field(client: TestClient):
+    payload = {"lms_host": "10.0.0.8"}
+    resp = client.post("/api/virtual-players", json=payload)
+    assert resp.status_code == 201
+    assert "name" not in resp.json()
 
 
 # ---------------------------------------------------------------------------
@@ -263,7 +278,7 @@ def test_create_and_get_scene(client: TestClient):
 
 def _make_full_coupling(storage: Storage) -> Coupling:
     """Create and persist all entities required for a Coupling, return the Coupling."""
-    player = VirtualPlayer(name="P", lms_host="10.0.0.1", player_mac="aa:bb:cc:dd:ee:ff")
+    player = VirtualPlayer(lms_host="10.0.0.1", player_mac="aa:bb:cc:dd:ee:ff")
     zone = Zone(name="Z", controller_id="ctrl-1", entertainment_area_id="ea-1")
     ac = AnalysisConfig(name="AC")
     scene = Scene(name="SC")
@@ -285,7 +300,7 @@ def _make_full_coupling(storage: Storage) -> Coupling:
 
 
 def test_create_coupling(client: TestClient):
-    player = VirtualPlayer(name="P", lms_host="10.0.0.1")
+    player = VirtualPlayer(lms_host="10.0.0.1")
     zone = Zone(name="Z", controller_id="c1", entertainment_area_id="ea-1")
     ac = AnalysisConfig(name="AC")
     scene = Scene(name="SC")

@@ -27,7 +27,6 @@ import {
 } from '@/lib/api'
 
 interface FormState {
-  name: string
   lms_host: string
   lms_port: string
   player_name: string
@@ -36,7 +35,6 @@ interface FormState {
 
 function defaultForm(player?: VirtualPlayer): FormState {
   return {
-    name: player?.name ?? '',
     lms_host: player?.lms_host ?? '',
     lms_port: String(player?.lms_port ?? 9000),
     player_name: player?.player_name ?? 'HueSync',
@@ -101,17 +99,21 @@ export function Players() {
     setSaving(true)
     setSaveError(null)
     try {
-      const body = {
-        name: form.name,
-        lms_host: form.lms_host,
-        lms_port: parseInt(form.lms_port, 10),
-        player_name: form.player_name,
-        alsa_device: form.alsa_device,
-      }
       if (editingPlayer) {
-        await updateVirtualPlayer(editingPlayer.id, body)
+        await updateVirtualPlayer(editingPlayer.id, {
+          lms_host: form.lms_host,
+          lms_port: parseInt(form.lms_port, 10),
+          player_name: form.player_name,
+          alsa_device: form.alsa_device,
+        })
       } else {
-        await createVirtualPlayer(body)
+        await createVirtualPlayer({
+          type: 'LMS',
+          lms_host: form.lms_host,
+          lms_port: parseInt(form.lms_port, 10),
+          player_name: form.player_name,
+          alsa_device: form.alsa_device,
+        })
       }
       setEditorOpen(false)
       await load()
@@ -150,7 +152,7 @@ export function Players() {
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>Name</TableHead>
+              <TableHead>Type</TableHead>
               <TableHead>LMS Host</TableHead>
               <TableHead>Player Name</TableHead>
               <TableHead>MAC</TableHead>
@@ -160,7 +162,7 @@ export function Players() {
           <TableBody>
             {players.map((p) => (
               <TableRow key={p.id}>
-                <TableCell className="font-medium">{p.name}</TableCell>
+                <TableCell className="font-medium">{p.type}</TableCell>
                 <TableCell className="font-mono text-sm text-muted-foreground">{p.lms_host}</TableCell>
                 <TableCell className="text-sm">{p.player_name}</TableCell>
                 <TableCell className="font-mono text-xs text-muted-foreground">{p.player_mac || '—'}</TableCell>
@@ -176,7 +178,7 @@ export function Players() {
                         </Button>
                       }
                       title="Delete player"
-                      description={`Delete "${p.name}"? This cannot be undone.`}
+                      description={`Delete player "${p.player_name}" (${p.lms_host})? This cannot be undone.`}
                       onConfirm={() => handleDelete(p.id)}
                     />
                   </div>
@@ -194,12 +196,8 @@ export function Players() {
           </DialogHeader>
 
           <div className="space-y-4">
-            <FormRow label="Name">
-              <Input
-                value={form.name}
-                onChange={(e) => set('name', e.target.value)}
-                placeholder="My player"
-              />
+            <FormRow label="Type">
+              <p className="text-sm font-mono py-1 text-muted-foreground">LMS (squeezelite)</p>
             </FormRow>
             <FormRow label="LMS host">
               <Input

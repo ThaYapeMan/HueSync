@@ -204,7 +204,7 @@ def _make_full_storage(tmp_path: Path) -> tuple[Storage, Coupling]:
     storage.save_controller(controller)
 
     player = VirtualPlayer(
-        id="player-1", name="Living Room", lms_host="192.168.1.10", lms_port=9000,
+        id="player-1", lms_host="192.168.1.10", lms_port=9000,
         player_name="HueSync", player_mac="aa:bb:cc:dd:ee:ff", alsa_device="",
     )
     storage.save_virtual_player(player)

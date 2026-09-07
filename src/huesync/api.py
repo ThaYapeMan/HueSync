@@ -18,6 +18,7 @@ from . import __git_hash__, __version__, hue_bridge
 from .lms_discovery import discover_lms
 from .models import (
     EFFECT_IDS,
+    VIRTUAL_PLAYER_TYPES,
     AnalysisConfig,
     BridgeConfig,
     Controller,
@@ -27,6 +28,7 @@ from .models import (
     PlayerLatency,
     Scene,
     VirtualPlayer,
+    VirtualPlayerType,
     Zone,
 )
 from .player_manager import PlayerManager, _build_engine_profile, _build_mellow_profile
@@ -82,7 +84,7 @@ class ControllerPatchBody(BaseModel):
 
 
 class VirtualPlayerCreateBody(BaseModel):
-    name: str = "HueSync Player"
+    type: str = "LMS"
     lms_host: str
     lms_port: int = 9000
     player_name: str = "HueSync"
@@ -92,7 +94,7 @@ class VirtualPlayerCreateBody(BaseModel):
 
 class VirtualPlayerPatchBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    name: str | None = None
+    type: str | None = None
     lms_host: str | None = None
     lms_port: int | None = None
     player_name: str | None = None
@@ -539,10 +541,12 @@ async def list_virtual_players(request: Request):
 
 @router.post("/virtual-players", status_code=201)
 async def create_virtual_player(request: Request, body: VirtualPlayerCreateBody):
+    if body.type not in VIRTUAL_PLAYER_TYPES:
+        raise HTTPException(status_code=422, detail=f"Unknown player type {body.type!r}")
     storage = _storage(request)
     mac = body.player_mac or generate_locally_administered_mac()
     player = VirtualPlayer(
-        name=body.name,
+        type=VirtualPlayerType(body.type),
         lms_host=body.lms_host,
         lms_port=body.lms_port,
         player_name=body.player_name,
@@ -569,14 +573,18 @@ async def patch_virtual_player(player_id: str, request: Request, body: VirtualPl
     if player is None:
         raise HTTPException(status_code=404, detail="VirtualPlayer not found")
     updates = body.model_dump(exclude_unset=True)
+    if "type" in updates:
+        if updates["type"] not in VIRTUAL_PLAYER_TYPES:
+            raise HTTPException(status_code=422, detail=f"Unknown player type {updates['type']!r}")
+        updates["type"] = VirtualPlayerType(updates["type"])
     for field, value in updates.items():
         setattr(player, field, value)
     storage.save_virtual_player(player)
-    # If active coupling uses this player and active fields changed, deactivate.
+    # If active coupling uses this player and any fields changed, deactivate.
     active_id = storage.get_active_coupling_id()
     if updates and active_id:
         coupling = storage.get_coupling(active_id)
-        active_fields = set(updates.keys()) - {"name"}
+        active_fields = set(updates.keys())
         if coupling and coupling.player_id == player_id and active_fields:
             await _apply_coupling_action(coupling, storage, manager, active_fields)
     return player.to_dict()

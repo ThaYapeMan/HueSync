@@ -73,7 +73,6 @@ interface NewPlayerDialogProps {
 }
 
 function NewPlayerDialog({ open, onClose, onCreated }: NewPlayerDialogProps) {
-  const [name, setName] = useState('')
   const [lmsHost, setLmsHost] = useState('')
   const [playerName, setPlayerName] = useState('HueSync')
   const [alsaDevice, setAlsaDevice] = useState('')
@@ -82,7 +81,6 @@ function NewPlayerDialog({ open, onClose, onCreated }: NewPlayerDialogProps) {
 
   useEffect(() => {
     if (open) {
-      setName('')
       setLmsHost('')
       setPlayerName('HueSync')
       setAlsaDevice('')
@@ -95,7 +93,7 @@ function NewPlayerDialog({ open, onClose, onCreated }: NewPlayerDialogProps) {
     setError(null)
     try {
       const player = await createVirtualPlayer({
-        name,
+        type: 'LMS',
         lms_host: lmsHost,
         lms_port: 9000,
         player_name: playerName,
@@ -117,10 +115,6 @@ function NewPlayerDialog({ open, onClose, onCreated }: NewPlayerDialogProps) {
           <DialogDescription>Create a new squeezelite player.</DialogDescription>
         </DialogHeader>
         <div className="space-y-3">
-          <div className="space-y-1">
-            <Label className="text-sm">Name</Label>
-            <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="My player" />
-          </div>
           <div className="space-y-1">
             <Label className="text-sm">LMS host</Label>
             <Input value={lmsHost} onChange={(e) => setLmsHost(e.target.value)} placeholder="192.168.x.x" />
@@ -647,7 +641,7 @@ function CouplingEditor({
                   </SelectTrigger>
                   <SelectContent>
                     {players.map((p) => (
-                      <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>
+                      <SelectItem key={p.id} value={p.id}>{p.player_name} ({p.lms_host})</SelectItem>
                     ))}
                   </SelectContent>
                 </Select>
@@ -936,7 +930,8 @@ export function Couplings({ activeCouplingId: activeCouplingIdProp, onActivation
 
   // Lookup helpers
   function playerName(id: string) {
-    return players.find((p) => p.id === id)?.name ?? id
+    const p = players.find((p) => p.id === id)
+    return p ? `${p.player_name} (${p.lms_host})` : id
   }
   function areaName(zoneId: string) {
     const zone = zones.find((z) => z.id === zoneId)
