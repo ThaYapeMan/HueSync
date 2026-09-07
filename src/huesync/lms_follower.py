@@ -89,6 +89,7 @@ class LmsFollower:
         self._follow_mac = follow_mac.lower()
         self._huesync_mac = huesync_mac
         self._stop_event = asyncio.Event()
+        self._play_count: int = 0  # diagnostic: total play commands sent this session
 
     def start(self) -> asyncio.Task:
         """Start the follower loop and return the background task."""
@@ -166,6 +167,20 @@ class LmsFollower:
         command = parts[1]
         sub = parts[2] if len(parts) > 2 else ""
 
+        # Diagnostic: log ALL newsong events so we can see if the wrong player
+        # is triggering, or if the same player fires more than once per track.
+        if command == "playlist" and sub.startswith("newsong"):
+            if player_id == self._follow_mac:
+                log.info(
+                    "DIAG newsong MATCH:  player=%s sub=%r -> will send play #%d",
+                    player_id, sub[:40], self._play_count + 1,
+                )
+            else:
+                log.info(
+                    "DIAG newsong IGNORE: player=%s sub=%r (watching %s)",
+                    player_id, sub[:40], self._follow_mac,
+                )
+
         if player_id != self._follow_mac:
             return  # event from a different player — ignore
 
@@ -177,11 +192,6 @@ class LmsFollower:
         )
 
         if command == "playlist" and sub.startswith("newsong"):
-            log.info(
-                "LMS follower: newsong from %s — mirroring to %s",
-                self._follow_mac,
-                self._huesync_mac,
-            )
             await asyncio.to_thread(self._mirror_track)
 
     # ------------------------------------------------------------------
@@ -217,12 +227,20 @@ class LmsFollower:
 
     def _send_play(self, url: str) -> None:
         """Tell HueSync's player to start playing *url*."""
+        import time as _time
+        self._play_count += 1
         encoded = quote(url, safe="")
         command = f"{self._huesync_mac} playlist play {encoded}\n"
+        ts = _time.strftime("%H:%M:%S")
+        log.info(
+            "DIAG SENDING PLAY #%d at %s -> %s  url=%.120s",
+            self._play_count, ts, self._huesync_mac, url,
+        )
         try:
             _cli_exchange(self._host, self._port, command)
             log.info(
-                "LMS follower: told %s to play %.100s", self._huesync_mac, url
+                "DIAG PLAY #%d sent OK (play_count=%d since follower start)",
+                self._play_count, self._play_count,
             )
         except Exception as exc:
             log.warning("LMS follower: failed to send play command: %s", exc)

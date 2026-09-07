@@ -23,7 +23,7 @@ from .hue_output import HueDriver, HueOutputConfig, get_channel_infos
 from .latency import FixedLatencyProbe, NoLatencyProbe
 from .lms_discovery import discover_lms
 from .lms_follower import LmsFollower
-from .lms_status import query_lms_status, unsync_player
+from .lms_status import query_lms_status, query_lms_sync_peers, unsync_player
 from .models import BridgeConfig, Controller, Coupling, Profile
 from .pcm_source import SqueezeliteShmSource
 from .storage import Storage
@@ -743,11 +743,49 @@ class PlayerManager:
             )
             return
         await asyncio.sleep(5)
+
+        # --- Diagnostic: check sync state BEFORE unsync ---
+        try:
+            peers_before = await asyncio.to_thread(
+                query_lms_sync_peers, lms_host, player_mac
+            )
+            log.info(
+                "DIAG pre-unsync:  %s sync peers = %r", player_mac, peers_before
+            )
+        except Exception as exc:
+            log.warning("DIAG pre-unsync query failed for %s: %s", player_mac, exc)
+
+        # --- Send the unsync command ---
+        log.info(
+            "DIAG sending unsync: %s sync - (host=%s)", player_mac, lms_host
+        )
         try:
             await asyncio.to_thread(unsync_player, lms_host, player_mac)
-            log.info("Player %s removed from LMS sync group", player_mac)
+            log.info("DIAG unsync command sent OK for %s", player_mac)
         except Exception as exc:
-            log.warning("Could not unsync player %s: %s", player_mac, exc)
+            log.warning("DIAG unsync failed for %s: %s", player_mac, exc)
+
+        # --- Wait 3 s, then verify the player is actually standalone ---
+        await asyncio.sleep(3)
+        try:
+            peers_after = await asyncio.to_thread(
+                query_lms_sync_peers, lms_host, player_mac
+            )
+            if peers_after:
+                log.warning(
+                    "DIAG post-unsync: %s is STILL in sync group with peers %r "
+                    "— LMS did not honour the unsync command",
+                    player_mac, peers_after,
+                )
+            else:
+                log.info(
+                    "DIAG post-unsync: %s is now STANDALONE (no sync peers)",
+                    player_mac,
+                )
+        except Exception as exc:
+            log.warning(
+                "DIAG post-unsync verification failed for %s: %s", player_mac, exc
+            )
 
         if session.follower is not None:
             follower_task = session.follower.start()
