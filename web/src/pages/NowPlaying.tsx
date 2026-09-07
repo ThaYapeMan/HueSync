@@ -197,7 +197,7 @@ function CouplingSelector({
             onClick={handleActivate}
             disabled={busy || !selected || selectedIsActive}
           >
-            {busy && !isActive ? 'Activating…' : 'Activate'}
+            {busy && !isActive ? 'Starting…' : 'Go'}
           </Button>
 
           {isActive && (
@@ -213,10 +213,10 @@ function CouplingSelector({
         </div>
 
         <p className="text-xs text-muted-foreground italic leading-snug">
-          Not for analysis purposes — switching couplings restarts the session
-          (squeezelite, cava, DTLS) and resets the BandNormaliser EMA. For a
-          live A/B comparison of analysis settings, edit the active Coupling
-          directly and change only the onset_method field.
+          Switching couplings restarts the full session (squeezelite, cava,
+          DTLS) and resets the BandNormaliser EMA. For a live A/B comparison,
+          swap the active coupling's AnalysisConfig or Crossfader instead —
+          those update without a session restart.
         </p>
 
         {error && (

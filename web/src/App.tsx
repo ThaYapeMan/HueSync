@@ -5,19 +5,23 @@ import { Latency } from '@/pages/Latency'
 import { Players } from '@/pages/Players'
 import { AnalysisConfigs } from '@/pages/AnalysisConfigs'
 import { Scenes } from '@/pages/Scenes'
+import { Crossfaders } from '@/pages/Crossfaders'
+import { Zones } from '@/pages/Zones'
 import { Couplings } from '@/pages/Couplings'
 import { Badge } from '@/components/ui/badge'
 import { cn } from '@/lib/utils'
 
-type Tab = 'now-playing' | 'latency' | 'players' | 'analysis-configs' | 'scenes' | 'couplings'
+type Tab = 'now-playing' | 'players' | 'analysis-configs' | 'scenes' | 'crossfaders' | 'zones' | 'couplings' | 'latency'
 
 const NAV_ITEMS: { value: Tab; label: string }[] = [
   { value: 'now-playing',      label: 'Now Playing' },
-  { value: 'latency',          label: 'Latency' },
   { value: 'players',          label: 'Virtual Players' },
   { value: 'analysis-configs', label: 'Analysis' },
   { value: 'scenes',           label: 'Scenes' },
+  { value: 'crossfaders',      label: 'Crossfaders' },
+  { value: 'zones',            label: 'Zones' },
   { value: 'couplings',        label: 'Couplings' },
+  { value: 'latency',          label: 'Latency' },
 ]
 
 function ConnectionBadge({ connected, attempt }: { connected: boolean; attempt: number }) {
@@ -72,19 +76,21 @@ export default function App() {
             {activeTab === 'now-playing' && (
               <NowPlaying colour={colour} onset={onset} onset_bass={onset_bass} onset_mid={onset_mid} onset_treble={onset_treble} mix={mix} bars={bars} status={status} />
             )}
-            {activeTab === 'latency' && (
-              <Latency
-                syncMaster={status?.sync_master ?? null}
-                syncMasterName={status?.sync_master_name ?? null}
-              />
-            )}
             {activeTab === 'players' && <Players />}
             {activeTab === 'analysis-configs' && <AnalysisConfigs />}
             {activeTab === 'scenes' && <Scenes />}
+            {activeTab === 'crossfaders' && <Crossfaders />}
+            {activeTab === 'zones' && <Zones />}
             {activeTab === 'couplings' && (
               <Couplings
                 activeCouplingId={status?.active_coupling_id ?? null}
                 onActivationChange={() => {}}
+              />
+            )}
+            {activeTab === 'latency' && (
+              <Latency
+                syncMaster={status?.sync_master ?? null}
+                syncMasterName={status?.sync_master_name ?? null}
               />
             )}
           </div>

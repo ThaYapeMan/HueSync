@@ -207,6 +207,8 @@ export const deleteVirtualPlayer = (id: string) => request<void>(`/api/virtual-p
 export const getZones = () => request<Zone[]>('/api/zones')
 export const createZone = (body: Omit<Zone, 'id'>) =>
   request<Zone>('/api/zones', json('POST', body))
+export const updateZone = (id: string, body: Partial<Omit<Zone, 'id'>>) =>
+  request<Zone>(`/api/zones/${id}`, json('PATCH', body))
 export const deleteZone = (id: string) =>
   request<void>(`/api/zones/${id}`, { method: 'DELETE' })
 
