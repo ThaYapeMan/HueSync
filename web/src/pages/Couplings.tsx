@@ -473,6 +473,7 @@ function CouplingEditor({
   const [newLightProviderOpen, setNewLightProviderOpen] = useState(false)
   const [newAnalysisConfigOpen, setNewAnalysisConfigOpen] = useState(false)
   const [newRenderConfigOpen, setNewRenderConfigOpen] = useState(false)
+  const [newRenderConfigTarget, setNewRenderConfigTarget] = useState<'active' | 'mellow'>('active')
 
   useEffect(() => {
     if (open) {
@@ -540,11 +541,20 @@ function CouplingEditor({
     setAnalysisConfigId(cfg.id)
   }
 
+  function openNewRenderConfig(target: 'active' | 'mellow') {
+    setNewRenderConfigTarget(target)
+    setNewRenderConfigOpen(true)
+  }
+
   async function handleRenderConfigCreated(cfg: RenderConfig) {
     setNewRenderConfigOpen(false)
     const updated = await getRenderConfigs().catch(() => renderConfigs)
     onRenderConfigsChanged(updated)
-    setRenderConfigId(cfg.id)
+    if (newRenderConfigTarget === 'mellow') {
+      setMellowRenderConfigId(cfg.id)
+    } else {
+      setRenderConfigId(cfg.id)
+    }
   }
 
   const selectedLP = lightProviders.find((lp) => lp.id === lightProviderId)
@@ -552,7 +562,7 @@ function CouplingEditor({
   return (
     <>
       <Dialog open={open} onOpenChange={(o) => { if (!o) onClose() }}>
-        <DialogContent className="max-w-md flex flex-col max-h-[90vh]">
+        <DialogContent className="max-w-xl flex flex-col max-h-[90vh]">
           <DialogHeader>
             <DialogTitle>{isEditing ? 'Edit coupling' : 'New coupling'}</DialogTitle>
           </DialogHeader>
@@ -629,14 +639,16 @@ function CouplingEditor({
             </div>
 
             {/* Two-column Active/Mellow layer selectors */}
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <div className="text-sm font-semibold">Active layer</div>
-                <div className="text-xs text-muted-foreground">Loud passages</div>
-                <div className="flex gap-2">
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1.5">
+                <div>
+                  <div className="text-sm font-semibold">Active layer</div>
+                  <div className="text-xs text-muted-foreground">Loud passages</div>
+                </div>
+                <div className="flex gap-1.5">
                   <Select value={renderConfigId} onValueChange={setRenderConfigId}>
-                    <SelectTrigger className="flex-1">
-                      <SelectValue placeholder="Select render config" />
+                    <SelectTrigger className="flex-1 min-w-0">
+                      <SelectValue placeholder="Select…" />
                     </SelectTrigger>
                     <SelectContent>
                       {renderConfigs.map((c) => (
@@ -644,25 +656,32 @@ function CouplingEditor({
                       ))}
                     </SelectContent>
                   </Select>
-                  <Button size="sm" variant="outline" type="button" onClick={() => setNewRenderConfigOpen(true)}>
+                  <Button size="sm" variant="outline" type="button" onClick={() => openNewRenderConfig('active')}>
                     + New
                   </Button>
                 </div>
               </div>
-              <div className="space-y-2">
-                <div className="text-sm font-semibold">Mellow layer</div>
-                <div className="text-xs text-muted-foreground">Quiet passages</div>
-                <Select value={mellowRenderConfigId} onValueChange={setMellowRenderConfigId}>
-                  <SelectTrigger>
-                    <SelectValue placeholder="Same as active layer" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="">Same as active layer</SelectItem>
-                    {renderConfigs.map((c) => (
-                      <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+              <div className="space-y-1.5">
+                <div>
+                  <div className="text-sm font-semibold">Mellow layer</div>
+                  <div className="text-xs text-muted-foreground">Quiet passages</div>
+                </div>
+                <div className="flex gap-1.5">
+                  <Select value={mellowRenderConfigId} onValueChange={setMellowRenderConfigId}>
+                    <SelectTrigger className="flex-1 min-w-0">
+                      <SelectValue placeholder="Same as active" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="">Same as active</SelectItem>
+                      {renderConfigs.map((c) => (
+                        <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <Button size="sm" variant="outline" type="button" onClick={() => openNewRenderConfig('mellow')}>
+                    + New
+                  </Button>
+                </div>
               </div>
             </div>
 
