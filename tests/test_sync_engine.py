@@ -1024,6 +1024,31 @@ def test_fireworks_burst_and_decay():
     )
 
 
+def test_fireworks_bright_at_onset_regardless_of_position():
+    """With the uniform flash, any light position shows a strong burst at onset.
+
+    Worst case: origin at x=0.9, light at x=-0.9 (max separation).
+    Without flash the light would have to wait for a particle to travel 1.8 units,
+    but the flash ensures full brightness immediately.
+    """
+    from huesync.sync_engine import ColourModeEffect
+
+    effect = ColourModeEffect(_prof(effect="fireworks", effect_speed=1.0, effect_decay=0.3))
+    # Trigger onset at t=0; sin(0)*0.9=0.0 but we fabricate onset at a known non-zero time
+    # so that origin_x = sin(1.0 * 127.0) * 0.9 ≈ sin(127) * 0.9 (some non-zero value).
+    # Instead sample at t=0 where origin=0 to guarantee origin_x=0.0, then check a far light.
+    effect.render(_ef(onset=True, full=0.5), t=0.0)  # origin_x = sin(0)*0.9 = 0.0
+
+    # Immediately after onset, even a light at x=0.9 (far from origin) must be bright.
+    scene = effect.render(_ef(onset=False, full=0.0), t=0.0)
+    far_light = Position(0.9, 0.0, 0.0)
+    c = scene.color_at(far_light, 0.0)
+    assert c.r > 0.7, (
+        f"Fireworks: far light must show bright flash at onset (got r={c.r:.3f}); "
+        "flash component should give immediate impact to all lights"
+    )
+
+
 def test_pulses_attack_is_not_instant():
     """Onset rise must be an exponential approach, not an instant 0→1 spike."""
     from huesync.sync_engine import ColourModeEffect

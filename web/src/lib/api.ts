@@ -1,6 +1,13 @@
 // Canonical list of onset detection methods accepted by the backend.
 // sync_engine.py switches on these exact string values; any value not in this
 // list silently falls through to cava-based onset (combined behaviour).
+// Virtual-player source types.  Keep in sync with VIRTUAL_PLAYER_TYPES in models.py.
+export const PLAYER_TYPES = [
+  { value: 'LMS', label: 'LMS (squeezelite)' },
+] as const
+
+export type PlayerType = typeof PLAYER_TYPES[number]['value']
+
 export const ONSET_METHODS = [
   { value: 'combined',  label: 'Combined (cava, 30 Hz)' },
   { value: 'multiband', label: 'Multiband (PCM tap, 100 Hz)' },
@@ -25,7 +32,7 @@ export const EFFECTS = [
   { id: 'pulses',      label: 'Pulses',        description: 'Sharp onset attack, decays away',   hasSpeed: false, hasDecay: true  },
   { id: 'flashes',     label: 'Flashes',       description: 'Hard flash on onset, dark between', hasSpeed: false, hasDecay: true  },
   { id: 'splotches',   label: 'Splotches',     description: 'Random lights flare on onset',      hasSpeed: false, hasDecay: true  },
-  { id: 'fireworks',   label: 'Fireworks',     description: 'Expanding burst from a point',      hasSpeed: true,  hasDecay: false },
+  { id: 'fireworks',   label: 'Fireworks',     description: 'Expanding burst from a point',      hasSpeed: true,  hasDecay: true  },
   { id: 'swirl',       label: 'Swirl',         description: 'Rotating colour gradient',          hasSpeed: true,  hasDecay: false },
   { id: 'wave',        label: 'Wave',          description: 'Colour wave across positions',      hasSpeed: true,  hasDecay: false },
   { id: 'solid',       label: 'Solid',         description: 'Steady colour, drifts with music',  hasSpeed: false, hasDecay: false },
@@ -127,7 +134,7 @@ export interface Controller {
 
 export interface VirtualPlayer {
   id: string
-  name: string
+  type: string
   lms_host: string
   lms_port: number
   player_name: string

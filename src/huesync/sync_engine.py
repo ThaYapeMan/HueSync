@@ -861,23 +861,50 @@ class _Particle:
 
 
 class _FireworkScene:
-    """Spatial scene: multiple particles radiate from an origin point.
+    """Spatial scene: uniform onset flash + particle trails radiating from origin.
 
-    Each particle travels outward at its own velocity; a light brightens
-    as a particle passes near it.  Contributions from all particles are
-    summed and clamped to 1.0, so overlapping particles add colour.
+    Two additive layers:
+    1. Uniform flash — position-independent; decays quickly so even a single
+       light shows a dramatic burst at onset regardless of where particles start.
+    2. Spatial trails — four particles travel from origin at different speeds,
+       illuminating lights they pass close to as they fan out.
+
+    With many lights the spatial spread is visible; with one light the flash
+    ensures a strong impact.  Returns black before any onset.
     """
 
-    __slots__ = ("_particles", "_decay_rate")
+    __slots__ = ("_particles", "_decay_rate", "_flash_rate", "_birth_t", "_r", "_g", "_b")
 
-    def __init__(self, particles: list[_Particle], decay_rate: float) -> None:
+    def __init__(
+        self,
+        particles: list[_Particle],
+        decay_rate: float,
+        flash_rate: float,
+        birth_t: float,
+        r: float,
+        g: float,
+        b: float,
+    ) -> None:
         self._particles = particles
         self._decay_rate = decay_rate
+        self._flash_rate = flash_rate
+        self._birth_t = birth_t
+        self._r = r
+        self._g = g
+        self._b = b
 
     def color_at(self, position: Position, t: float) -> Colour:
         if not self._particles:
             return Colour.BLACK
         r = g = b = 0.0
+        # Uniform flash: same brightness for every light at onset.
+        flash_age = t - self._birth_t
+        if 0.0 <= flash_age <= 5.0:
+            flash = math.exp(-flash_age * self._flash_rate)
+            r += flash * self._r
+            g += flash * self._g
+            b += flash * self._b
+        # Spatial trail: each particle illuminates lights near its current position.
         for p in self._particles:
             age = t - p.birth_t
             if age < 0.0 or age > 5.0:
@@ -897,15 +924,16 @@ class _FireworksRenderer(_EffectRenderer):
     """Four particles burst from a pseudo-random origin on each onset.
 
     Particles fan out at four distinct speeds so they sweep across all
-    lights sequentially rather than all at once.  The burst colour is
-    snapshotted from the spectrum at the onset moment; the snapshot is
-    only updated when bars carry real signal, preventing hue drift toward
-    white during quiet passages.
-    effect_speed scales particle velocities; effect_decay controls fade.
+    lights sequentially rather than all at once.  A position-independent
+    flash component fires at every onset so single-light setups also show
+    a dramatic burst.  The burst colour is snapshotted from the spectrum at
+    the onset moment; the snapshot is only updated when bars carry real signal.
+    effect_speed scales particle velocities; effect_decay controls fade duration.
     """
 
     def __init__(self) -> None:
         self._particles: list[_Particle] = []
+        self._birth_t: float = -999.0
         self._r: float = 1.0
         self._g: float = 1.0
         self._b: float = 1.0
@@ -932,10 +960,15 @@ class _FireworksRenderer(_EffectRenderer):
                           r=self._r, g=self._g, b=self._b)
                 for v in (-1.2, -0.4, 0.4, 1.2)
             ]
-        # effect_decay=0.3 (default) → decay_rate=0.9 → half-life ≈ 770 ms,
-        # long enough for slow particles to illuminate far lights before fading.
+            self._birth_t = t
+        # Trail: effect_decay=0.3 → decay_rate=0.9 → half-life ≈ 770 ms.
+        # Flash: 2× faster, so the initial BOOM fades while particle trails are still active.
         decay_rate = profile.effect_decay * 3.0
-        return _FireworkScene(list(self._particles), decay_rate)
+        flash_rate = decay_rate * 2.0
+        return _FireworkScene(
+            list(self._particles), decay_rate, flash_rate,
+            self._birth_t, self._r, self._g, self._b,
+        )
 
 
 class _SwirlScene:
