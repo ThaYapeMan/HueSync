@@ -28,6 +28,7 @@ import {
 } from '@/components/ui/select'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
 import {
+  EFFECTS,
   type Coupling,
   type VirtualPlayer,
   type Zone,
@@ -931,16 +932,23 @@ export function Couplings({ activeCouplingId: activeCouplingIdProp, onActivation
   // Lookup helpers
   function playerName(id: string) {
     const p = players.find((p) => p.id === id)
-    return p ? `${p.player_name} (${p.lms_host})` : id
+    return p ? p.player_name : id
   }
   function areaName(zoneId: string) {
     const zone = zones.find((z) => z.id === zoneId)
     return zone ? zone.name : zoneId
   }
-  function modeName(cfId: string) {
+  function effectLabel(effectId: string) {
+    return EFFECTS.find((e) => e.id === effectId)?.label ?? effectId
+  }
+  function effectDisplay(cfId: string) {
     const cf = crossfaders.find((x) => x.id === cfId)
     if (!cf) return cfId
-    return scenes.find((s) => s.id === cf.active_scene_id)?.effect ?? cfId
+    const activeEffect = scenes.find((s) => s.id === cf.active_scene_id)?.effect ?? '—'
+    const active = effectLabel(activeEffect)
+    if (!cf.mellow_scene_id || cf.mellow_scene_id === cf.active_scene_id) return active
+    const mellowEffect = scenes.find((s) => s.id === cf.mellow_scene_id)?.effect ?? '—'
+    return `${active} / ${effectLabel(mellowEffect)}`
   }
 
   if (loading) {
@@ -970,8 +978,8 @@ export function Couplings({ activeCouplingId: activeCouplingIdProp, onActivation
             <TableRow>
               <TableHead>Name</TableHead>
               <TableHead>Player</TableHead>
-              <TableHead>Area</TableHead>
-              <TableHead>Color Mode</TableHead>
+              <TableHead>Zone</TableHead>
+              <TableHead>Effect</TableHead>
               <TableHead>Status</TableHead>
               <TableHead className="text-right">Actions</TableHead>
             </TableRow>
@@ -984,7 +992,7 @@ export function Couplings({ activeCouplingId: activeCouplingIdProp, onActivation
                   <TableCell className="font-medium">{c.name}</TableCell>
                   <TableCell className="text-sm text-muted-foreground">{playerName(c.player_id)}</TableCell>
                   <TableCell className="text-sm text-muted-foreground">{areaName(c.zone_id)}</TableCell>
-                  <TableCell className="text-sm font-mono">{modeName(c.crossfader_id)}</TableCell>
+                  <TableCell className="text-sm">{effectDisplay(c.crossfader_id)}</TableCell>
                   <TableCell>
                     <Badge variant={isActive ? 'default' : 'secondary'}>
                       {isActive ? 'Active' : c.enabled ? 'Inactive' : 'Disabled'}
