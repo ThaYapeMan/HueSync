@@ -9,15 +9,30 @@ export const ONSET_METHODS = [
 
 export type OnsetMethod = typeof ONSET_METHODS[number]['value']
 
-// Canonical list of colour modes.  Derived from models.ColorMode in the backend;
-// any value not in this list raises 422 on POST and 500 on PATCH (until the
-// PATCH guard was added).  Keep in sync with COLOUR_MODES in models.py.
+// Canonical list of colour modes — kept as deprecated alias.
+// New code should use EFFECTS instead.
 export const COLOUR_MODES = [
   { value: 'spectrum_rgb', label: 'Spectrum RGB' },
   { value: 'mono_pulse',   label: 'Mono Pulse' },
 ] as const
 
 export type ColourMode = typeof COLOUR_MODES[number]['value']
+
+// Canonical list of effects.  Keep in sync with EFFECT_IDS in models.py.
+export const EFFECTS = [
+  { id: 'spectrum_rgb', label: 'Spectrum RGB',  description: 'Bass→R, mid→G, treble→B',         hasSpeed: false, hasDecay: false },
+  { id: 'mono_pulse',  label: 'Mono Pulse',   description: 'Brightness follows overall energy',  hasSpeed: false, hasDecay: false },
+  { id: 'pulses',      label: 'Pulses',        description: 'Sharp onset attack, decays away',   hasSpeed: false, hasDecay: true  },
+  { id: 'flashes',     label: 'Flashes',       description: 'Hard flash on onset, dark between', hasSpeed: false, hasDecay: true  },
+  { id: 'splotches',   label: 'Splotches',     description: 'Random lights flare on onset',      hasSpeed: false, hasDecay: true  },
+  { id: 'fireworks',   label: 'Fireworks',     description: 'Expanding burst from a point',      hasSpeed: true,  hasDecay: false },
+  { id: 'swirl',       label: 'Swirl',         description: 'Rotating colour gradient',          hasSpeed: true,  hasDecay: false },
+  { id: 'wave',        label: 'Wave',          description: 'Colour wave across positions',      hasSpeed: true,  hasDecay: false },
+  { id: 'solid',       label: 'Solid',         description: 'Steady colour, drifts with music',  hasSpeed: false, hasDecay: false },
+  { id: 'none',        label: 'None',          description: 'Layer off',                         hasSpeed: false, hasDecay: false },
+] as const
+
+export type EffectId = typeof EFFECTS[number]['id']
 
 export interface EntertainmentArea {
   id: string
@@ -145,7 +160,9 @@ export interface AnalysisConfig {
 export interface RenderConfig {
   id: string
   name: string
-  color_mode: string
+  effect: string
+  effect_speed: number
+  effect_decay: number
   sensitivity: number
   brightness_floor: number
   bass_hz: number

@@ -28,7 +28,7 @@ import {
 } from '@/components/ui/select'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
 import {
-  COLOUR_MODES,
+  EFFECTS,
   type Coupling,
   type VirtualPlayer,
   type LightProvider,
@@ -350,14 +350,14 @@ interface NewRenderConfigDialogProps {
 
 function NewRenderConfigDialog({ open, onClose, onCreated }: NewRenderConfigDialogProps) {
   const [name, setName] = useState('')
-  const [colorMode, setColorMode] = useState('spectrum_rgb')
+  const [effect, setEffect] = useState('spectrum_rgb')
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
     if (open) {
       setName('')
-      setColorMode('spectrum_rgb')
+      setEffect('spectrum_rgb')
       setError(null)
     }
   }, [open])
@@ -368,7 +368,9 @@ function NewRenderConfigDialog({ open, onClose, onCreated }: NewRenderConfigDial
     try {
       const cfg = await createRenderConfig({
         name,
-        color_mode: colorMode,
+        effect,
+        effect_speed: 1.0,
+        effect_decay: 0.3,
         sensitivity: 1.0,
         brightness_floor: 0.15,
         bass_hz: 250,
@@ -397,14 +399,14 @@ function NewRenderConfigDialog({ open, onClose, onCreated }: NewRenderConfigDial
             <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="My render config" />
           </div>
           <div className="space-y-1">
-            <Label className="text-sm">Colour mode</Label>
-            <Select value={colorMode} onValueChange={setColorMode}>
+            <Label className="text-sm">Effect</Label>
+            <Select value={effect} onValueChange={setEffect}>
               <SelectTrigger>
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                {COLOUR_MODES.map((m) => (
-                  <SelectItem key={m.value} value={m.value}>{m.label}</SelectItem>
+                {EFFECTS.map((e) => (
+                  <SelectItem key={e.id} value={e.id}>{e.label}</SelectItem>
                 ))}
               </SelectContent>
             </Select>
@@ -626,45 +628,47 @@ function CouplingEditor({
               </div>
             </div>
 
-            {/* Render config (active layer) */}
-            <div className="space-y-1">
-              <Label className="text-sm">Render config (active layer)</Label>
-              <div className="flex gap-2">
-                <Select value={renderConfigId} onValueChange={setRenderConfigId}>
-                  <SelectTrigger className="flex-1">
-                    <SelectValue placeholder="Select render config" />
+            {/* Two-column Active/Mellow layer selectors */}
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <div className="text-sm font-semibold">Active layer</div>
+                <div className="text-xs text-muted-foreground">Loud passages</div>
+                <div className="flex gap-2">
+                  <Select value={renderConfigId} onValueChange={setRenderConfigId}>
+                    <SelectTrigger className="flex-1">
+                      <SelectValue placeholder="Select render config" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {renderConfigs.map((c) => (
+                        <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <Button size="sm" variant="outline" type="button" onClick={() => setNewRenderConfigOpen(true)}>
+                    + New
+                  </Button>
+                </div>
+              </div>
+              <div className="space-y-2">
+                <div className="text-sm font-semibold">Mellow layer</div>
+                <div className="text-xs text-muted-foreground">Quiet passages</div>
+                <Select value={mellowRenderConfigId} onValueChange={setMellowRenderConfigId}>
+                  <SelectTrigger>
+                    <SelectValue placeholder="Same as active layer" />
                   </SelectTrigger>
                   <SelectContent>
+                    <SelectItem value="">Same as active layer</SelectItem>
                     {renderConfigs.map((c) => (
                       <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>
                     ))}
                   </SelectContent>
                 </Select>
-                <Button size="sm" variant="outline" type="button" onClick={() => setNewRenderConfigOpen(true)}>
-                  + New
-                </Button>
               </div>
             </div>
 
-            {/* Mellow render config (quiet layer) */}
-            <div className="space-y-1">
-              <Label className="text-sm">Mellow layer render config (quiet passages)</Label>
-              <Select value={mellowRenderConfigId} onValueChange={setMellowRenderConfigId}>
-                <SelectTrigger>
-                  <SelectValue placeholder="Same as active layer" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="">Same as active layer</SelectItem>
-                  {renderConfigs.map((c) => (
-                    <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-
-            {/* Layer mixer */}
-            <div className="space-y-2">
-              <Label className="text-sm font-semibold">Layer mixer</Label>
+            {/* Crossfade mix controls */}
+            <div className="space-y-3 border-t pt-3">
+              <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Crossfade</div>
               <div className="space-y-1">
                 <Label className="text-sm text-muted-foreground">Low threshold (energy below → pure mellow)</Label>
                 <Input
@@ -853,7 +857,7 @@ export function Couplings({ activeCouplingId: activeCouplingIdProp, onActivation
     return lp ? lp.name : lpId
   }
   function modeName(rcId: string) {
-    return renderConfigs.find((r) => r.id === rcId)?.color_mode ?? rcId
+    return renderConfigs.find((r) => r.id === rcId)?.effect ?? rcId
   }
 
   if (loading) {

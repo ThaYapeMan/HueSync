@@ -17,16 +17,10 @@ import {
   DialogTitle,
   DialogFooter,
 } from '@/components/ui/dialog'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
+import { cn } from '@/lib/utils'
 import {
-  COLOUR_MODES,
+  EFFECTS,
   type RenderConfig,
   getRenderConfigs,
   createRenderConfig,
@@ -36,7 +30,9 @@ import {
 
 interface FormState {
   name: string
-  color_mode: string
+  effect: string
+  effect_speed: string
+  effect_decay: string
   sensitivity: string
   brightness_floor: string
   bass_hz: string
@@ -48,7 +44,9 @@ interface FormState {
 function defaultForm(cfg?: RenderConfig): FormState {
   return {
     name: cfg?.name ?? '',
-    color_mode: cfg?.color_mode ?? 'spectrum_rgb',
+    effect: cfg?.effect ?? 'spectrum_rgb',
+    effect_speed: String(cfg?.effect_speed ?? 1.0),
+    effect_decay: String(cfg?.effect_decay ?? 0.3),
     sensitivity: String(cfg?.sensitivity ?? 1.0),
     brightness_floor: String(cfg?.brightness_floor ?? 0.15),
     bass_hz: String(cfg?.bass_hz ?? 250),
@@ -117,7 +115,9 @@ export function RenderConfigs() {
     try {
       const body = {
         name: form.name,
-        color_mode: form.color_mode,
+        effect: form.effect,
+        effect_speed: parseFloat(form.effect_speed),
+        effect_decay: parseFloat(form.effect_decay),
         sensitivity: parseFloat(form.sensitivity),
         brightness_floor: parseFloat(form.brightness_floor),
         bass_hz: parseInt(form.bass_hz, 10),
@@ -152,6 +152,8 @@ export function RenderConfigs() {
     return <p className="text-destructive text-sm">{error}</p>
   }
 
+  const selectedEffect = EFFECTS.find((e) => e.id === form.effect)
+
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
@@ -168,7 +170,7 @@ export function RenderConfigs() {
           <TableHeader>
             <TableRow>
               <TableHead>Name</TableHead>
-              <TableHead>Color Mode</TableHead>
+              <TableHead>Effect</TableHead>
               <TableHead>Sensitivity</TableHead>
               <TableHead>Brightness Floor</TableHead>
               <TableHead className="text-right">Actions</TableHead>
@@ -178,7 +180,7 @@ export function RenderConfigs() {
             {configs.map((c) => (
               <TableRow key={c.id}>
                 <TableCell className="font-medium">{c.name}</TableCell>
-                <TableCell className="text-sm font-mono">{c.color_mode}</TableCell>
+                <TableCell className="text-sm font-mono">{c.effect}</TableCell>
                 <TableCell className="text-sm">{c.sensitivity.toFixed(1)}</TableCell>
                 <TableCell className="text-sm">{c.brightness_floor.toFixed(2)}</TableCell>
                 <TableCell className="text-right">
@@ -218,18 +220,50 @@ export function RenderConfigs() {
                 placeholder="My render config"
               />
             </FormRow>
-            <FormRow label="Colour mode">
-              <Select value={form.color_mode} onValueChange={(v) => set('color_mode', v)}>
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {COLOUR_MODES.map((m) => (
-                    <SelectItem key={m.value} value={m.value}>{m.label}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+            <FormRow label="Effect">
+              <div className="grid grid-cols-2 gap-1.5">
+                {EFFECTS.map((e) => (
+                  <button
+                    key={e.id}
+                    type="button"
+                    onClick={() => set('effect', e.id)}
+                    className={cn(
+                      'text-left rounded border p-2 text-sm transition-colors',
+                      form.effect === e.id
+                        ? 'border-primary bg-primary/10'
+                        : 'border-border hover:border-muted-foreground/60'
+                    )}
+                  >
+                    <div className="font-medium leading-tight">{e.label}</div>
+                    <div className="text-xs text-muted-foreground leading-tight mt-0.5">{e.description}</div>
+                  </button>
+                ))}
+              </div>
             </FormRow>
+            {selectedEffect?.hasSpeed && (
+              <FormRow label="Effect speed (0.1 = slow, 5 = fast)">
+                <Input
+                  type="number"
+                  step={0.1}
+                  min={0.1}
+                  max={5}
+                  value={form.effect_speed}
+                  onChange={(e) => set('effect_speed', e.target.value)}
+                />
+              </FormRow>
+            )}
+            {selectedEffect?.hasDecay && (
+              <FormRow label="Effect decay (0.1 = slow, 0.9 = fast)">
+                <Input
+                  type="number"
+                  step={0.05}
+                  min={0.01}
+                  max={0.99}
+                  value={form.effect_decay}
+                  onChange={(e) => set('effect_decay', e.target.value)}
+                />
+              </FormRow>
+            )}
             <FormRow label="Sensitivity">
               <Input
                 type="number"
