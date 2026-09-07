@@ -19,10 +19,11 @@ from .models import (
     AnalysisConfig,
     Controller,
     Coupling,
-    LightProvider,
+    Crossfader,
     PlayerLatency,
-    RenderConfig,
+    Scene,
     VirtualPlayer,
+    Zone,
 )
 
 _lock = threading.Lock()
@@ -39,9 +40,10 @@ class Storage:
                     # Five-entity model
                     "controllers": [],
                     "virtual_players": [],
-                    "light_providers": [],
+                    "zones": [],
                     "analysis_configs": [],
-                    "render_configs": [],
+                    "scenes": [],
+                    "crossfaders": [],
                     "couplings": [],
                     "active_coupling_id": None,
                 }
@@ -53,17 +55,28 @@ class Storage:
         # Back-fill any top-level keys added after the initial file was written.
         data.setdefault("player_latencies", [])
         data.setdefault("controllers", [])
-        data.setdefault("light_providers", [])
         data.setdefault("analysis_configs", [])
-        data.setdefault("render_configs", [])
         data.setdefault("couplings", [])
         data.setdefault("active_coupling_id", None)
+        data.setdefault("crossfaders", [])
         # Migrate old "players" key to "virtual_players" if present.
         if "players" in data and "virtual_players" not in data:
             data["virtual_players"] = data.pop("players")
         elif "players" in data:
             data.pop("players")
         data.setdefault("virtual_players", [])
+        # Migrate old "light_providers" key to "zones" if present.
+        if "light_providers" in data and "zones" not in data:
+            data["zones"] = data.pop("light_providers")
+        elif "light_providers" in data:
+            data.pop("light_providers")
+        data.setdefault("zones", [])
+        # Migrate old "render_configs" key to "scenes" if present.
+        if "render_configs" in data and "scenes" not in data:
+            data["scenes"] = data.pop("render_configs")
+        elif "render_configs" in data:
+            data.pop("render_configs")
+        data.setdefault("scenes", [])
         return data
 
     def _write(self, data: dict) -> None:
@@ -145,26 +158,26 @@ class Storage:
             data["virtual_players"] = [p for p in data["virtual_players"] if p["id"] != player_id]
             self._write(data)
 
-    # -- LightProviders -----------------------------------------------------
+    # -- Zones --------------------------------------------------------------
 
-    def list_light_providers(self) -> list[LightProvider]:
+    def list_zones(self) -> list[Zone]:
         with _lock:
-            return [LightProvider.from_dict(lp) for lp in self._read()["light_providers"]]
+            return [Zone.from_dict(z) for z in self._read()["zones"]]
 
-    def get_light_provider(self, lp_id: str) -> LightProvider | None:
-        return next((lp for lp in self.list_light_providers() if lp.id == lp_id), None)
+    def get_zone(self, zone_id: str) -> Zone | None:
+        return next((z for z in self.list_zones() if z.id == zone_id), None)
 
-    def save_light_provider(self, lp: LightProvider) -> None:
+    def save_zone(self, zone: Zone) -> None:
         with _lock:
             data = self._read()
-            data["light_providers"] = [x for x in data["light_providers"] if x["id"] != lp.id]
-            data["light_providers"].append(lp.to_dict())
+            data["zones"] = [x for x in data["zones"] if x["id"] != zone.id]
+            data["zones"].append(zone.to_dict())
             self._write(data)
 
-    def delete_light_provider(self, lp_id: str) -> None:
+    def delete_zone(self, zone_id: str) -> None:
         with _lock:
             data = self._read()
-            data["light_providers"] = [x for x in data["light_providers"] if x["id"] != lp_id]
+            data["zones"] = [x for x in data["zones"] if x["id"] != zone_id]
             self._write(data)
 
     # -- AnalysisConfigs ----------------------------------------------------
@@ -189,26 +202,48 @@ class Storage:
             data["analysis_configs"] = [x for x in data["analysis_configs"] if x["id"] != ac_id]
             self._write(data)
 
-    # -- RenderConfigs ------------------------------------------------------
+    # -- Scenes -------------------------------------------------------------
 
-    def list_render_configs(self) -> list[RenderConfig]:
+    def list_scenes(self) -> list[Scene]:
         with _lock:
-            return [RenderConfig.from_dict(r) for r in self._read()["render_configs"]]
+            return [Scene.from_dict(s) for s in self._read()["scenes"]]
 
-    def get_render_config(self, rc_id: str) -> RenderConfig | None:
-        return next((r for r in self.list_render_configs() if r.id == rc_id), None)
+    def get_scene(self, scene_id: str) -> Scene | None:
+        return next((s for s in self.list_scenes() if s.id == scene_id), None)
 
-    def save_render_config(self, rc: RenderConfig) -> None:
+    def save_scene(self, scene: Scene) -> None:
         with _lock:
             data = self._read()
-            data["render_configs"] = [x for x in data["render_configs"] if x["id"] != rc.id]
-            data["render_configs"].append(rc.to_dict())
+            data["scenes"] = [x for x in data["scenes"] if x["id"] != scene.id]
+            data["scenes"].append(scene.to_dict())
             self._write(data)
 
-    def delete_render_config(self, rc_id: str) -> None:
+    def delete_scene(self, scene_id: str) -> None:
         with _lock:
             data = self._read()
-            data["render_configs"] = [x for x in data["render_configs"] if x["id"] != rc_id]
+            data["scenes"] = [x for x in data["scenes"] if x["id"] != scene_id]
+            self._write(data)
+
+    # -- Crossfaders --------------------------------------------------------
+
+    def list_crossfaders(self) -> list[Crossfader]:
+        with _lock:
+            return [Crossfader.from_dict(x) for x in self._read()["crossfaders"]]
+
+    def get_crossfader(self, crossfader_id: str) -> Crossfader | None:
+        return next((x for x in self.list_crossfaders() if x.id == crossfader_id), None)
+
+    def save_crossfader(self, crossfader: Crossfader) -> None:
+        with _lock:
+            data = self._read()
+            data["crossfaders"] = [x for x in data["crossfaders"] if x["id"] != crossfader.id]
+            data["crossfaders"].append(crossfader.to_dict())
+            self._write(data)
+
+    def delete_crossfader(self, crossfader_id: str) -> None:
+        with _lock:
+            data = self._read()
+            data["crossfaders"] = [x for x in data["crossfaders"] if x["id"] != crossfader_id]
             self._write(data)
 
     # -- Couplings ----------------------------------------------------------
@@ -236,28 +271,36 @@ class Storage:
             self._write(data)
 
     def migrate(self) -> None:
-        """One-time data migration: create mellow RenderConfigs from mellow_colour_mode.
+        """Idempotent data migration: handles all format changes in one pass.
 
-        Previous format stored mellow_colour_mode, mix_low_threshold,
-        mix_high_threshold, and mix_ema_alpha on the RenderConfig entity.  The
-        new format moves the mix params to the Coupling and gives each coupling
-        its own mellow_render_config_id pointing to a separate RenderConfig.
-
-        If a coupling already has mellow_render_config_id set it is skipped.
+        Migrations applied (in order):
+        1. mellow_colour_mode → separate Scene clone per coupling
+        2. color_mode → effect rename in scene dicts
+        3. render_configs key → scenes key
+        4. light_providers key → zones key
+        5. light_provider_id → zone_id on couplings
+        6. render_config_id + mix fields → Crossfader entity per coupling
         """
         import uuid as _uuid
 
         with _lock:
             data = self._read()
             changed = False
-            rc_by_id = {r["id"]: r for r in data.get("render_configs", [])}
+
+            # --- Step 1 & 2: legacy mellow_colour_mode + color_mode rename ---
+            # Work on scenes list (already migrated from render_configs by _read).
+            scene_by_id = {r["id"]: r for r in data.get("scenes", [])}
 
             for c in data.get("couplings", []):
+                # Only run the old mellow migration if the coupling still has
+                # render_config_id (not yet migrated to crossfader_id).
+                if c.get("crossfader_id") or not c.get("render_config_id"):
+                    continue
                 if c.get("mellow_render_config_id"):
-                    continue  # already migrated
+                    continue  # already done the mellow clone step
 
                 rc_id = c.get("render_config_id", "")
-                rc_raw = rc_by_id.get(rc_id, {})
+                rc_raw = scene_by_id.get(rc_id, {})
 
                 # Move mix params from RC to coupling (if present in old RC data).
                 for param, default in [
@@ -274,7 +317,7 @@ class Storage:
                     mellow_id = str(_uuid.uuid4())
                     mellow_rc = dict(rc_raw)
                     mellow_rc["id"] = mellow_id
-                    mellow_rc["name"] = mellow_rc.get("name", "Render Config") + " (Mellow)"
+                    mellow_rc["name"] = mellow_rc.get("name", "Scene") + " (Mellow)"
                     mellow_rc["color_mode"] = mellow_cm
                     for old_key in (
                         "mellow_colour_mode",
@@ -283,27 +326,67 @@ class Storage:
                         "mix_ema_alpha",
                     ):
                         mellow_rc.pop(old_key, None)
-                    data["render_configs"].append(mellow_rc)
-                    rc_by_id[mellow_id] = mellow_rc
+                    data["scenes"].append(mellow_rc)
+                    scene_by_id[mellow_id] = mellow_rc
                     c["mellow_render_config_id"] = mellow_id
                 else:
-                    # No distinct mellow mode: reuse the same RC for both layers.
+                    # No distinct mellow mode: reuse the same scene for both layers.
                     c["mellow_render_config_id"] = rc_id
                 changed = True
 
-            # Rename color_mode → effect in all render_config dicts (after the
-            # mellow-RC-clone loop so newly created mellow RCs also get renamed).
-            for rc in data.get("render_configs", []):
-                if "color_mode" in rc and "effect" not in rc:
-                    rc["effect"] = rc.pop("color_mode")
+            # Rename color_mode → effect in all scene dicts (after the
+            # mellow-clone loop so newly created mellow scenes also get renamed).
+            for scene in data.get("scenes", []):
+                if "color_mode" in scene and "effect" not in scene:
+                    scene["effect"] = scene.pop("color_mode")
                     changed = True
-                elif "color_mode" in rc:
-                    rc.pop("color_mode")
+                elif "color_mode" in scene:
+                    scene.pop("color_mode")
                     changed = True
                 # Remove obsolete mellow_colour_mode if still present.
-                if "mellow_colour_mode" in rc:
-                    rc.pop("mellow_colour_mode")
+                if "mellow_colour_mode" in scene:
+                    scene.pop("mellow_colour_mode")
                     changed = True
+
+            # --- Step 3 & 4: key renames (handled by _read, normalise here) ---
+            # _read() already moves the data; nothing extra to do here.
+
+            # --- Step 5: light_provider_id → zone_id on couplings ---
+            for c in data.get("couplings", []):
+                if "light_provider_id" in c and "zone_id" not in c:
+                    c["zone_id"] = c.pop("light_provider_id")
+                    changed = True
+                elif "light_provider_id" in c:
+                    c.pop("light_provider_id")
+                    changed = True
+
+            # --- Step 6: render_config_id + mix fields → Crossfader per coupling ---
+            # Create one Crossfader per coupling that has render_config_id but no crossfader_id.
+            cf_by_id: dict = {cf["id"]: cf for cf in data.get("crossfaders", [])}
+
+            for c in data.get("couplings", []):
+                if c.get("crossfader_id"):
+                    continue  # already migrated
+                rc_id = c.pop("render_config_id", "")
+                mellow_rc_id = c.pop("mellow_render_config_id", "")
+                low = c.pop("mix_low_threshold", 0.3)
+                high = c.pop("mix_high_threshold", 0.7)
+                alpha = c.pop("mix_ema_alpha", 0.1)
+
+                cf_id = str(_uuid.uuid4())
+                cf = {
+                    "id": cf_id,
+                    "name": c.get("name", "Crossfader") + " Crossfader",
+                    "active_scene_id": rc_id,
+                    "mellow_scene_id": mellow_rc_id if mellow_rc_id != rc_id else "",
+                    "low_threshold": low,
+                    "high_threshold": high,
+                    "fade_speed": alpha,
+                }
+                data.setdefault("crossfaders", []).append(cf)
+                cf_by_id[cf_id] = cf
+                c["crossfader_id"] = cf_id
+                changed = True
 
             if changed:
                 self._write(data)

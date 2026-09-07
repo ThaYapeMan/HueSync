@@ -16,10 +16,11 @@ from huesync.models import (
     Controller,
     ControllerType,
     Coupling,
-    LightProvider,
+    Crossfader,
     Profile,
-    RenderConfig,
+    Scene,
     VirtualPlayer,
+    Zone,
 )
 from huesync.player_manager import ActiveSession, PlayerManager, _build_engine_profile
 from huesync.storage import Storage
@@ -208,12 +209,12 @@ def _make_full_storage(tmp_path: Path) -> tuple[Storage, Coupling]:
     )
     storage.save_virtual_player(player)
 
-    lp = LightProvider(
-        id="lp-1", name="Living AE", controller_id="ctrl-1",
+    zone = Zone(
+        id="zone-1", name="Living AE", controller_id="ctrl-1",
         entertainment_area_id="ae-001", entertainment_area_name="Living Room AE",
         light_count=4,
     )
-    storage.save_light_provider(lp)
+    storage.save_zone(zone)
 
     ac = AnalysisConfig(
         id="ac-1", name="Default", onset_method="combined", onset_delta=0.1,
@@ -222,17 +223,24 @@ def _make_full_storage(tmp_path: Path) -> tuple[Storage, Coupling]:
     )
     storage.save_analysis_config(ac)
 
-    rc = RenderConfig(
-        id="rc-1", name="Default", effect="spectrum_rgb",
+    scene = Scene(
+        id="scene-1", name="Default", effect="spectrum_rgb",
         sensitivity=1.0, brightness_floor=0.15, bass_hz=250, mid_hz=2000,
         exertion_clip=3.0,
     )
-    storage.save_render_config(rc)
+    storage.save_scene(scene)
+
+    crossfader = Crossfader(
+        id="cf-1", name="Default CF",
+        active_scene_id="scene-1",
+        low_threshold=0.3, high_threshold=0.7, fade_speed=0.1,
+    )
+    storage.save_crossfader(crossfader)
 
     coupling = Coupling(
         id="coupling-1", name="Living Room",
         player_id="player-1", analysis_config_id="ac-1",
-        light_provider_id="lp-1", render_config_id="rc-1", enabled=True,
+        zone_id="zone-1", crossfader_id="cf-1", enabled=True,
     )
     storage.save_coupling(coupling)
 
@@ -272,9 +280,9 @@ def test_build_profile_from_coupling_returns_none_on_missing_player(tmp_path: Pa
     assert _build_engine_profile(coupling, storage) is None
 
 
-def test_build_profile_from_coupling_returns_none_on_missing_lp(tmp_path: Path) -> None:
+def test_build_profile_from_coupling_returns_none_on_missing_zone(tmp_path: Path) -> None:
     storage, coupling = _make_full_storage(tmp_path)
-    storage.delete_light_provider("lp-1")
+    storage.delete_zone("zone-1")
     assert _build_engine_profile(coupling, storage) is None
 
 
@@ -284,9 +292,15 @@ def test_build_profile_from_coupling_returns_none_on_missing_ac(tmp_path: Path) 
     assert _build_engine_profile(coupling, storage) is None
 
 
-def test_build_profile_from_coupling_returns_none_on_missing_rc(tmp_path: Path) -> None:
+def test_build_profile_from_coupling_returns_none_on_missing_crossfader(tmp_path: Path) -> None:
     storage, coupling = _make_full_storage(tmp_path)
-    storage.delete_render_config("rc-1")
+    storage.delete_crossfader("cf-1")
+    assert _build_engine_profile(coupling, storage) is None
+
+
+def test_build_profile_from_coupling_returns_none_on_missing_scene(tmp_path: Path) -> None:
+    storage, coupling = _make_full_storage(tmp_path)
+    storage.delete_scene("scene-1")
     assert _build_engine_profile(coupling, storage) is None
 
 
@@ -304,12 +318,12 @@ def test_activate_coupling_raises_on_missing_player(tmp_path: Path) -> None:
         asyncio.run(manager.activate_coupling(coupling))
 
 
-def test_activate_coupling_raises_on_missing_light_provider(tmp_path: Path) -> None:
+def test_activate_coupling_raises_on_missing_zone(tmp_path: Path) -> None:
     storage, coupling = _make_full_storage(tmp_path)
-    storage.delete_light_provider("lp-1")
+    storage.delete_zone("zone-1")
     manager = PlayerManager(storage)
 
-    with pytest.raises(ValueError, match="missing LightProvider"):
+    with pytest.raises(ValueError, match="missing Zone"):
         asyncio.run(manager.activate_coupling(coupling))
 
 
@@ -322,12 +336,21 @@ def test_activate_coupling_raises_on_missing_analysis_config(tmp_path: Path) -> 
         asyncio.run(manager.activate_coupling(coupling))
 
 
-def test_activate_coupling_raises_on_missing_render_config(tmp_path: Path) -> None:
+def test_activate_coupling_raises_on_missing_crossfader(tmp_path: Path) -> None:
     storage, coupling = _make_full_storage(tmp_path)
-    storage.delete_render_config("rc-1")
+    storage.delete_crossfader("cf-1")
     manager = PlayerManager(storage)
 
-    with pytest.raises(ValueError, match="missing RenderConfig"):
+    with pytest.raises(ValueError, match="missing Crossfader"):
+        asyncio.run(manager.activate_coupling(coupling))
+
+
+def test_activate_coupling_raises_on_missing_scene(tmp_path: Path) -> None:
+    storage, coupling = _make_full_storage(tmp_path)
+    storage.delete_scene("scene-1")
+    manager = PlayerManager(storage)
+
+    with pytest.raises(ValueError, match="missing Scene"):
         asyncio.run(manager.activate_coupling(coupling))
 
 

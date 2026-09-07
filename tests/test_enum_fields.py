@@ -97,16 +97,16 @@ def test_effect_ids_contains_expected_effects() -> None:
 # ---------------------------------------------------------------------------
 
 def test_patch_handler_has_effect_guard() -> None:
-    """The PATCH /render-configs handler must validate effect against EFFECT_IDS.
+    """The PATCH /scenes handler must validate effect against EFFECT_IDS.
 
     Without the guard, an unknown effect silently falls through to the
     fallback renderer instead of returning 422 Unprocessable Entity.
     """
     source = _API_PY.read_text()
-    patch_section = source[source.index("patch_render_config"):]
+    patch_section = source[source.index("patch_scene"):]
     next_router = patch_section.find("@router", 1)
     handler_body = patch_section[:next_router] if next_router != -1 else patch_section
     assert "EFFECT_IDS" in handler_body, (
-        "patch_render_config must check effect against EFFECT_IDS to return 422 "
+        "patch_scene must check effect against EFFECT_IDS to return 422 "
         "for unknown effect values"
     )

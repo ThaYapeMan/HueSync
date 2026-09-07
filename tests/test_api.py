@@ -16,9 +16,10 @@ from huesync.app import app
 from huesync.models import (
     AnalysisConfig,
     Coupling,
-    LightProvider,
-    RenderConfig,
+    Crossfader,
+    Scene,
     VirtualPlayer,
+    Zone,
 )
 from huesync.storage import Storage
 
@@ -177,11 +178,11 @@ def test_create_and_get_virtual_player(client: TestClient):
 
 
 # ---------------------------------------------------------------------------
-# LightProviders
+# Zones (was LightProviders)
 # ---------------------------------------------------------------------------
 
 
-def test_create_and_get_light_provider(client: TestClient):
+def test_create_and_get_zone(client: TestClient):
     payload = {
         "name": "Living Room EA",
         "controller_id": "ctrl-1",
@@ -189,14 +190,14 @@ def test_create_and_get_light_provider(client: TestClient):
         "entertainment_area_name": "Living Room",
         "light_count": 4,
     }
-    resp = client.post("/api/light-providers", json=payload)
+    resp = client.post("/api/zones", json=payload)
     assert resp.status_code == 201
     body = resp.json()
-    lp_id = body["id"]
+    zone_id = body["id"]
     assert body["name"] == "Living Room EA"
     assert body["light_count"] == 4
 
-    resp2 = client.get(f"/api/light-providers/{lp_id}")
+    resp2 = client.get(f"/api/zones/{zone_id}")
     assert resp2.status_code == 200
     assert resp2.json()["entertainment_area_name"] == "Living Room"
 
@@ -221,19 +222,19 @@ def test_create_and_get_analysis_config(client: TestClient):
 
 
 # ---------------------------------------------------------------------------
-# RenderConfigs
+# Scenes (was RenderConfigs)
 # ---------------------------------------------------------------------------
 
 
-def test_create_and_get_render_config(client: TestClient):
+def test_create_and_get_scene(client: TestClient):
     payload = {"name": "Vivid", "effect": "spectrum_rgb", "sensitivity": 1.5}
-    resp = client.post("/api/render-configs", json=payload)
+    resp = client.post("/api/scenes", json=payload)
     assert resp.status_code == 201
     body = resp.json()
-    rc_id = body["id"]
+    scene_id = body["id"]
     assert body["sensitivity"] == 1.5
 
-    resp2 = client.get(f"/api/render-configs/{rc_id}")
+    resp2 = client.get(f"/api/scenes/{scene_id}")
     assert resp2.status_code == 200
     assert resp2.json()["name"] == "Vivid"
 
@@ -246,19 +247,21 @@ def test_create_and_get_render_config(client: TestClient):
 def _make_full_coupling(storage: Storage) -> Coupling:
     """Create and persist all entities required for a Coupling, return the Coupling."""
     player = VirtualPlayer(name="P", lms_host="10.0.0.1", player_mac="aa:bb:cc:dd:ee:ff")
-    lp = LightProvider(name="LP", controller_id="ctrl-1", entertainment_area_id="ea-1")
+    zone = Zone(name="Z", controller_id="ctrl-1", entertainment_area_id="ea-1")
     ac = AnalysisConfig(name="AC")
-    rc = RenderConfig(name="RC")
+    scene = Scene(name="SC")
+    crossfader = Crossfader(name="CF", active_scene_id=scene.id)
     storage.save_virtual_player(player)
-    storage.save_light_provider(lp)
+    storage.save_zone(zone)
     storage.save_analysis_config(ac)
-    storage.save_render_config(rc)
+    storage.save_scene(scene)
+    storage.save_crossfader(crossfader)
     coupling = Coupling(
         name="Test Coupling",
         player_id=player.id,
-        light_provider_id=lp.id,
+        zone_id=zone.id,
         analysis_config_id=ac.id,
-        render_config_id=rc.id,
+        crossfader_id=crossfader.id,
     )
     storage.save_coupling(coupling)
     return coupling
@@ -266,20 +269,22 @@ def _make_full_coupling(storage: Storage) -> Coupling:
 
 def test_create_coupling(client: TestClient):
     player = VirtualPlayer(name="P", lms_host="10.0.0.1")
-    lp = LightProvider(name="LP", controller_id="c1", entertainment_area_id="ea-1")
+    zone = Zone(name="Z", controller_id="c1", entertainment_area_id="ea-1")
     ac = AnalysisConfig(name="AC")
-    rc = RenderConfig(name="RC")
+    scene = Scene(name="SC")
+    crossfader = Crossfader(name="CF", active_scene_id=scene.id)
     client._storage.save_virtual_player(player)
-    client._storage.save_light_provider(lp)
+    client._storage.save_zone(zone)
     client._storage.save_analysis_config(ac)
-    client._storage.save_render_config(rc)
+    client._storage.save_scene(scene)
+    client._storage.save_crossfader(crossfader)
 
     payload = {
         "name": "My Coupling",
         "player_id": player.id,
         "analysis_config_id": ac.id,
-        "light_provider_id": lp.id,
-        "render_config_id": rc.id,
+        "zone_id": zone.id,
+        "crossfader_id": crossfader.id,
     }
     resp = client.post("/api/couplings", json=payload)
     assert resp.status_code == 201
@@ -298,9 +303,9 @@ def test_activate_coupling_missing_entities(client: TestClient):
     coupling = Coupling(
         name="Broken",
         player_id="missing",
-        light_provider_id="missing",
+        zone_id="missing",
         analysis_config_id="missing",
-        render_config_id="missing",
+        crossfader_id="missing",
     )
     client._storage.save_coupling(coupling)
     client._manager.activate_coupling.side_effect = ValueError("missing Player")
@@ -338,17 +343,6 @@ def test_deactivate_coupling_endpoint(client: TestClient):
     assert resp.json() == {"active_id": None}
     client._manager.deactivate.assert_awaited_once()
     assert client._storage.get_active_coupling_id() is None
-
-
-def test_patch_coupling_render_field_triggers_update_render(client: TestClient):
-    coupling = _make_full_coupling(client._storage)
-    client._storage.set_active_coupling_id(coupling.id)
-
-    resp = client.patch(f"/api/couplings/{coupling.id}", json={"sensitivity": 1.8})
-    assert resp.status_code == 200
-    client._manager.update_render.assert_called_once()
-    client._manager.deactivate.assert_not_awaited()
-    client._manager.restart_cava.assert_not_awaited()
 
 
 def test_patch_coupling_cava_field_triggers_restart_cava(client: TestClient):
@@ -393,18 +387,20 @@ def test_patch_coupling_analysis_config_id_restarts_cava_not_deactivate(client: 
     assert saved is not None and saved.analysis_config_id == new_ac.id
 
 
-def test_patch_coupling_render_config_id_update_render_only(client: TestClient):
-    """Swapping render_config_id must call update_render only — no cava restart,
+def test_patch_coupling_crossfader_id_update_render_only(client: TestClient):
+    """Swapping crossfader_id must call update_render only — no cava restart,
     no deactivate."""
     coupling = _make_full_coupling(client._storage)
     client._storage.set_active_coupling_id(coupling.id)
 
-    new_rc = RenderConfig(name="RC2")
-    client._storage.save_render_config(new_rc)
+    new_scene = Scene(name="SC2")
+    client._storage.save_scene(new_scene)
+    new_cf = Crossfader(name="CF2", active_scene_id=new_scene.id)
+    client._storage.save_crossfader(new_cf)
 
     resp = client.patch(
         f"/api/couplings/{coupling.id}",
-        json={"render_config_id": new_rc.id},
+        json={"crossfader_id": new_cf.id},
     )
     assert resp.status_code == 200
     client._manager.deactivate.assert_not_awaited()
@@ -412,7 +408,7 @@ def test_patch_coupling_render_config_id_update_render_only(client: TestClient):
     client._manager.update_render.assert_called_once()
 
     saved = client._storage.get_coupling(coupling.id)
-    assert saved is not None and saved.render_config_id == new_rc.id
+    assert saved is not None and saved.crossfader_id == new_cf.id
 
 
 def test_ac_swap_session_remains_active(client: TestClient):
@@ -479,24 +475,32 @@ def test_clone_coupling_returns_new_id(client: TestClient):
     assert body["name"] == f"{coupling.name} (copy)"
 
 
-def test_clone_coupling_analysis_and_render_configs_are_independent(client: TestClient):
-    """Cloned AnalysisConfig and RenderConfig have new IDs but identical field values."""
+def test_clone_coupling_analysis_and_scene_configs_are_independent(client: TestClient):
+    """Cloned AnalysisConfig and Scene have new IDs but identical field values.
+    Cloned Crossfader has a new ID and points to the new Scene.
+    """
     coupling = _make_full_coupling(client._storage)
     orig_ac = client._storage.get_analysis_config(coupling.analysis_config_id)
-    orig_rc = client._storage.get_render_config(coupling.render_config_id)
+    orig_cf = client._storage.get_crossfader(coupling.crossfader_id)
+    orig_scene = client._storage.get_scene(orig_cf.active_scene_id) if orig_cf else None
 
     resp = client.post(f"/api/couplings/{coupling.id}/clone")
     assert resp.status_code == 201
     body = resp.json()
 
     new_ac = client._storage.get_analysis_config(body["analysis_config_id"])
-    new_rc = client._storage.get_render_config(body["render_config_id"])
+    new_cf = client._storage.get_crossfader(body["crossfader_id"])
+    new_scene = client._storage.get_scene(new_cf.active_scene_id) if new_cf else None
 
     # New IDs — not the same sub-entity objects.
     assert new_ac is not None
-    assert new_rc is not None
+    assert new_cf is not None
+    assert new_scene is not None
+    assert orig_ac is not None
+    assert orig_scene is not None
     assert new_ac.id != orig_ac.id
-    assert new_rc.id != orig_rc.id
+    assert new_cf.id != orig_cf.id
+    assert new_scene.id != orig_scene.id
 
     # All field values identical to the originals.
     assert new_ac.onset_method == orig_ac.onset_method
@@ -505,16 +509,16 @@ def test_clone_coupling_analysis_and_render_configs_are_independent(client: Test
     assert new_ac.bars == orig_ac.bars
     assert new_ac.lower_cutoff_freq == orig_ac.lower_cutoff_freq
     assert new_ac.higher_cutoff_freq == orig_ac.higher_cutoff_freq
-    assert new_rc.effect == orig_rc.effect
-    assert new_rc.sensitivity == orig_rc.sensitivity
-    assert new_rc.brightness_floor == orig_rc.brightness_floor
-    assert new_rc.bass_hz == orig_rc.bass_hz
-    assert new_rc.mid_hz == orig_rc.mid_hz
-    assert new_rc.exertion_clip == orig_rc.exertion_clip
+    assert new_scene.effect == orig_scene.effect
+    assert new_scene.sensitivity == orig_scene.sensitivity
+    assert new_scene.brightness_floor == orig_scene.brightness_floor
+    assert new_scene.bass_hz == orig_scene.bass_hz
+    assert new_scene.mid_hz == orig_scene.mid_hz
+    assert new_scene.exertion_clip == orig_scene.exertion_clip
 
-    # Player and LightProvider are shared (same IDs).
+    # Player and Zone are shared (same IDs).
     assert body["player_id"] == coupling.player_id
-    assert body["light_provider_id"] == coupling.light_provider_id
+    assert body["zone_id"] == coupling.zone_id
 
 
 def test_clone_coupling_modifying_clone_does_not_affect_original(client: TestClient):

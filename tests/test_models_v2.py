@@ -8,9 +8,10 @@ from huesync.models import (
     Controller,
     ControllerType,
     Coupling,
-    LightProvider,
-    RenderConfig,
+    Crossfader,
+    Scene,
     VirtualPlayer,
+    Zone,
 )
 from huesync.storage import Storage
 
@@ -78,19 +79,19 @@ def test_player_from_dict_strips_unknown_keys():
 
 
 # ---------------------------------------------------------------------------
-# LightProvider round-trip
+# Zone round-trip (was LightProvider)
 # ---------------------------------------------------------------------------
 
 
-def test_light_provider_roundtrip():
-    lp = LightProvider(name="Living Room AE", controller_id="ctrl-1",
-                       entertainment_area_id="ae-001",
-                       entertainment_area_name="Living Room", light_count=5)
-    lp2 = LightProvider.from_dict(lp.to_dict())
-    assert lp2.id == lp.id
-    assert lp2.controller_id == lp.controller_id
-    assert lp2.entertainment_area_id == lp.entertainment_area_id
-    assert lp2.light_count == lp.light_count
+def test_zone_roundtrip():
+    zone = Zone(name="Living Room AE", controller_id="ctrl-1",
+                entertainment_area_id="ae-001",
+                entertainment_area_name="Living Room", light_count=5)
+    zone2 = Zone.from_dict(zone.to_dict())
+    assert zone2.id == zone.id
+    assert zone2.controller_id == zone.controller_id
+    assert zone2.entertainment_area_id == zone.entertainment_area_id
+    assert zone2.light_count == zone.light_count
 
 
 # ---------------------------------------------------------------------------
@@ -117,26 +118,43 @@ def test_analysis_config_from_dict_strips_unknown_keys():
 
 
 # ---------------------------------------------------------------------------
-# RenderConfig round-trip
+# Scene round-trip (was RenderConfig)
 # ---------------------------------------------------------------------------
 
 
-def test_render_config_roundtrip():
-    rc = RenderConfig(name="Vivid", effect="mono_pulse",
-                      sensitivity=2.0, brightness_floor=0.1,
-                      bass_hz=300, mid_hz=2500, exertion_clip=4.0)
-    rc2 = RenderConfig.from_dict(rc.to_dict())
-    assert rc2.id == rc.id
-    assert rc2.effect == "mono_pulse"
-    assert rc2.sensitivity == 2.0
-    assert rc2.exertion_clip == 4.0
+def test_scene_roundtrip():
+    sc = Scene(name="Vivid", effect="mono_pulse",
+               sensitivity=2.0, brightness_floor=0.1,
+               bass_hz=300, mid_hz=2500, exertion_clip=4.0)
+    sc2 = Scene.from_dict(sc.to_dict())
+    assert sc2.id == sc.id
+    assert sc2.effect == "mono_pulse"
+    assert sc2.sensitivity == 2.0
+    assert sc2.exertion_clip == 4.0
 
 
-def test_render_config_bad_color_mode_falls_back():
-    d = RenderConfig().to_dict()
+def test_scene_bad_color_mode_falls_back():
+    d = Scene().to_dict()
     d["color_mode"] = "bass_brightness"  # legacy value — should migrate to spectrum_rgb
-    rc = RenderConfig.from_dict(d)
-    assert rc.effect == "spectrum_rgb"
+    sc = Scene.from_dict(d)
+    assert sc.effect == "spectrum_rgb"
+
+
+# ---------------------------------------------------------------------------
+# Crossfader round-trip
+# ---------------------------------------------------------------------------
+
+
+def test_crossfader_roundtrip():
+    cf = Crossfader(name="My CF", active_scene_id="sc-1",
+                    mellow_scene_id="sc-2", low_threshold=0.2,
+                    high_threshold=0.8, fade_speed=0.05)
+    cf2 = Crossfader.from_dict(cf.to_dict())
+    assert cf2.id == cf.id
+    assert cf2.active_scene_id == "sc-1"
+    assert cf2.mellow_scene_id == "sc-2"
+    assert cf2.low_threshold == 0.2
+    assert cf2.fade_speed == 0.05
 
 
 # ---------------------------------------------------------------------------
@@ -146,12 +164,26 @@ def test_render_config_bad_color_mode_falls_back():
 
 def test_coupling_roundtrip():
     c = Coupling(name="Zone A → Hue", player_id="p1", analysis_config_id="ac1",
-                 light_provider_id="lp1", render_config_id="rc1", enabled=False)
+                 zone_id="z1", crossfader_id="cf1", enabled=False)
     c2 = Coupling.from_dict(c.to_dict())
     assert c2.id == c.id
     assert c2.player_id == "p1"
     assert c2.analysis_config_id == "ac1"
+    assert c2.zone_id == "z1"
+    assert c2.crossfader_id == "cf1"
     assert c2.enabled is False
+
+
+def test_coupling_backward_compat_light_provider_id():
+    """Old dicts with light_provider_id are automatically remapped to zone_id."""
+    d = {
+        "id": "c-1", "name": "Test", "player_id": "p1",
+        "analysis_config_id": "ac1", "light_provider_id": "lp1",
+        "crossfader_id": "cf1", "enabled": True,
+    }
+    c = Coupling.from_dict(d)
+    assert c.zone_id == "lp1"
+    assert not hasattr(c, "light_provider_id")
 
 
 # ---------------------------------------------------------------------------
@@ -216,25 +248,25 @@ def test_storage_delete_player():
 
 
 # ---------------------------------------------------------------------------
-# Storage CRUD — LightProvider
+# Storage CRUD — Zone (was LightProvider)
 # ---------------------------------------------------------------------------
 
 
-def test_storage_save_and_get_light_provider():
+def test_storage_save_and_get_zone():
     s = make_storage()
-    lp = LightProvider(name="Living AE", controller_id="ctrl-1", light_count=3)
-    s.save_light_provider(lp)
-    fetched = s.get_light_provider(lp.id)
+    zone = Zone(name="Living AE", controller_id="ctrl-1", light_count=3)
+    s.save_zone(zone)
+    fetched = s.get_zone(zone.id)
     assert fetched is not None
     assert fetched.light_count == 3
 
 
-def test_storage_delete_light_provider():
+def test_storage_delete_zone():
     s = make_storage()
-    lp = LightProvider()
-    s.save_light_provider(lp)
-    s.delete_light_provider(lp.id)
-    assert s.get_light_provider(lp.id) is None
+    zone = Zone()
+    s.save_zone(zone)
+    s.delete_zone(zone.id)
+    assert s.get_zone(zone.id) is None
 
 
 # ---------------------------------------------------------------------------
@@ -261,26 +293,49 @@ def test_storage_delete_analysis_config():
 
 
 # ---------------------------------------------------------------------------
-# Storage CRUD — RenderConfig
+# Storage CRUD — Scene (was RenderConfig)
 # ---------------------------------------------------------------------------
 
 
-def test_storage_save_and_get_render_config():
+def test_storage_save_and_get_scene():
     s = make_storage()
-    rc = RenderConfig(name="Vivid", sensitivity=2.0, exertion_clip=4.0)
-    s.save_render_config(rc)
-    fetched = s.get_render_config(rc.id)
+    sc = Scene(name="Vivid", sensitivity=2.0, exertion_clip=4.0)
+    s.save_scene(sc)
+    fetched = s.get_scene(sc.id)
     assert fetched is not None
     assert fetched.sensitivity == 2.0
     assert fetched.exertion_clip == 4.0
 
 
-def test_storage_delete_render_config():
+def test_storage_delete_scene():
     s = make_storage()
-    rc = RenderConfig()
-    s.save_render_config(rc)
-    s.delete_render_config(rc.id)
-    assert s.get_render_config(rc.id) is None
+    sc = Scene()
+    s.save_scene(sc)
+    s.delete_scene(sc.id)
+    assert s.get_scene(sc.id) is None
+
+
+# ---------------------------------------------------------------------------
+# Storage CRUD — Crossfader
+# ---------------------------------------------------------------------------
+
+
+def test_storage_save_and_get_crossfader():
+    s = make_storage()
+    cf = Crossfader(name="CF", active_scene_id="sc-1", low_threshold=0.2)
+    s.save_crossfader(cf)
+    fetched = s.get_crossfader(cf.id)
+    assert fetched is not None
+    assert fetched.active_scene_id == "sc-1"
+    assert fetched.low_threshold == 0.2
+
+
+def test_storage_delete_crossfader():
+    s = make_storage()
+    cf = Crossfader()
+    s.save_crossfader(cf)
+    s.delete_crossfader(cf.id)
+    assert s.get_crossfader(cf.id) is None
 
 
 # ---------------------------------------------------------------------------
@@ -291,11 +346,13 @@ def test_storage_delete_render_config():
 def test_storage_save_and_get_coupling():
     s = make_storage()
     c = Coupling(name="Zone A → Hue", player_id="p1", analysis_config_id="ac1",
-                 light_provider_id="lp1", render_config_id="rc1")
+                 zone_id="z1", crossfader_id="cf1")
     s.save_coupling(c)
     fetched = s.get_coupling(c.id)
     assert fetched is not None
     assert fetched.player_id == "p1"
+    assert fetched.zone_id == "z1"
+    assert fetched.crossfader_id == "cf1"
 
 
 def test_storage_delete_coupling_clears_active_id():

@@ -21,11 +21,11 @@ import { ConfirmDialog } from '@/components/ConfirmDialog'
 import { cn } from '@/lib/utils'
 import {
   EFFECTS,
-  type RenderConfig,
-  getRenderConfigs,
-  createRenderConfig,
-  updateRenderConfig,
-  deleteRenderConfig,
+  type Scene,
+  getScenes,
+  createScene,
+  updateScene,
+  deleteScene,
 } from '@/lib/api'
 
 interface FormState {
@@ -41,7 +41,7 @@ interface FormState {
   onset_flash_intensity: string
 }
 
-function defaultForm(cfg?: RenderConfig): FormState {
+function defaultForm(cfg?: Scene): FormState {
   return {
     name: cfg?.name ?? '',
     effect: cfg?.effect ?? 'spectrum_rgb',
@@ -65,20 +65,20 @@ function FormRow({ label, children }: { label: string; children: React.ReactNode
   )
 }
 
-export function RenderConfigs() {
-  const [configs, setConfigs] = useState<RenderConfig[]>([])
+export function Scenes() {
+  const [scenes, setScenes] = useState<Scene[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [editorOpen, setEditorOpen] = useState(false)
-  const [editingConfig, setEditingConfig] = useState<RenderConfig | undefined>(undefined)
+  const [editingScene, setEditingScene] = useState<Scene | undefined>(undefined)
   const [form, setForm] = useState<FormState>(defaultForm())
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
 
   async function load() {
     try {
-      const data = await getRenderConfigs()
-      setConfigs(data)
+      const data = await getScenes()
+      setScenes(data)
       setError(null)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to load')
@@ -92,15 +92,15 @@ export function RenderConfigs() {
   }, [])
 
   function openNew() {
-    setEditingConfig(undefined)
+    setEditingScene(undefined)
     setForm(defaultForm())
     setSaveError(null)
     setEditorOpen(true)
   }
 
-  function openEdit(cfg: RenderConfig) {
-    setEditingConfig(cfg)
-    setForm(defaultForm(cfg))
+  function openEdit(scene: Scene) {
+    setEditingScene(scene)
+    setForm(defaultForm(scene))
     setSaveError(null)
     setEditorOpen(true)
   }
@@ -125,10 +125,10 @@ export function RenderConfigs() {
         exertion_clip: parseFloat(form.exertion_clip),
         onset_flash_intensity: parseFloat(form.onset_flash_intensity),
       }
-      if (editingConfig) {
-        await updateRenderConfig(editingConfig.id, body)
+      if (editingScene) {
+        await updateScene(editingScene.id, body)
       } else {
-        await createRenderConfig(body)
+        await createScene(body)
       }
       setEditorOpen(false)
       await load()
@@ -140,7 +140,7 @@ export function RenderConfigs() {
   }
 
   async function handleDelete(id: string) {
-    await deleteRenderConfig(id)
+    await deleteScene(id)
     await load()
   }
 
@@ -157,14 +157,14 @@ export function RenderConfigs() {
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <h2 className="text-sm font-semibold">Render configs</h2>
+        <h2 className="text-sm font-semibold">Scenes</h2>
         <Button size="sm" onClick={openNew}>
-          New config
+          New scene
         </Button>
       </div>
 
-      {configs.length === 0 ? (
-        <p className="text-sm text-muted-foreground">No render configs yet. Create one to get started.</p>
+      {scenes.length === 0 ? (
+        <p className="text-sm text-muted-foreground">No scenes yet. Create one to get started.</p>
       ) : (
         <Table>
           <TableHeader>
@@ -177,7 +177,7 @@ export function RenderConfigs() {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {configs.map((c) => (
+            {scenes.map((c) => (
               <TableRow key={c.id}>
                 <TableCell className="font-medium">{c.name}</TableCell>
                 <TableCell className="text-sm font-mono">{c.effect}</TableCell>
@@ -194,7 +194,7 @@ export function RenderConfigs() {
                           Delete
                         </Button>
                       }
-                      title="Delete render config"
+                      title="Delete scene"
                       description={`Delete "${c.name}"? This cannot be undone.`}
                       onConfirm={() => handleDelete(c.id)}
                     />
@@ -209,7 +209,7 @@ export function RenderConfigs() {
       <Dialog open={editorOpen} onOpenChange={(o) => { if (!o) setEditorOpen(false) }}>
         <DialogContent className="max-w-md flex flex-col max-h-[90vh]">
           <DialogHeader>
-            <DialogTitle>{editingConfig ? 'Edit render config' : 'New render config'}</DialogTitle>
+            <DialogTitle>{editingScene ? 'Edit scene' : 'New scene'}</DialogTitle>
           </DialogHeader>
 
           <div className="overflow-y-auto flex-1 pr-1 space-y-4">
@@ -217,7 +217,7 @@ export function RenderConfigs() {
               <Input
                 value={form.name}
                 onChange={(e) => set('name', e.target.value)}
-                placeholder="My render config"
+                placeholder="My scene"
               />
             </FormRow>
             <FormRow label="Effect">

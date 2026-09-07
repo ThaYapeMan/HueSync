@@ -52,10 +52,11 @@ def _build_engine_profile(coupling: Coupling, storage: Storage) -> Profile | Non
     rest of the stack works with Coupling + entities.
     """
     player = storage.get_virtual_player(coupling.player_id)
-    lp     = storage.get_light_provider(coupling.light_provider_id)
+    zone   = storage.get_zone(coupling.zone_id)
     ac     = storage.get_analysis_config(coupling.analysis_config_id)
-    rc     = storage.get_render_config(coupling.render_config_id)
-    if not all([player, lp, ac, rc]):
+    cf     = storage.get_crossfader(coupling.crossfader_id)
+    scene  = storage.get_scene(cf.active_scene_id) if cf else None
+    if not all([player, zone, ac, cf, scene]):
         return None
     return Profile(
         id=coupling.id,
@@ -65,22 +66,22 @@ def _build_engine_profile(coupling: Coupling, storage: Storage) -> Profile | Non
         player_name=player.player_name,
         player_mac=player.player_mac,
         alsa_device=player.alsa_device,
-        bridge_id=lp.controller_id,
-        entertainment_area_id=lp.entertainment_area_id,
-        entertainment_area_name=lp.entertainment_area_name,
-        light_count=lp.light_count,
-        effect=rc.effect,
-        effect_speed=rc.effect_speed,
-        effect_decay=rc.effect_decay,
-        mix_low_threshold=coupling.mix_low_threshold,
-        mix_high_threshold=coupling.mix_high_threshold,
-        mix_ema_alpha=coupling.mix_ema_alpha,
-        sensitivity=rc.sensitivity,
-        brightness_floor=rc.brightness_floor,
-        bass_hz=rc.bass_hz,
-        mid_hz=rc.mid_hz,
-        exertion_clip=rc.exertion_clip,
-        onset_flash_intensity=rc.onset_flash_intensity,
+        bridge_id=zone.controller_id,
+        entertainment_area_id=zone.entertainment_area_id,
+        entertainment_area_name=zone.entertainment_area_name,
+        light_count=zone.light_count,
+        effect=scene.effect,
+        effect_speed=scene.effect_speed,
+        effect_decay=scene.effect_decay,
+        mix_low_threshold=cf.low_threshold,
+        mix_high_threshold=cf.high_threshold,
+        mix_ema_alpha=cf.fade_speed,
+        sensitivity=scene.sensitivity,
+        brightness_floor=scene.brightness_floor,
+        bass_hz=scene.bass_hz,
+        mid_hz=scene.mid_hz,
+        exertion_clip=scene.exertion_clip,
+        onset_flash_intensity=scene.onset_flash_intensity,
         onset_method=ac.onset_method,
         onset_delta=ac.onset_delta,
         onset_alpha=ac.onset_alpha,
@@ -94,24 +95,25 @@ def _build_engine_profile(coupling: Coupling, storage: Storage) -> Profile | Non
 
 
 def _build_mellow_profile(coupling: Coupling, storage: Storage) -> Profile | None:
-    """Build a Profile for the mellow (quiet-passage) layer from the Coupling's mellow RC.
+    """Build a Profile for the mellow (quiet-passage) layer from the Crossfader's mellow Scene.
 
-    Returns None if mellow_render_config_id is empty or the entity is missing
-    — the caller (SyncEngine) then falls back to the active profile for both
-    layers, which is a valid no-op state.
+    Returns None if the crossfader has no mellow_scene_id or the entity is
+    missing — the caller (SyncEngine) then falls back to the active profile for
+    both layers, which is a valid no-op state.
     """
-    if not coupling.mellow_render_config_id:
+    cf = storage.get_crossfader(coupling.crossfader_id)
+    if not cf or not cf.mellow_scene_id:
         return None
-    mellow_rc = storage.get_render_config(coupling.mellow_render_config_id)
-    if mellow_rc is None:
+    mellow_scene = storage.get_scene(cf.mellow_scene_id)
+    if mellow_scene is None:
         return None
 
-    # All non-RC fields (player, LMS, analysis, LP) are the same as the active
-    # profile; only the RC-derived fields differ.
+    # All non-Scene fields (player, LMS, analysis, zone) are the same as the
+    # active profile; only the Scene-derived fields differ.
     player = storage.get_virtual_player(coupling.player_id)
-    lp     = storage.get_light_provider(coupling.light_provider_id)
+    zone   = storage.get_zone(coupling.zone_id)
     ac     = storage.get_analysis_config(coupling.analysis_config_id)
-    if not all([player, lp, ac]):
+    if not all([player, zone, ac]):
         return None
     return Profile(
         id=coupling.id,
@@ -121,22 +123,22 @@ def _build_mellow_profile(coupling: Coupling, storage: Storage) -> Profile | Non
         player_name=player.player_name,
         player_mac=player.player_mac,
         alsa_device=player.alsa_device,
-        bridge_id=lp.controller_id,
-        entertainment_area_id=lp.entertainment_area_id,
-        entertainment_area_name=lp.entertainment_area_name,
-        light_count=lp.light_count,
-        effect=mellow_rc.effect,
-        effect_speed=mellow_rc.effect_speed,
-        effect_decay=mellow_rc.effect_decay,
-        mix_low_threshold=coupling.mix_low_threshold,
-        mix_high_threshold=coupling.mix_high_threshold,
-        mix_ema_alpha=coupling.mix_ema_alpha,
-        sensitivity=mellow_rc.sensitivity,
-        brightness_floor=mellow_rc.brightness_floor,
-        bass_hz=mellow_rc.bass_hz,
-        mid_hz=mellow_rc.mid_hz,
-        exertion_clip=mellow_rc.exertion_clip,
-        onset_flash_intensity=mellow_rc.onset_flash_intensity,
+        bridge_id=zone.controller_id,
+        entertainment_area_id=zone.entertainment_area_id,
+        entertainment_area_name=zone.entertainment_area_name,
+        light_count=zone.light_count,
+        effect=mellow_scene.effect,
+        effect_speed=mellow_scene.effect_speed,
+        effect_decay=mellow_scene.effect_decay,
+        mix_low_threshold=cf.low_threshold,
+        mix_high_threshold=cf.high_threshold,
+        mix_ema_alpha=cf.fade_speed,
+        sensitivity=mellow_scene.sensitivity,
+        brightness_floor=mellow_scene.brightness_floor,
+        bass_hz=mellow_scene.bass_hz,
+        mid_hz=mellow_scene.mid_hz,
+        exertion_clip=mellow_scene.exertion_clip,
+        onset_flash_intensity=mellow_scene.onset_flash_intensity,
         onset_method=ac.onset_method,
         onset_delta=ac.onset_delta,
         onset_alpha=ac.onset_alpha,
@@ -341,42 +343,47 @@ class PlayerManager:
         await self.deactivate()
 
         player = self.storage.get_virtual_player(coupling.player_id)
-        lp = self.storage.get_light_provider(coupling.light_provider_id)
+        zone = self.storage.get_zone(coupling.zone_id)
         ac = self.storage.get_analysis_config(coupling.analysis_config_id)
-        rc = self.storage.get_render_config(coupling.render_config_id)
+        cf = self.storage.get_crossfader(coupling.crossfader_id)
+        scene = self.storage.get_scene(cf.active_scene_id) if cf else None
 
         if not player:
             raise ValueError(f"Coupling references missing VirtualPlayer {coupling.player_id!r}")
-        if not lp:
+        if not zone:
             raise ValueError(
-                f"Coupling references missing LightProvider {coupling.light_provider_id!r}"
+                f"Coupling references missing Zone {coupling.zone_id!r}"
             )
         if not ac:
             raise ValueError(
                 f"Coupling references missing AnalysisConfig {coupling.analysis_config_id!r}"
             )
-        if not rc:
+        if not cf:
             raise ValueError(
-                f"Coupling references missing RenderConfig {coupling.render_config_id!r}"
+                f"Coupling references missing Crossfader {coupling.crossfader_id!r}"
+            )
+        if not scene:
+            raise ValueError(
+                f"Crossfader references missing Scene {cf.active_scene_id!r}"
             )
 
-        controller = self.storage.get_controller(lp.controller_id)
+        controller = self.storage.get_controller(zone.controller_id)
         if not controller:
             raise ValueError(
-                f"LightProvider references missing Controller {lp.controller_id!r}"
+                f"Zone references missing Controller {zone.controller_id!r}"
             )
 
         bridge = _controller_to_bridge(controller)
         areas = await list_entertainment_areas(bridge)
-        area = next((a for a in areas if a.id == lp.entertainment_area_id), None)
+        area = next((a for a in areas if a.id == zone.entertainment_area_id), None)
         if area is None:
             raise ValueError("Configured Entertainment Area no longer exists on the controller")
 
-        channels = await get_channel_infos(bridge, lp.entertainment_area_id)
+        channels = await get_channel_infos(bridge, zone.entertainment_area_id)
 
         output_config = HueOutputConfig(
             bridge=bridge,
-            area_id=lp.entertainment_area_id,
+            area_id=zone.entertainment_area_id,
             area_name=area.name,
         )
 
@@ -388,22 +395,22 @@ class PlayerManager:
             player_name=player.player_name,
             player_mac=player.player_mac,
             alsa_device=player.alsa_device,
-            bridge_id=lp.controller_id,
-            entertainment_area_id=lp.entertainment_area_id,
-            entertainment_area_name=lp.entertainment_area_name,
-            light_count=lp.light_count,
-            effect=rc.effect,
-            effect_speed=rc.effect_speed,
-            effect_decay=rc.effect_decay,
-            mix_low_threshold=coupling.mix_low_threshold,
-            mix_high_threshold=coupling.mix_high_threshold,
-            mix_ema_alpha=coupling.mix_ema_alpha,
-            sensitivity=rc.sensitivity,
-            brightness_floor=rc.brightness_floor,
-            bass_hz=rc.bass_hz,
-            mid_hz=rc.mid_hz,
-            exertion_clip=rc.exertion_clip,
-            onset_flash_intensity=rc.onset_flash_intensity,
+            bridge_id=zone.controller_id,
+            entertainment_area_id=zone.entertainment_area_id,
+            entertainment_area_name=zone.entertainment_area_name,
+            light_count=zone.light_count,
+            effect=scene.effect,
+            effect_speed=scene.effect_speed,
+            effect_decay=scene.effect_decay,
+            mix_low_threshold=cf.low_threshold,
+            mix_high_threshold=cf.high_threshold,
+            mix_ema_alpha=cf.fade_speed,
+            sensitivity=scene.sensitivity,
+            brightness_floor=scene.brightness_floor,
+            bass_hz=scene.bass_hz,
+            mid_hz=scene.mid_hz,
+            exertion_clip=scene.exertion_clip,
+            onset_flash_intensity=scene.onset_flash_intensity,
             onset_method=ac.onset_method,
             onset_delta=ac.onset_delta,
             onset_alpha=ac.onset_alpha,

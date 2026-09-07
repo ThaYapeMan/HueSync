@@ -135,7 +135,7 @@ export interface VirtualPlayer {
   alsa_device: string
 }
 
-export interface LightProvider {
+export interface Zone {
   id: string
   name: string
   controller_id: string
@@ -157,7 +157,7 @@ export interface AnalysisConfig {
   higher_cutoff_freq: number
 }
 
-export interface RenderConfig {
+export interface Scene {
   id: string
   name: string
   effect: string
@@ -171,17 +171,23 @@ export interface RenderConfig {
   onset_flash_intensity: number
 }
 
+export interface Crossfader {
+  id: string
+  name: string
+  active_scene_id: string
+  mellow_scene_id: string
+  low_threshold: number
+  high_threshold: number
+  fade_speed: number
+}
+
 export interface Coupling {
   id: string
   name: string
   player_id: string
   analysis_config_id: string
-  light_provider_id: string
-  render_config_id: string
-  mellow_render_config_id: string
-  mix_low_threshold: number
-  mix_high_threshold: number
-  mix_ema_alpha: number
+  zone_id: string
+  crossfader_id: string
   enabled: boolean
 }
 
@@ -197,12 +203,12 @@ export const updateVirtualPlayer = (id: string, body: Partial<Omit<VirtualPlayer
   request<VirtualPlayer>(`/api/virtual-players/${id}`, json('PATCH', body))
 export const deleteVirtualPlayer = (id: string) => request<void>(`/api/virtual-players/${id}`, { method: 'DELETE' })
 
-// LightProviders
-export const getLightProviders = () => request<LightProvider[]>('/api/light-providers')
-export const createLightProvider = (body: Omit<LightProvider, 'id'>) =>
-  request<LightProvider>('/api/light-providers', json('POST', body))
-export const deleteLightProvider = (id: string) =>
-  request<void>(`/api/light-providers/${id}`, { method: 'DELETE' })
+// Zones
+export const getZones = () => request<Zone[]>('/api/zones')
+export const createZone = (body: Omit<Zone, 'id'>) =>
+  request<Zone>('/api/zones', json('POST', body))
+export const deleteZone = (id: string) =>
+  request<void>(`/api/zones/${id}`, { method: 'DELETE' })
 
 // AnalysisConfigs
 export const getAnalysisConfigs = () => request<AnalysisConfig[]>('/api/analysis-configs')
@@ -213,14 +219,23 @@ export const updateAnalysisConfig = (id: string, body: Partial<Omit<AnalysisConf
 export const deleteAnalysisConfig = (id: string) =>
   request<void>(`/api/analysis-configs/${id}`, { method: 'DELETE' })
 
-// RenderConfigs
-export const getRenderConfigs = () => request<RenderConfig[]>('/api/render-configs')
-export const createRenderConfig = (body: Omit<RenderConfig, 'id'>) =>
-  request<RenderConfig>('/api/render-configs', json('POST', body))
-export const updateRenderConfig = (id: string, body: Partial<Omit<RenderConfig, 'id'>>) =>
-  request<RenderConfig>(`/api/render-configs/${id}`, json('PATCH', body))
-export const deleteRenderConfig = (id: string) =>
-  request<void>(`/api/render-configs/${id}`, { method: 'DELETE' })
+// Scenes
+export const getScenes = () => request<Scene[]>('/api/scenes')
+export const createScene = (body: Omit<Scene, 'id'>) =>
+  request<Scene>('/api/scenes', json('POST', body))
+export const updateScene = (id: string, body: Partial<Omit<Scene, 'id'>>) =>
+  request<Scene>(`/api/scenes/${id}`, json('PATCH', body))
+export const deleteScene = (id: string) =>
+  request<void>(`/api/scenes/${id}`, { method: 'DELETE' })
+
+// Crossfaders
+export const getCrossfaders = () => request<Crossfader[]>('/api/crossfaders')
+export const createCrossfader = (body: Omit<Crossfader, 'id'>) =>
+  request<Crossfader>('/api/crossfaders', json('POST', body))
+export const updateCrossfader = (id: string, body: Partial<Omit<Crossfader, 'id'>>) =>
+  request<Crossfader>(`/api/crossfaders/${id}`, json('PATCH', body))
+export const deleteCrossfader = (id: string) =>
+  request<void>(`/api/crossfaders/${id}`, { method: 'DELETE' })
 
 // Couplings
 export const getCouplings = () => request<Coupling[]>('/api/couplings')

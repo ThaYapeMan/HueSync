@@ -4,19 +4,19 @@ import { NowPlaying } from '@/pages/NowPlaying'
 import { Latency } from '@/pages/Latency'
 import { Players } from '@/pages/Players'
 import { AnalysisConfigs } from '@/pages/AnalysisConfigs'
-import { RenderConfigs } from '@/pages/RenderConfigs'
+import { Scenes } from '@/pages/Scenes'
 import { Couplings } from '@/pages/Couplings'
 import { Badge } from '@/components/ui/badge'
 import { cn } from '@/lib/utils'
 
-type Tab = 'now-playing' | 'latency' | 'players' | 'analysis-configs' | 'render-configs' | 'couplings'
+type Tab = 'now-playing' | 'latency' | 'players' | 'analysis-configs' | 'scenes' | 'couplings'
 
 const NAV_ITEMS: { value: Tab; label: string }[] = [
   { value: 'now-playing',      label: 'Now Playing' },
   { value: 'latency',          label: 'Latency' },
   { value: 'players',          label: 'Virtual Players' },
   { value: 'analysis-configs', label: 'Analysis' },
-  { value: 'render-configs',   label: 'Rendering' },
+  { value: 'scenes',           label: 'Scenes' },
   { value: 'couplings',        label: 'Couplings' },
 ]
 
@@ -80,7 +80,7 @@ export default function App() {
             )}
             {activeTab === 'players' && <Players />}
             {activeTab === 'analysis-configs' && <AnalysisConfigs />}
-            {activeTab === 'render-configs' && <RenderConfigs />}
+            {activeTab === 'scenes' && <Scenes />}
             {activeTab === 'couplings' && (
               <Couplings
                 activeCouplingId={status?.active_coupling_id ?? null}

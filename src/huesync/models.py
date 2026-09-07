@@ -26,7 +26,7 @@ class ColorMode(StrEnum):
     mapped bass energy to a fixed warm hue.  Profiles that stored it are
     migrated to spectrum_rgb on load.
 
-    New code should use EFFECT_IDS and the ``effect`` field on RenderConfig.
+    New code should use EFFECT_IDS and the ``effect`` field on Scene.
     """
 
     # Whole spectrum split in three bands (bass/mid/treble) mapped to R/G/B.
@@ -237,8 +237,8 @@ _PROFILE_FIELDS = frozenset(f.name for f in fields(Profile))
 
 
 # ---------------------------------------------------------------------------
-# Phase-2 entities: Controller, Player, LightProvider, AnalysisConfig,
-# RenderConfig, Coupling.
+# Phase-2 entities: Controller, Player, Zone, AnalysisConfig,
+# Scene, Crossfader, Coupling.
 # ---------------------------------------------------------------------------
 
 
@@ -315,15 +315,19 @@ class VirtualPlayer:
 _VIRTUAL_PLAYER_FIELDS = frozenset(f.name for f in fields(VirtualPlayer))
 
 
-_LIGHT_PROVIDER_FIELDS: frozenset[str] = frozenset()  # filled after class
+_ZONE_FIELDS: frozenset[str] = frozenset()  # filled after class
 
 
 @dataclass
-class LightProvider:
-    """One output target within a Controller (e.g., a Hue Entertainment Area)."""
+class Zone:
+    """One output target within a Controller (e.g., a Hue Entertainment Area).
+
+    Zone is the sound-to-light term (from ENTTEC EMU and similar software).
+    It maps to a Hue Entertainment Area within a Controller.
+    """
 
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
-    name: str = "Light Provider"
+    name: str = "Zone"
     controller_id: str = ""
     entertainment_area_id: str = ""
     entertainment_area_name: str = ""
@@ -340,11 +344,11 @@ class LightProvider:
         }
 
     @classmethod
-    def from_dict(cls, d: dict) -> LightProvider:
-        return cls(**{k: v for k, v in d.items() if k in _LIGHT_PROVIDER_FIELDS})
+    def from_dict(cls, d: dict) -> Zone:
+        return cls(**{k: v for k, v in d.items() if k in _ZONE_FIELDS})
 
 
-_LIGHT_PROVIDER_FIELDS = frozenset(f.name for f in fields(LightProvider))
+_ZONE_FIELDS = frozenset(f.name for f in fields(Zone))
 
 
 _ANALYSIS_CONFIG_FIELDS: frozenset[str] = frozenset()  # filled after class
@@ -387,21 +391,19 @@ class AnalysisConfig:
 _ANALYSIS_CONFIG_FIELDS = frozenset(f.name for f in fields(AnalysisConfig))
 
 
-_RENDER_CONFIG_FIELDS: frozenset[str] = frozenset()  # filled after class
+_SCENE_FIELDS: frozenset[str] = frozenset()  # filled after class
 
 
 @dataclass
-class RenderConfig:
+class Scene:
     """Visual output parameters (colour mode, sensitivity, …), provider-neutral.
 
-    Mix parameters (mix_low_threshold, mix_high_threshold, mix_ema_alpha) and
-    the mellow layer reference (mellow_render_config_id) live on Coupling, not
-    here.  A RenderConfig describes a single colour rendering mode; the Coupling
-    picks two RenderConfigs and owns the crossfade settings.
+    A Scene describes a single colour rendering mode. The Crossfader picks two
+    Scenes (active and mellow) and owns the crossfade settings.
     """
 
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
-    name: str = "Default Render"
+    name: str = "Default Scene"
     effect: str = "spectrum_rgb"
     effect_speed: float = 1.0
     effect_decay: float = 0.3
@@ -428,7 +430,7 @@ class RenderConfig:
         }
 
     @classmethod
-    def from_dict(cls, d: dict) -> RenderConfig:
+    def from_dict(cls, d: dict) -> Scene:
         d = dict(d)
         # Migrate legacy color_mode field to effect.
         if "color_mode" in d and "effect" not in d:
@@ -437,7 +439,7 @@ class RenderConfig:
                 d["effect"] = cm_val
             else:
                 log.warning(
-                    "Unsupported color_mode %r in saved RenderConfig; falling back to spectrum_rgb",
+                    "Unsupported color_mode %r in saved Scene; falling back to spectrum_rgb",
                     cm_val,
                 )
                 d["effect"] = "spectrum_rgb"
@@ -445,10 +447,49 @@ class RenderConfig:
             d.pop("color_mode")
         # Old keys (mellow_colour_mode, mix_low_threshold, mix_high_threshold,
         # mix_ema_alpha) are silently dropped by the field filter below.
-        return cls(**{k: v for k, v in d.items() if k in _RENDER_CONFIG_FIELDS})
+        return cls(**{k: v for k, v in d.items() if k in _SCENE_FIELDS})
 
 
-_RENDER_CONFIG_FIELDS = frozenset(f.name for f in fields(RenderConfig))
+_SCENE_FIELDS = frozenset(f.name for f in fields(Scene))
+
+
+_CROSSFADER_FIELDS: frozenset[str] = frozenset()  # filled after class
+
+
+@dataclass
+class Crossfader:
+    """Links an active Scene and a mellow Scene with crossfade parameters.
+
+    The Coupling references one Crossfader. The Crossfader owns the two-layer
+    scene selection and all LayerMixer parameters, keeping Coupling focused on
+    routing (player → analysis → zone → crossfader).
+    """
+
+    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    name: str = "Default Crossfader"
+    active_scene_id: str = ""   # Scene used in loud passages
+    mellow_scene_id: str = ""   # Scene used in quiet passages (empty = same as active)
+    low_threshold: float = 0.3  # energy below this → pure mellow (mix=0)
+    high_threshold: float = 0.7  # energy above this → pure active (mix=1)
+    fade_speed: float = 0.1     # EMA alpha for mix smoothing (was mix_ema_alpha)
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "active_scene_id": self.active_scene_id,
+            "mellow_scene_id": self.mellow_scene_id,
+            "low_threshold": self.low_threshold,
+            "high_threshold": self.high_threshold,
+            "fade_speed": self.fade_speed,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> Crossfader:
+        return cls(**{k: v for k, v in d.items() if k in _CROSSFADER_FIELDS})
+
+
+_CROSSFADER_FIELDS = frozenset(f.name for f in fields(Crossfader))
 
 
 _COUPLING_FIELDS: frozenset[str] = frozenset()  # filled after class
@@ -456,35 +497,22 @@ _COUPLING_FIELDS: frozenset[str] = frozenset()  # filled after class
 
 @dataclass
 class Coupling:
-    """Links a Player + AnalysisConfig + LightProvider + two RenderConfigs.
+    """Links a Player + AnalysisConfig + Zone + Crossfader.
 
     Activation happens on a Coupling. The linked entities can be shared
     across multiple Couplings, but each Coupling runs its own cava process.
 
-    Two RenderConfigs are supported:
-    - render_config_id: the active (loud) layer.
-    - mellow_render_config_id: the quiet-passage layer.  When empty or equal
-      to render_config_id, the LayerMixer blends two identical effects (no-op).
-
-    LayerMixer crossfade parameters are owned by the Coupling rather than either
-    RenderConfig because they govern the *relationship* between the two layers.
+    The Crossfader owns the active Scene, optional mellow Scene, and all
+    LayerMixer crossfade parameters. Coupling is focused on routing:
+    player → analysis → zone → crossfader.
     """
 
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     name: str = "New Coupling"
     player_id: str = ""
     analysis_config_id: str = ""
-    light_provider_id: str = ""
-    render_config_id: str = ""
-    # Mellow layer: separate RenderConfig for quiet passages.
-    # Empty → same RC for both layers (LayerMixer is a no-op blend).
-    mellow_render_config_id: str = ""
-    # LayerMixer crossfade thresholds.  mix = smoothstep(energy, lo, hi).
-    mix_low_threshold: float = 0.3   # energy below this → pure mellow (mix=0)
-    mix_high_threshold: float = 0.7  # energy above this → pure active (mix=1)
-    # EMA smoothing on the mix value (α per frame at 30 Hz).
-    # 0.1 → ~10-frame lag ≈ 330 ms; keeps transitions smooth without lagging music.
-    mix_ema_alpha: float = 0.1
+    zone_id: str = ""
+    crossfader_id: str = ""
     enabled: bool = True
 
     def to_dict(self) -> dict:
@@ -493,17 +521,21 @@ class Coupling:
             "name": self.name,
             "player_id": self.player_id,
             "analysis_config_id": self.analysis_config_id,
-            "light_provider_id": self.light_provider_id,
-            "render_config_id": self.render_config_id,
-            "mellow_render_config_id": self.mellow_render_config_id,
-            "mix_low_threshold": self.mix_low_threshold,
-            "mix_high_threshold": self.mix_high_threshold,
-            "mix_ema_alpha": self.mix_ema_alpha,
+            "zone_id": self.zone_id,
+            "crossfader_id": self.crossfader_id,
             "enabled": self.enabled,
         }
 
     @classmethod
     def from_dict(cls, d: dict) -> Coupling:
+        d = dict(d)
+        # Backward compat: light_provider_id → zone_id
+        if "light_provider_id" in d and "zone_id" not in d:
+            d["zone_id"] = d.pop("light_provider_id")
+        elif "light_provider_id" in d:
+            d.pop("light_provider_id")
+        # Old render_config_id and mix fields are dropped here; Storage.migrate()
+        # creates a Crossfader from them before Coupling.from_dict() is called.
         return cls(**{k: v for k, v in d.items() if k in _COUPLING_FIELDS})
 
 

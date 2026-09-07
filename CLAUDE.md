@@ -137,6 +137,34 @@ Post-normalisation, `sensitivity = 1.0` is the correct default: steady-state
 music sits around one-third brightness with brief peaks at full. Above ~3.0
 the steady state saturates.
 
+### Zone naming (`models.py`, `storage.py`, `api.py`)
+
+A **Zone** is a Hue Entertainment Area that has been registered in HueSync. It
+stores `controller_id`, `entertainment_area_id`, `entertainment_area_name`, and
+`light_count`. Zones are shared across Couplings — you pick the Zone when
+creating a Coupling, you do not clone it. Only the Coupling is deactivated and
+restarted if `zone_id` changes.
+
+Formerly called `LightProvider` in code written before the rename refactoring
+(commit after `0e2e07e`). Storage migration handles old JSON keys transparently:
+`light_providers` → `zones`, `light_provider_id` → `zone_id` in Couplings.
+
+### Live/Blind principle (`Couplings.tsx`, `api.py`)
+
+Some edits take effect without restarting the session ("live"); others require a
+full deactivate/reactivate cycle ("blind", because lights go off briefly).
+
+The UI shows a **● Live** badge in the `CouplingEditor` dialog header whenever
+the coupling being edited is the currently active one (`coupling.id ===
+activeCouplingId`). This signals to the user that changes may affect lights
+immediately.
+
+On the backend, `PATCH /api/scenes/{id}` and `PATCH /api/crossfaders/{id}`
+both detect whether the active coupling references the patched entity and call
+`SyncEngine.update_render()` without a restart. Similarly, swapping
+`analysis_config_id` on an active Coupling triggers `restart_cava()` +
+`update_onset_pipeline()` without touching the Hue DTLS session.
+
 ### Coupling PATCH routes to the minimum necessary action (`api.py`, `player_manager.py`)
 
 `PATCH /api/couplings/{id}` categorises changed fields before deciding what to
@@ -145,12 +173,12 @@ that was the original source of warmup-state interference in A/B comparisons.
 
 | Category | Fields | Action |
 |---|---|---|
-| deactivate | `player_id`, `light_provider_id`, `lms_host`, `lms_port`, `player_name`, `alsa_device` | Full deactivate |
+| deactivate | `player_id`, `zone_id`, `lms_host`, `lms_port`, `player_name`, `alsa_device` | Full deactivate |
 | live FK | `analysis_config_id` | `restart_cava()` + `update_onset_pipeline()` |
-| live FK | `render_config_id` | `update_render()` only |
+| live FK | `crossfader_id` | `update_render()` only |
 | cava | `bars`, `lower_cutoff_freq`, `higher_cutoff_freq` | `restart_cava()` |
 | pcm | `onset_method`, `onset_delta`, `onset_alpha`, `superflux_mu`, `superflux_lag`, `bass_hz`, `mid_hz` | `SyncEngine.update_onset_pipeline()` |
-| render | `color_mode`, `sensitivity`, `brightness_floor`, `exertion_clip`, `onset_flash_intensity`, `enabled`, `entertainment_area_name`, `light_count` | `SyncEngine.update_render()` |
+| render | `sensitivity`, `brightness_floor`, `exertion_clip`, `onset_flash_intensity`, `enabled`, `entertainment_area_name`, `light_count` | `SyncEngine.update_render()` |
 
 Priority: deactivate > cava > pcm > render. `update_onset_pipeline()` resets
 onset warmup state but NOT the BandNormaliser EMA.
@@ -172,8 +200,9 @@ does **not** require a full session restart. It is intentionally live-updateable
 there previously and caused lights to freeze (deactivate called, no re-activate).
 The fix is tested by `test_ac_swap_session_remains_active` in `tests/test_api.py`.
 
-Similarly, `render_config_id` routes to `update_render()` only (no cava restart,
-no deactivate).
+Similarly, `crossfader_id` routes to `update_render()` only (no cava restart,
+no deactivate). Edits to a Scene or Crossfader that is in use by the active
+Coupling also route to `update_render()` directly, bypassing the Coupling PATCH.
 
 ### Timing: lights run AHEAD of Sonos
 
@@ -216,7 +245,7 @@ because the directory is owned by `huesync` while git runs as root.
 | `src/huesync/hue_output.py` | **Only** file importing `hue_entertainment` for streaming: `HueDriver`, `ChannelInfo`, `get_channel_infos()` |
 | `src/huesync/hue_bridge.py` | Controller pairing and Entertainment Area discovery |
 | `src/huesync/player_manager.py` | Process lifecycle: squeezelite + cava + output driver; `activate_coupling()`, `update_onset_pipeline()`, `update_render()` |
-| `src/huesync/models.py` | Five-entity model: `Controller`, `VirtualPlayer`, `LightProvider`, `AnalysisConfig`, `RenderConfig`, `Coupling`; also `Profile` and `BridgeConfig` as internal engine types |
+| `src/huesync/models.py` | Seven-entity model: `Controller`, `VirtualPlayer`, `Zone`, `AnalysisConfig`, `Scene`, `Crossfader`, `Coupling`; also `Profile` as an internal engine type |
 | `src/huesync/lms_discovery.py` | UDP broadcast discovery of the LMS server |
 | `src/huesync/app.py` | FastAPI web UI |
 | `src/huesync/storage.py` | JSON config persistence |

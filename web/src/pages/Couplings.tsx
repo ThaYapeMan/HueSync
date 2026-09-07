@@ -28,12 +28,12 @@ import {
 } from '@/components/ui/select'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
 import {
-  EFFECTS,
   type Coupling,
   type VirtualPlayer,
-  type LightProvider,
+  type Zone,
   type AnalysisConfig,
-  type RenderConfig,
+  type Scene,
+  type Crossfader,
   type Controller,
   type EntertainmentArea,
   getCouplings,
@@ -45,12 +45,15 @@ import {
   deactivateCoupling,
   getVirtualPlayers,
   createVirtualPlayer,
-  getLightProviders,
-  createLightProvider,
+  getZones,
+  createZone,
   getAnalysisConfigs,
   createAnalysisConfig,
-  getRenderConfigs,
-  createRenderConfig,
+  getScenes,
+  createScene,
+  getCrossfaders,
+  createCrossfader,
+  updateCrossfader,
   getControllers,
   getControllerAreas,
   getStatus,
@@ -141,15 +144,15 @@ function NewPlayerDialog({ open, onClose, onCreated }: NewPlayerDialogProps) {
   )
 }
 
-// ---- Inline mini-dialog: New LightProvider ----
+// ---- Inline mini-dialog: New Zone ----
 
-interface NewLightProviderDialogProps {
+interface NewZoneDialogProps {
   open: boolean
   onClose: () => void
-  onCreated: (lp: LightProvider) => void
+  onCreated: (zone: Zone) => void
 }
 
-function NewLightProviderDialog({ open, onClose, onCreated }: NewLightProviderDialogProps) {
+function NewZoneDialog({ open, onClose, onCreated }: NewZoneDialogProps) {
   const [controllers, setControllers] = useState<Controller[]>([])
   const [selectedControllerId, setSelectedControllerId] = useState('')
   const [areas, setAreas] = useState<EntertainmentArea[]>([])
@@ -200,14 +203,14 @@ function NewLightProviderDialog({ open, onClose, onCreated }: NewLightProviderDi
     setError(null)
     try {
       const area = areas.find((a) => a.id === selectedAreaId)
-      const lp = await createLightProvider({
+      const zone = await createZone({
         name,
         controller_id: selectedControllerId,
         entertainment_area_id: selectedAreaId,
         entertainment_area_name: area?.name ?? '',
         light_count: area?.light_count ?? 0,
       })
-      onCreated(lp)
+      onCreated(zone)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Save failed')
     } finally {
@@ -219,8 +222,8 @@ function NewLightProviderDialog({ open, onClose, onCreated }: NewLightProviderDi
     <Dialog open={open} onOpenChange={(o) => { if (!o) onClose() }}>
       <DialogContent className="max-w-sm">
         <DialogHeader>
-          <DialogTitle>New light provider</DialogTitle>
-          <DialogDescription>Link a Hue entertainment area as a light provider.</DialogDescription>
+          <DialogTitle>New zone</DialogTitle>
+          <DialogDescription>Link a Hue entertainment area as a zone.</DialogDescription>
         </DialogHeader>
         <div className="space-y-3">
           <div className="space-y-1">
@@ -340,15 +343,15 @@ function NewAnalysisConfigDialog({ open, onClose, onCreated }: NewAnalysisConfig
   )
 }
 
-// ---- Inline mini-dialog: New RenderConfig ----
+// ---- Inline mini-dialog: New Scene ----
 
-interface NewRenderConfigDialogProps {
+interface NewSceneDialogProps {
   open: boolean
   onClose: () => void
-  onCreated: (cfg: RenderConfig) => void
+  onCreated: (cfg: Scene) => void
 }
 
-function NewRenderConfigDialog({ open, onClose, onCreated }: NewRenderConfigDialogProps) {
+function NewSceneDialog({ open, onClose, onCreated }: NewSceneDialogProps) {
   const [name, setName] = useState('')
   const [effect, setEffect] = useState('spectrum_rgb')
   const [saving, setSaving] = useState(false)
@@ -366,7 +369,7 @@ function NewRenderConfigDialog({ open, onClose, onCreated }: NewRenderConfigDial
     setSaving(true)
     setError(null)
     try {
-      const cfg = await createRenderConfig({
+      const cfg = await createScene({
         name,
         effect,
         effect_speed: 1.0,
@@ -386,17 +389,30 @@ function NewRenderConfigDialog({ open, onClose, onCreated }: NewRenderConfigDial
     }
   }
 
+  const EFFECTS_BASIC = [
+    { id: 'spectrum_rgb', label: 'Spectrum RGB' },
+    { id: 'mono_pulse', label: 'Mono Pulse' },
+    { id: 'pulses', label: 'Pulses' },
+    { id: 'flashes', label: 'Flashes' },
+    { id: 'splotches', label: 'Splotches' },
+    { id: 'fireworks', label: 'Fireworks' },
+    { id: 'swirl', label: 'Swirl' },
+    { id: 'wave', label: 'Wave' },
+    { id: 'solid', label: 'Solid' },
+    { id: 'none', label: 'None' },
+  ]
+
   return (
     <Dialog open={open} onOpenChange={(o) => { if (!o) onClose() }}>
       <DialogContent className="max-w-sm">
         <DialogHeader>
-          <DialogTitle>New render config</DialogTitle>
-          <DialogDescription>Uses sensible defaults — edit in Rendering tab to adjust.</DialogDescription>
+          <DialogTitle>New scene</DialogTitle>
+          <DialogDescription>Uses sensible defaults — edit in Scenes tab to adjust.</DialogDescription>
         </DialogHeader>
         <div className="space-y-3">
           <div className="space-y-1">
             <Label className="text-sm">Name</Label>
-            <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="My render config" />
+            <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="My scene" />
           </div>
           <div className="space-y-1">
             <Label className="text-sm">Effect</Label>
@@ -405,7 +421,7 @@ function NewRenderConfigDialog({ open, onClose, onCreated }: NewRenderConfigDial
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                {EFFECTS.map((e) => (
+                {EFFECTS_BASIC.map((e) => (
                   <SelectItem key={e.id} value={e.id}>{e.label}</SelectItem>
                 ))}
               </SelectContent>
@@ -428,89 +444,129 @@ interface CouplingEditorProps {
   open: boolean
   coupling?: Coupling
   players: VirtualPlayer[]
-  lightProviders: LightProvider[]
+  zones: Zone[]
   analysisConfigs: AnalysisConfig[]
-  renderConfigs: RenderConfig[]
+  scenes: Scene[]
+  crossfaders: Crossfader[]
+  activeCouplingId: string | null
   onSave: () => void
   onClose: () => void
   onPlayersChanged: (players: VirtualPlayer[]) => void
-  onLightProvidersChanged: (lps: LightProvider[]) => void
+  onZonesChanged: (zones: Zone[]) => void
   onAnalysisConfigsChanged: (cfgs: AnalysisConfig[]) => void
-  onRenderConfigsChanged: (cfgs: RenderConfig[]) => void
+  onScenesChanged: (scenes: Scene[]) => void
+  onCrossfadersChanged: (crossfaders: Crossfader[]) => void
 }
 
 function CouplingEditor({
   open,
   coupling,
   players,
-  lightProviders,
+  zones,
   analysisConfigs,
-  renderConfigs,
+  scenes,
+  crossfaders,
+  activeCouplingId,
   onSave,
   onClose,
   onPlayersChanged,
-  onLightProvidersChanged,
+  onZonesChanged,
   onAnalysisConfigsChanged,
-  onRenderConfigsChanged,
+  onScenesChanged,
+  onCrossfadersChanged,
 }: CouplingEditorProps) {
   const isEditing = !!coupling
+  const isLive = !!(coupling && activeCouplingId && coupling.id === activeCouplingId)
 
   const [name, setName] = useState('')
   const [playerId, setPlayerId] = useState('')
-  const [lightProviderId, setLightProviderId] = useState('')
+  const [zoneId, setZoneId] = useState('')
   const [analysisConfigId, setAnalysisConfigId] = useState('')
-  const [renderConfigId, setRenderConfigId] = useState('')
-  const [mellowRenderConfigId, setMellowRenderConfigId] = useState('')
-  const [mixLowThreshold, setMixLowThreshold] = useState('0.3')
-  const [mixHighThreshold, setMixHighThreshold] = useState('0.7')
-  const [mixEmaAlpha, setMixEmaAlpha] = useState('0.1')
+  const [activeSceneId, setActiveSceneId] = useState('')
+  const [mellowSceneId, setMellowSceneId] = useState('')
+  const [lowThreshold, setLowThreshold] = useState('0.3')
+  const [highThreshold, setHighThreshold] = useState('0.7')
+  const [fadeSpeed, setFadeSpeed] = useState('0.1')
   const [enabled, setEnabled] = useState(true)
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
 
   // Nested dialog states
   const [newPlayerOpen, setNewPlayerOpen] = useState(false)
-  const [newLightProviderOpen, setNewLightProviderOpen] = useState(false)
+  const [newZoneOpen, setNewZoneOpen] = useState(false)
   const [newAnalysisConfigOpen, setNewAnalysisConfigOpen] = useState(false)
-  const [newRenderConfigOpen, setNewRenderConfigOpen] = useState(false)
-  const [newRenderConfigTarget, setNewRenderConfigTarget] = useState<'active' | 'mellow'>('active')
+  const [newSceneOpen, setNewSceneOpen] = useState(false)
+  const [newSceneTarget, setNewSceneTarget] = useState<'active' | 'mellow'>('active')
 
   useEffect(() => {
     if (open) {
       setName(coupling?.name ?? '')
       setPlayerId(coupling?.player_id ?? '')
-      setLightProviderId(coupling?.light_provider_id ?? '')
+      setZoneId(coupling?.zone_id ?? '')
       setAnalysisConfigId(coupling?.analysis_config_id ?? '')
-      setRenderConfigId(coupling?.render_config_id ?? '')
-      setMellowRenderConfigId(coupling?.mellow_render_config_id ?? '')
-      setMixLowThreshold(String(coupling?.mix_low_threshold ?? 0.3))
-      setMixHighThreshold(String(coupling?.mix_high_threshold ?? 0.7))
-      setMixEmaAlpha(String(coupling?.mix_ema_alpha ?? 0.1))
       setEnabled(coupling?.enabled ?? true)
       setSaveError(null)
+
+      // Resolve crossfader settings
+      if (coupling?.crossfader_id) {
+        const cf = crossfaders.find((x) => x.id === coupling.crossfader_id)
+        setActiveSceneId(cf?.active_scene_id ?? '')
+        setMellowSceneId(cf?.mellow_scene_id ?? '')
+        setLowThreshold(String(cf?.low_threshold ?? 0.3))
+        setHighThreshold(String(cf?.high_threshold ?? 0.7))
+        setFadeSpeed(String(cf?.fade_speed ?? 0.1))
+      } else {
+        setActiveSceneId('')
+        setMellowSceneId('')
+        setLowThreshold('0.3')
+        setHighThreshold('0.7')
+        setFadeSpeed('0.1')
+      }
     }
-  }, [open, coupling])
+  }, [open, coupling, crossfaders])
 
   async function handleSave() {
     setSaving(true)
     setSaveError(null)
     try {
-      const body = {
-        name,
-        player_id: playerId,
-        light_provider_id: lightProviderId,
-        analysis_config_id: analysisConfigId,
-        render_config_id: renderConfigId,
-        mellow_render_config_id: mellowRenderConfigId,
-        mix_low_threshold: parseFloat(mixLowThreshold),
-        mix_high_threshold: parseFloat(mixHighThreshold),
-        mix_ema_alpha: parseFloat(mixEmaAlpha),
-        enabled,
-      }
-      if (isEditing) {
-        await updateCoupling(coupling.id, body)
+      if (isEditing && coupling) {
+        // Update crossfader with changed scene/threshold settings
+        if (coupling.crossfader_id) {
+          await updateCrossfader(coupling.crossfader_id, {
+            active_scene_id: activeSceneId,
+            mellow_scene_id: mellowSceneId,
+            low_threshold: parseFloat(lowThreshold),
+            high_threshold: parseFloat(highThreshold),
+            fade_speed: parseFloat(fadeSpeed),
+          })
+        }
+        // Update coupling (name, enabled, player_id, zone_id, analysis_config_id)
+        await updateCoupling(coupling.id, {
+          name,
+          enabled,
+          player_id: playerId,
+          zone_id: zoneId,
+          analysis_config_id: analysisConfigId,
+        })
       } else {
-        await createCoupling(body)
+        // Create crossfader first
+        const cf = await createCrossfader({
+          name: `${name} Crossfader`,
+          active_scene_id: activeSceneId,
+          mellow_scene_id: mellowSceneId,
+          low_threshold: parseFloat(lowThreshold),
+          high_threshold: parseFloat(highThreshold),
+          fade_speed: parseFloat(fadeSpeed),
+        })
+        // Create coupling
+        await createCoupling({
+          name,
+          player_id: playerId,
+          zone_id: zoneId,
+          analysis_config_id: analysisConfigId,
+          crossfader_id: cf.id,
+          enabled,
+        })
       }
       onSave()
     } catch (e) {
@@ -527,11 +583,11 @@ function CouplingEditor({
     setPlayerId(player.id)
   }
 
-  async function handleLightProviderCreated(lp: LightProvider) {
-    setNewLightProviderOpen(false)
-    const updated = await getLightProviders().catch(() => lightProviders)
-    onLightProvidersChanged(updated)
-    setLightProviderId(lp.id)
+  async function handleZoneCreated(zone: Zone) {
+    setNewZoneOpen(false)
+    const updated = await getZones().catch(() => zones)
+    onZonesChanged(updated)
+    setZoneId(zone.id)
   }
 
   async function handleAnalysisConfigCreated(cfg: AnalysisConfig) {
@@ -541,30 +597,38 @@ function CouplingEditor({
     setAnalysisConfigId(cfg.id)
   }
 
-  function openNewRenderConfig(target: 'active' | 'mellow') {
-    setNewRenderConfigTarget(target)
-    setNewRenderConfigOpen(true)
+  function openNewScene(target: 'active' | 'mellow') {
+    setNewSceneTarget(target)
+    setNewSceneOpen(true)
   }
 
-  async function handleRenderConfigCreated(cfg: RenderConfig) {
-    setNewRenderConfigOpen(false)
-    const updated = await getRenderConfigs().catch(() => renderConfigs)
-    onRenderConfigsChanged(updated)
-    if (newRenderConfigTarget === 'mellow') {
-      setMellowRenderConfigId(cfg.id)
+  async function handleSceneCreated(cfg: Scene) {
+    setNewSceneOpen(false)
+    const updated = await getScenes().catch(() => scenes)
+    onScenesChanged(updated)
+    if (newSceneTarget === 'mellow') {
+      setMellowSceneId(cfg.id)
     } else {
-      setRenderConfigId(cfg.id)
+      setActiveSceneId(cfg.id)
     }
+    // Refresh crossfaders list too
+    const updatedCf = await getCrossfaders().catch(() => crossfaders)
+    onCrossfadersChanged(updatedCf)
   }
 
-  const selectedLP = lightProviders.find((lp) => lp.id === lightProviderId)
+  const selectedZone = zones.find((z) => z.id === zoneId)
 
   return (
     <>
       <Dialog open={open} onOpenChange={(o) => { if (!o) onClose() }}>
         <DialogContent className="max-w-xl flex flex-col max-h-[90vh]">
           <DialogHeader>
-            <DialogTitle>{isEditing ? 'Edit coupling' : 'New coupling'}</DialogTitle>
+            <DialogTitle className="flex items-center gap-2">
+              {isEditing ? 'Edit coupling' : 'New coupling'}
+              {isLive && (
+                <Badge variant="destructive" className="text-xs font-normal">● Live</Badge>
+              )}
+            </DialogTitle>
           </DialogHeader>
 
           <div className="overflow-y-auto flex-1 pr-1 space-y-4">
@@ -593,28 +657,28 @@ function CouplingEditor({
               </div>
             </div>
 
-            {/* Light provider */}
+            {/* Zone */}
             <div className="space-y-1">
-              <Label className="text-sm">Light provider (area)</Label>
+              <Label className="text-sm">Zone (area)</Label>
               <div className="flex gap-2">
-                <Select value={lightProviderId} onValueChange={setLightProviderId}>
+                <Select value={zoneId} onValueChange={setZoneId}>
                   <SelectTrigger className="flex-1">
-                    <SelectValue placeholder="Select area" />
+                    <SelectValue placeholder="Select zone" />
                   </SelectTrigger>
                   <SelectContent>
-                    {lightProviders.map((lp) => (
-                      <SelectItem key={lp.id} value={lp.id}>
-                        {lp.name}
+                    {zones.map((z) => (
+                      <SelectItem key={z.id} value={z.id}>
+                        {z.name}
                       </SelectItem>
                     ))}
                   </SelectContent>
                 </Select>
-                <Button size="sm" variant="outline" type="button" onClick={() => setNewLightProviderOpen(true)}>
+                <Button size="sm" variant="outline" type="button" onClick={() => setNewZoneOpen(true)}>
                   + New
                 </Button>
               </div>
-              {selectedLP && (
-                <p className="text-xs text-muted-foreground">{selectedLP.entertainment_area_name} — {selectedLP.light_count} lights</p>
+              {selectedZone && (
+                <p className="text-xs text-muted-foreground">{selectedZone.entertainment_area_name} — {selectedZone.light_count} lights</p>
               )}
             </div>
 
@@ -638,7 +702,7 @@ function CouplingEditor({
               </div>
             </div>
 
-            {/* Two-column Active/Mellow layer selectors */}
+            {/* Two-column Active/Mellow scene selectors */}
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1.5">
                 <div>
@@ -646,17 +710,17 @@ function CouplingEditor({
                   <div className="text-xs text-muted-foreground">Loud passages</div>
                 </div>
                 <div className="flex gap-1.5">
-                  <Select value={renderConfigId} onValueChange={setRenderConfigId}>
+                  <Select value={activeSceneId} onValueChange={setActiveSceneId}>
                     <SelectTrigger className="flex-1 min-w-0">
                       <SelectValue placeholder="Select…" />
                     </SelectTrigger>
                     <SelectContent>
-                      {renderConfigs.map((c) => (
+                      {scenes.map((c) => (
                         <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>
                       ))}
                     </SelectContent>
                   </Select>
-                  <Button size="sm" variant="outline" type="button" onClick={() => openNewRenderConfig('active')}>
+                  <Button size="sm" variant="outline" type="button" onClick={() => openNewScene('active')}>
                     + New
                   </Button>
                 </div>
@@ -667,18 +731,18 @@ function CouplingEditor({
                   <div className="text-xs text-muted-foreground">Quiet passages</div>
                 </div>
                 <div className="flex gap-1.5">
-                  <Select value={mellowRenderConfigId} onValueChange={setMellowRenderConfigId}>
+                  <Select value={mellowSceneId} onValueChange={setMellowSceneId}>
                     <SelectTrigger className="flex-1 min-w-0">
                       <SelectValue placeholder="Same as active" />
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="">Same as active</SelectItem>
-                      {renderConfigs.map((c) => (
+                      {scenes.map((c) => (
                         <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>
                       ))}
                     </SelectContent>
                   </Select>
-                  <Button size="sm" variant="outline" type="button" onClick={() => openNewRenderConfig('mellow')}>
+                  <Button size="sm" variant="outline" type="button" onClick={() => openNewScene('mellow')}>
                     + New
                   </Button>
                 </div>
@@ -695,8 +759,8 @@ function CouplingEditor({
                   step={0.05}
                   min={0}
                   max={1}
-                  value={mixLowThreshold}
-                  onChange={(e) => setMixLowThreshold(e.target.value)}
+                  value={lowThreshold}
+                  onChange={(e) => setLowThreshold(e.target.value)}
                 />
               </div>
               <div className="space-y-1">
@@ -706,19 +770,19 @@ function CouplingEditor({
                   step={0.05}
                   min={0}
                   max={1}
-                  value={mixHighThreshold}
-                  onChange={(e) => setMixHighThreshold(e.target.value)}
+                  value={highThreshold}
+                  onChange={(e) => setHighThreshold(e.target.value)}
                 />
               </div>
               <div className="space-y-1">
-                <Label className="text-sm text-muted-foreground">EMA alpha (crossfade speed, 0.01–0.5)</Label>
+                <Label className="text-sm text-muted-foreground">Fade speed / EMA alpha (0.01–0.5)</Label>
                 <Input
                   type="number"
                   step={0.01}
                   min={0.01}
                   max={0.5}
-                  value={mixEmaAlpha}
-                  onChange={(e) => setMixEmaAlpha(e.target.value)}
+                  value={fadeSpeed}
+                  onChange={(e) => setFadeSpeed(e.target.value)}
                 />
               </div>
             </div>
@@ -752,20 +816,20 @@ function CouplingEditor({
         onClose={() => setNewPlayerOpen(false)}
         onCreated={handlePlayerCreated}
       />
-      <NewLightProviderDialog
-        open={newLightProviderOpen}
-        onClose={() => setNewLightProviderOpen(false)}
-        onCreated={handleLightProviderCreated}
+      <NewZoneDialog
+        open={newZoneOpen}
+        onClose={() => setNewZoneOpen(false)}
+        onCreated={handleZoneCreated}
       />
       <NewAnalysisConfigDialog
         open={newAnalysisConfigOpen}
         onClose={() => setNewAnalysisConfigOpen(false)}
         onCreated={handleAnalysisConfigCreated}
       />
-      <NewRenderConfigDialog
-        open={newRenderConfigOpen}
-        onClose={() => setNewRenderConfigOpen(false)}
-        onCreated={handleRenderConfigCreated}
+      <NewSceneDialog
+        open={newSceneOpen}
+        onClose={() => setNewSceneOpen(false)}
+        onCreated={handleSceneCreated}
       />
     </>
   )
@@ -776,9 +840,10 @@ function CouplingEditor({
 export function Couplings({ activeCouplingId: activeCouplingIdProp, onActivationChange }: Props) {
   const [couplings, setCouplings] = useState<Coupling[]>([])
   const [players, setPlayers] = useState<VirtualPlayer[]>([])
-  const [lightProviders, setLightProviders] = useState<LightProvider[]>([])
+  const [zones, setZones] = useState<Zone[]>([])
   const [analysisConfigs, setAnalysisConfigs] = useState<AnalysisConfig[]>([])
-  const [renderConfigs, setRenderConfigs] = useState<RenderConfig[]>([])
+  const [scenes, setScenes] = useState<Scene[]>([])
+  const [crossfaders, setCrossfaders] = useState<Crossfader[]>([])
   const [activeCouplingId, setActiveCouplingId] = useState<string | null>(activeCouplingIdProp)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -788,19 +853,21 @@ export function Couplings({ activeCouplingId: activeCouplingIdProp, onActivation
 
   async function loadAll() {
     try {
-      const [cs, ps, lps, acs, rcs, st] = await Promise.all([
+      const [cs, ps, zs, acs, cfs, scs, st] = await Promise.all([
         getCouplings(),
         getVirtualPlayers(),
-        getLightProviders(),
+        getZones(),
         getAnalysisConfigs(),
-        getRenderConfigs(),
+        getCrossfaders(),
+        getScenes(),
         getStatus(),
       ])
       setCouplings(cs)
       setPlayers(ps)
-      setLightProviders(lps)
+      setZones(zs)
       setAnalysisConfigs(acs)
-      setRenderConfigs(rcs)
+      setCrossfaders(cfs)
+      setScenes(scs)
       setActiveCouplingId(st.active_coupling_id ?? activeCouplingIdProp)
       setError(null)
     } catch (e) {
@@ -871,12 +938,14 @@ export function Couplings({ activeCouplingId: activeCouplingIdProp, onActivation
   function playerName(id: string) {
     return players.find((p) => p.id === id)?.name ?? id
   }
-  function areaName(lpId: string) {
-    const lp = lightProviders.find((l) => l.id === lpId)
-    return lp ? lp.name : lpId
+  function areaName(zoneId: string) {
+    const zone = zones.find((z) => z.id === zoneId)
+    return zone ? zone.name : zoneId
   }
-  function modeName(rcId: string) {
-    return renderConfigs.find((r) => r.id === rcId)?.effect ?? rcId
+  function modeName(cfId: string) {
+    const cf = crossfaders.find((x) => x.id === cfId)
+    if (!cf) return cfId
+    return scenes.find((s) => s.id === cf.active_scene_id)?.effect ?? cfId
   }
 
   if (loading) {
@@ -919,8 +988,8 @@ export function Couplings({ activeCouplingId: activeCouplingIdProp, onActivation
                 <TableRow key={c.id}>
                   <TableCell className="font-medium">{c.name}</TableCell>
                   <TableCell className="text-sm text-muted-foreground">{playerName(c.player_id)}</TableCell>
-                  <TableCell className="text-sm text-muted-foreground">{areaName(c.light_provider_id)}</TableCell>
-                  <TableCell className="text-sm font-mono">{modeName(c.render_config_id)}</TableCell>
+                  <TableCell className="text-sm text-muted-foreground">{areaName(c.zone_id)}</TableCell>
+                  <TableCell className="text-sm font-mono">{modeName(c.crossfader_id)}</TableCell>
                   <TableCell>
                     <Badge variant={isActive ? 'default' : 'secondary'}>
                       {isActive ? 'Active' : c.enabled ? 'Inactive' : 'Disabled'}
@@ -930,7 +999,7 @@ export function Couplings({ activeCouplingId: activeCouplingIdProp, onActivation
                     <div className="flex items-center justify-end gap-1">
                       {!isActive && (
                         <Button size="sm" variant="outline" onClick={() => handleActivate(c.id)}>
-                          Activate
+                          Go
                         </Button>
                       )}
                       {isActive && (
@@ -967,15 +1036,18 @@ export function Couplings({ activeCouplingId: activeCouplingIdProp, onActivation
         open={editorOpen}
         coupling={editingCoupling}
         players={players}
-        lightProviders={lightProviders}
+        zones={zones}
         analysisConfigs={analysisConfigs}
-        renderConfigs={renderConfigs}
+        scenes={scenes}
+        crossfaders={crossfaders}
+        activeCouplingId={activeCouplingId}
         onSave={handleSave}
         onClose={() => setEditorOpen(false)}
         onPlayersChanged={setPlayers}
-        onLightProvidersChanged={setLightProviders}
+        onZonesChanged={setZones}
         onAnalysisConfigsChanged={setAnalysisConfigs}
-        onRenderConfigsChanged={setRenderConfigs}
+        onScenesChanged={setScenes}
+        onCrossfadersChanged={setCrossfaders}
       />
     </div>
   )

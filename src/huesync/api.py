@@ -23,10 +23,11 @@ from .models import (
     Controller,
     ControllerType,
     Coupling,
-    LightProvider,
+    Crossfader,
     PlayerLatency,
-    RenderConfig,
+    Scene,
     VirtualPlayer,
+    Zone,
 )
 from .player_manager import PlayerManager, _build_engine_profile, _build_mellow_profile
 from .storage import Storage
@@ -98,15 +99,15 @@ class VirtualPlayerPatchBody(BaseModel):
     alsa_device: str | None = None
 
 
-class LightProviderCreateBody(BaseModel):
-    name: str = "Light Provider"
+class ZoneCreateBody(BaseModel):
+    name: str = "Zone"
     controller_id: str
     entertainment_area_id: str
     entertainment_area_name: str = ""
     light_count: int = 0
 
 
-class LightProviderPatchBody(BaseModel):
+class ZonePatchBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str | None = None
     entertainment_area_name: str | None = None
@@ -138,8 +139,8 @@ class AnalysisConfigPatchBody(BaseModel):
     higher_cutoff_freq: int | None = None
 
 
-class RenderConfigCreateBody(BaseModel):
-    name: str = "Default Render"
+class SceneCreateBody(BaseModel):
+    name: str = "Default Scene"
     effect: str = "spectrum_rgb"
     effect_speed: float = 1.0
     effect_decay: float = 0.3
@@ -151,7 +152,7 @@ class RenderConfigCreateBody(BaseModel):
     onset_flash_intensity: float = 0.0
 
 
-class RenderConfigPatchBody(BaseModel):
+class ScenePatchBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str | None = None
     effect: str | None = None
@@ -165,16 +166,31 @@ class RenderConfigPatchBody(BaseModel):
     onset_flash_intensity: float | None = None
 
 
+class CrossfaderCreateBody(BaseModel):
+    name: str = "Default Crossfader"
+    active_scene_id: str
+    mellow_scene_id: str = ""
+    low_threshold: float = 0.3
+    high_threshold: float = 0.7
+    fade_speed: float = 0.1
+
+
+class CrossfaderPatchBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str | None = None
+    active_scene_id: str | None = None
+    mellow_scene_id: str | None = None
+    low_threshold: float | None = None
+    high_threshold: float | None = None
+    fade_speed: float | None = None
+
+
 class CouplingCreateBody(BaseModel):
     name: str
     player_id: str
     analysis_config_id: str
-    light_provider_id: str
-    render_config_id: str
-    mellow_render_config_id: str = ""
-    mix_low_threshold: float = 0.3
-    mix_high_threshold: float = 0.7
-    mix_ema_alpha: float = 0.1
+    zone_id: str
+    crossfader_id: str
     enabled: bool = True
 
 
@@ -194,11 +210,10 @@ class CouplingPatchBody(BaseModel):
     enabled: bool | None = None
     # FK rewiring (deactivate if active)
     player_id: str | None = None
+    zone_id: str | None = None
+    # FK live update (no deactivate)
     analysis_config_id: str | None = None
-    light_provider_id: str | None = None
-    render_config_id: str | None = None
-    # Mellow layer FK (live update_render, no deactivate)
-    mellow_render_config_id: str | None = None
+    crossfader_id: str | None = None
     # Player inline (deactivate if active)
     lms_host: str | None = None
     lms_port: int | None = None
@@ -214,22 +229,10 @@ class CouplingPatchBody(BaseModel):
     onset_alpha: float | None = None
     superflux_mu: int | None = None
     superflux_lag: int | None = None
-    # RenderConfig fields (update_render)
-    effect: str | None = None
-    effect_speed: float | None = None
-    effect_decay: float | None = None
-    sensitivity: float | None = None
-    brightness_floor: float | None = None
-    exertion_clip: float | None = None
-    onset_flash_intensity: float | None = None
-    # bass_hz/mid_hz: stored in RenderConfig but pcm-category for restart
+    # bass_hz/mid_hz: stored in Scene but pcm-category for restart
     bass_hz: int | None = None
     mid_hz: int | None = None
-    # LayerMixer crossfade params — live on Coupling, update_render triggers
-    mix_low_threshold: float | None = None
-    mix_high_threshold: float | None = None
-    mix_ema_alpha: float | None = None
-    # LightProvider render fields
+    # Zone render fields
     entertainment_area_name: str | None = None
     light_count: int | None = None
 
@@ -247,17 +250,16 @@ class CouplingPatchBody(BaseModel):
 
 _C_DEACTIVATE_FIELDS: frozenset[str] = frozenset({
     # Changing these requires a full squeezelite + cava + DTLS restart because
-    # a new process (player_id) or a new Entertainment Area (light_provider_id)
-    # cannot be hot-swapped into a running session.
-    "player_id", "light_provider_id",
+    # a new process (player_id) or a new Zone cannot be hot-swapped into a
+    # running session.
+    "player_id", "zone_id",
     "lms_host", "lms_port", "player_name", "alsa_device",
 })
 # FK fields that do NOT require a full restart — handled via lighter live-update
 # paths in _apply_coupling_action().
 _C_LIVE_FK_FIELDS: frozenset[str] = frozenset({
-    "analysis_config_id",       # → cava restart + PCM pipeline rebuild
-    "render_config_id",         # → update_render only
-    "mellow_render_config_id",  # → update_render only (new mellow layer RC)
+    "analysis_config_id",  # → cava restart + PCM pipeline rebuild
+    "crossfader_id",       # → update_render only
 })
 _C_CAVA_FIELDS: frozenset[str] = frozenset({
     "bars", "lower_cutoff_freq", "higher_cutoff_freq",
@@ -267,10 +269,10 @@ _C_PCM_FIELDS: frozenset[str] = frozenset({
     "bass_hz", "mid_hz",
 })
 _C_RENDER_FIELDS: frozenset[str] = frozenset({
-    "effect", "effect_speed", "effect_decay",
-    "mix_low_threshold", "mix_high_threshold",
-    "mix_ema_alpha", "sensitivity", "brightness_floor", "exertion_clip",
-    "onset_flash_intensity", "entertainment_area_name", "light_count",
+    "entertainment_area_name", "light_count",
+    # Crossfader patch fields that propagate render changes:
+    "active_scene_id", "mellow_scene_id",
+    "low_threshold", "high_threshold", "fade_speed",
 })
 
 # Which sub-entity owns each inline field in CouplingPatchBody
@@ -281,20 +283,17 @@ _C_AC_INLINE: frozenset[str] = frozenset({
     "bars", "lower_cutoff_freq", "higher_cutoff_freq",
     "onset_method", "onset_delta", "onset_alpha", "superflux_mu", "superflux_lag",
 })
-_C_RC_INLINE: frozenset[str] = frozenset({
-    "effect", "effect_speed", "effect_decay",
-    "sensitivity", "brightness_floor", "exertion_clip",
-    "onset_flash_intensity", "bass_hz", "mid_hz",
+_C_SCENE_INLINE: frozenset[str] = frozenset({
+    "bass_hz", "mid_hz",
 })
-_C_LP_INLINE: frozenset[str] = frozenset({"entertainment_area_name", "light_count"})
+_C_ZONE_INLINE: frozenset[str] = frozenset({"entertainment_area_name", "light_count"})
 _C_FK_FIELDS: frozenset[str] = frozenset({
-    "player_id", "analysis_config_id", "light_provider_id", "render_config_id",
-    "mellow_render_config_id",
+    "player_id", "zone_id", "analysis_config_id", "crossfader_id",
 })
 # Fields that live directly on Coupling (not on a sub-entity) and are set
 # via setattr(coupling, field, value) in the patch handler.
 _C_COUPLING_DIRECT_FIELDS: frozenset[str] = frozenset({
-    "name", "enabled", "mix_low_threshold", "mix_high_threshold", "mix_ema_alpha",
+    "name", "enabled",
 })
 
 
@@ -318,7 +317,7 @@ async def _apply_coupling_action(
         await manager.deactivate()
         return
     # analysis_config_id swap: treat as cava + PCM change (new AC replaces all
-    # its fields: bars, cutoffs, onset params).  render_config_id alone falls
+    # its fields: bars, cutoffs, onset params).  crossfader_id alone falls
     # through to update_render() only.
     if changed & (_C_CAVA_FIELDS | {"analysis_config_id"}):
         await manager.restart_cava()
@@ -589,61 +588,61 @@ async def delete_virtual_player(player_id: str, request: Request):
 
 
 # ---------------------------------------------------------------------------
-# LightProviders
+# Zones
 # ---------------------------------------------------------------------------
 
 
-@router.get("/light-providers")
-async def list_light_providers(request: Request):
-    return [lp.to_dict() for lp in _storage(request).list_light_providers()]
+@router.get("/zones")
+async def list_zones(request: Request):
+    return [z.to_dict() for z in _storage(request).list_zones()]
 
 
-@router.post("/light-providers", status_code=201)
-async def create_light_provider(request: Request, body: LightProviderCreateBody):
+@router.post("/zones", status_code=201)
+async def create_zone(request: Request, body: ZoneCreateBody):
     storage = _storage(request)
-    lp = LightProvider(
+    zone = Zone(
         name=body.name,
         controller_id=body.controller_id,
         entertainment_area_id=body.entertainment_area_id,
         entertainment_area_name=body.entertainment_area_name,
         light_count=body.light_count,
     )
-    storage.save_light_provider(lp)
-    return JSONResponse(content=lp.to_dict(), status_code=201)
+    storage.save_zone(zone)
+    return JSONResponse(content=zone.to_dict(), status_code=201)
 
 
-@router.get("/light-providers/{lp_id}")
-async def get_light_provider(lp_id: str, request: Request):
-    lp = _storage(request).get_light_provider(lp_id)
-    if lp is None:
-        raise HTTPException(status_code=404, detail="LightProvider not found")
-    return lp.to_dict()
+@router.get("/zones/{zone_id}")
+async def get_zone(zone_id: str, request: Request):
+    zone = _storage(request).get_zone(zone_id)
+    if zone is None:
+        raise HTTPException(status_code=404, detail="Zone not found")
+    return zone.to_dict()
 
 
-@router.patch("/light-providers/{lp_id}")
-async def patch_light_provider(lp_id: str, request: Request, body: LightProviderPatchBody):
+@router.patch("/zones/{zone_id}")
+async def patch_zone(zone_id: str, request: Request, body: ZonePatchBody):
     storage = _storage(request)
     manager = _manager(request)
-    lp = storage.get_light_provider(lp_id)
-    if lp is None:
-        raise HTTPException(status_code=404, detail="LightProvider not found")
+    zone = storage.get_zone(zone_id)
+    if zone is None:
+        raise HTTPException(status_code=404, detail="Zone not found")
     updates = body.model_dump(exclude_unset=True)
     for field, value in updates.items():
-        setattr(lp, field, value)
-    storage.save_light_provider(lp)
+        setattr(zone, field, value)
+    storage.save_zone(zone)
     # entertainment_area_name and light_count are render-category changes.
     active_id = storage.get_active_coupling_id()
     render_changed = set(updates.keys()) & _C_RENDER_FIELDS
     if render_changed and active_id:
         coupling = storage.get_coupling(active_id)
-        if coupling and coupling.light_provider_id == lp_id:
+        if coupling and coupling.zone_id == zone_id:
             await _apply_coupling_action(coupling, storage, manager, render_changed)
-    return lp.to_dict()
+    return zone.to_dict()
 
 
-@router.delete("/light-providers/{lp_id}", status_code=204)
-async def delete_light_provider(lp_id: str, request: Request):
-    _storage(request).delete_light_provider(lp_id)
+@router.delete("/zones/{zone_id}", status_code=204)
+async def delete_zone(zone_id: str, request: Request):
+    _storage(request).delete_zone(zone_id)
 
 
 # ---------------------------------------------------------------------------
@@ -709,23 +708,23 @@ async def delete_analysis_config(ac_id: str, request: Request):
 
 
 # ---------------------------------------------------------------------------
-# RenderConfigs
+# Scenes
 # ---------------------------------------------------------------------------
 
 
-@router.get("/render-configs")
-async def list_render_configs(request: Request):
-    return [rc.to_dict() for rc in _storage(request).list_render_configs()]
+@router.get("/scenes")
+async def list_scenes(request: Request):
+    return [s.to_dict() for s in _storage(request).list_scenes()]
 
 
-@router.post("/render-configs", status_code=201)
-async def create_render_config(request: Request, body: RenderConfigCreateBody):
+@router.post("/scenes", status_code=201)
+async def create_scene(request: Request, body: SceneCreateBody):
     storage = _storage(request)
     if body.effect not in EFFECT_IDS:
         raise HTTPException(
             status_code=422, detail=f"Unknown effect: {body.effect!r}"
         )
-    rc = RenderConfig(
+    scene = Scene(
         name=body.name,
         effect=body.effect,
         effect_speed=body.effect_speed,
@@ -737,46 +736,108 @@ async def create_render_config(request: Request, body: RenderConfigCreateBody):
         exertion_clip=body.exertion_clip,
         onset_flash_intensity=body.onset_flash_intensity,
     )
-    storage.save_render_config(rc)
-    return JSONResponse(content=rc.to_dict(), status_code=201)
+    storage.save_scene(scene)
+    return JSONResponse(content=scene.to_dict(), status_code=201)
 
 
-@router.get("/render-configs/{rc_id}")
-async def get_render_config(rc_id: str, request: Request):
-    rc = _storage(request).get_render_config(rc_id)
-    if rc is None:
-        raise HTTPException(status_code=404, detail="RenderConfig not found")
-    return rc.to_dict()
+@router.get("/scenes/{scene_id}")
+async def get_scene(scene_id: str, request: Request):
+    scene = _storage(request).get_scene(scene_id)
+    if scene is None:
+        raise HTTPException(status_code=404, detail="Scene not found")
+    return scene.to_dict()
 
 
-@router.patch("/render-configs/{rc_id}")
-async def patch_render_config(rc_id: str, request: Request, body: RenderConfigPatchBody):
+@router.patch("/scenes/{scene_id}")
+async def patch_scene(scene_id: str, request: Request, body: ScenePatchBody):
     storage = _storage(request)
     manager = _manager(request)
-    rc = storage.get_render_config(rc_id)
-    if rc is None:
-        raise HTTPException(status_code=404, detail="RenderConfig not found")
+    scene = storage.get_scene(scene_id)
+    if scene is None:
+        raise HTTPException(status_code=404, detail="Scene not found")
     updates = body.model_dump(exclude_unset=True)
     for field, value in updates.items():
         if field == "effect" and value not in EFFECT_IDS:
             raise HTTPException(
                 status_code=422, detail=f"Unknown effect: {value!r}"
             )
-        setattr(rc, field, value)
-    storage.save_render_config(rc)
-    # Trigger render/pcm update if the active coupling uses this RenderConfig.
+        setattr(scene, field, value)
+    storage.save_scene(scene)
+    # Trigger render/pcm update if the active coupling uses this Scene
+    # (via its crossfader's active_scene_id).
     active_id = storage.get_active_coupling_id()
     active_fields = set(updates.keys()) - {"name"}
     if active_fields and active_id:
         coupling = storage.get_coupling(active_id)
-        if coupling and coupling.render_config_id == rc_id:
+        if coupling and coupling.crossfader_id:
+            cf = storage.get_crossfader(coupling.crossfader_id)
+            if cf and cf.active_scene_id == scene_id:
+                await _apply_coupling_action(coupling, storage, manager, active_fields)
+    return scene.to_dict()
+
+
+@router.delete("/scenes/{scene_id}", status_code=204)
+async def delete_scene(scene_id: str, request: Request):
+    _storage(request).delete_scene(scene_id)
+
+
+# ---------------------------------------------------------------------------
+# Crossfaders
+# ---------------------------------------------------------------------------
+
+
+@router.get("/crossfaders")
+async def list_crossfaders(request: Request):
+    return [cf.to_dict() for cf in _storage(request).list_crossfaders()]
+
+
+@router.post("/crossfaders", status_code=201)
+async def create_crossfader(request: Request, body: CrossfaderCreateBody):
+    storage = _storage(request)
+    cf = Crossfader(
+        name=body.name,
+        active_scene_id=body.active_scene_id,
+        mellow_scene_id=body.mellow_scene_id,
+        low_threshold=body.low_threshold,
+        high_threshold=body.high_threshold,
+        fade_speed=body.fade_speed,
+    )
+    storage.save_crossfader(cf)
+    return JSONResponse(content=cf.to_dict(), status_code=201)
+
+
+@router.get("/crossfaders/{cf_id}")
+async def get_crossfader(cf_id: str, request: Request):
+    cf = _storage(request).get_crossfader(cf_id)
+    if cf is None:
+        raise HTTPException(status_code=404, detail="Crossfader not found")
+    return cf.to_dict()
+
+
+@router.patch("/crossfaders/{cf_id}")
+async def patch_crossfader(cf_id: str, request: Request, body: CrossfaderPatchBody):
+    storage = _storage(request)
+    manager = _manager(request)
+    cf = storage.get_crossfader(cf_id)
+    if cf is None:
+        raise HTTPException(status_code=404, detail="Crossfader not found")
+    updates = body.model_dump(exclude_unset=True)
+    for field, value in updates.items():
+        setattr(cf, field, value)
+    storage.save_crossfader(cf)
+    # If the active coupling uses this crossfader, trigger update_render.
+    active_id = storage.get_active_coupling_id()
+    active_fields = set(updates.keys()) - {"name"}
+    if active_fields and active_id:
+        coupling = storage.get_coupling(active_id)
+        if coupling and coupling.crossfader_id == cf_id:
             await _apply_coupling_action(coupling, storage, manager, active_fields)
-    return rc.to_dict()
+    return cf.to_dict()
 
 
-@router.delete("/render-configs/{rc_id}", status_code=204)
-async def delete_render_config(rc_id: str, request: Request):
-    _storage(request).delete_render_config(rc_id)
+@router.delete("/crossfaders/{cf_id}", status_code=204)
+async def delete_crossfader(cf_id: str, request: Request):
+    _storage(request).delete_crossfader(cf_id)
 
 
 # ---------------------------------------------------------------------------
@@ -796,12 +857,8 @@ async def create_coupling(request: Request, body: CouplingCreateBody):
         name=body.name,
         player_id=body.player_id,
         analysis_config_id=body.analysis_config_id,
-        light_provider_id=body.light_provider_id,
-        render_config_id=body.render_config_id,
-        mellow_render_config_id=body.mellow_render_config_id,
-        mix_low_threshold=body.mix_low_threshold,
-        mix_high_threshold=body.mix_high_threshold,
-        mix_ema_alpha=body.mix_ema_alpha,
+        zone_id=body.zone_id,
+        crossfader_id=body.crossfader_id,
         enabled=body.enabled,
     )
     storage.save_coupling(coupling)
@@ -863,17 +920,19 @@ async def restart_coupling_cava(
             ac.higher_cutoff_freq = body.higher_cutoff_freq
         storage.save_analysis_config(ac)
 
-        rc = storage.get_render_config(coupling.render_config_id)
-        if rc is not None:
-            changed_rc = False
-            if body.bass_hz is not None:
-                rc.bass_hz = body.bass_hz
-                changed_rc = True
-            if body.mid_hz is not None:
-                rc.mid_hz = body.mid_hz
-                changed_rc = True
-            if changed_rc:
-                storage.save_render_config(rc)
+        crossfader = storage.get_crossfader(coupling.crossfader_id)
+        if crossfader is not None:
+            scene = storage.get_scene(crossfader.active_scene_id)
+            if scene is not None:
+                changed_scene = False
+                if body.bass_hz is not None:
+                    scene.bass_hz = body.bass_hz
+                    changed_scene = True
+                if body.mid_hz is not None:
+                    scene.mid_hz = body.mid_hz
+                    changed_scene = True
+                if changed_scene:
+                    storage.save_scene(scene)
 
     try:
         await manager.restart_cava()
@@ -914,18 +973,13 @@ async def patch_coupling(coupling_id: str, request: Request, body: CouplingPatch
         if coupling.analysis_config_id
         else None
     )
-    rc = (
-        storage.get_render_config(coupling.render_config_id)
-        if coupling.render_config_id
-        else None
-    )
-    lp = (
-        storage.get_light_provider(coupling.light_provider_id)
-        if coupling.light_provider_id
+    zone = (
+        storage.get_zone(coupling.zone_id)
+        if coupling.zone_id
         else None
     )
 
-    player_changed = ac_changed = rc_changed = lp_changed = False
+    player_changed = ac_changed = zone_changed = False
 
     for field, value in updates.items():
         if field in _C_COUPLING_DIRECT_FIELDS | _C_FK_FIELDS:
@@ -936,22 +990,17 @@ async def patch_coupling(coupling_id: str, request: Request, body: CouplingPatch
         elif field in _C_AC_INLINE and ac:
             setattr(ac, field, value)
             ac_changed = True
-        elif field in _C_RC_INLINE and rc:
-            setattr(rc, field, value)
-            rc_changed = True
-        elif field in _C_LP_INLINE and lp:
-            setattr(lp, field, value)
-            lp_changed = True
+        elif field in _C_ZONE_INLINE and zone:
+            setattr(zone, field, value)
+            zone_changed = True
 
     storage.save_coupling(coupling)
     if player_changed and player:
         storage.save_virtual_player(player)
     if ac_changed and ac:
         storage.save_analysis_config(ac)
-    if rc_changed and rc:
-        storage.save_render_config(rc)
-    if lp_changed and lp:
-        storage.save_light_provider(lp)
+    if zone_changed and zone:
+        storage.save_zone(zone)
 
     if was_active:
         changed = set(updates.keys())
@@ -976,9 +1025,9 @@ async def delete_coupling(coupling_id: str, request: Request):
 
 @router.post("/couplings/{coupling_id}/clone", status_code=201)
 async def clone_coupling(coupling_id: str, request: Request):
-    """Deep-clone a Coupling with fresh AnalysisConfig and RenderConfig copies.
+    """Deep-clone a Coupling with fresh AnalysisConfig, Scene, and Crossfader copies.
 
-    The Player and LightProvider references are shared (not cloned).
+    The Player and Zone references are shared (not cloned).
     The new Coupling is named "<original name> (copy)".
     """
     storage = _storage(request)
@@ -988,22 +1037,25 @@ async def clone_coupling(coupling_id: str, request: Request):
         raise HTTPException(status_code=404, detail="Coupling not found")
 
     ac = storage.get_analysis_config(coupling.analysis_config_id)
-    rc = storage.get_render_config(coupling.render_config_id)
-    if ac is None or rc is None:
+    cf = storage.get_crossfader(coupling.crossfader_id)
+    scene = storage.get_scene(cf.active_scene_id) if cf else None
+    if ac is None or cf is None or scene is None:
         raise HTTPException(status_code=422, detail="Coupling has missing sub-entities")
 
     new_ac = replace(ac, id=str(uuid.uuid4()))
-    new_rc = replace(rc, id=str(uuid.uuid4()))
+    new_scene = replace(scene, id=str(uuid.uuid4()))
+    new_cf = replace(cf, id=str(uuid.uuid4()), active_scene_id=new_scene.id)
     new_coupling = replace(
         coupling,
         id=str(uuid.uuid4()),
         name=f"{coupling.name} (copy)",
         analysis_config_id=new_ac.id,
-        render_config_id=new_rc.id,
+        crossfader_id=new_cf.id,
     )
 
     storage.save_analysis_config(new_ac)
-    storage.save_render_config(new_rc)
+    storage.save_scene(new_scene)
+    storage.save_crossfader(new_cf)
     storage.save_coupling(new_coupling)
 
     return new_coupling.to_dict()
