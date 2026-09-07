@@ -1022,3 +1022,43 @@ def test_fireworks_burst_and_decay():
     assert b_25 < b_10, (
         f"Fireworks: expected further decay from {b_10:.4f} by t=2.5, got {b_25:.4f}"
     )
+
+
+def test_pulses_attack_is_not_instant():
+    """Onset rise must be an exponential approach, not an instant 0→1 spike."""
+    from huesync.sync_engine import ColourModeEffect
+
+    effect = ColourModeEffect(_prof(effect="pulses", effect_decay=0.3))
+    before = effect.render(_ef(onset=False, full=0.0), 0.0).color_at(_ORIGIN, 0.0)
+    after = effect.render(_ef(onset=True, full=0.0), 0.0).color_at(_ORIGIN, 0.0)
+    delta = after.r - before.r
+    assert delta < 1.0 - 1e-6, (
+        f"Pulses: onset must not be an instant 0→1 jump; got delta={delta:.4f}"
+    )
+    assert delta > 0.3, (
+        f"Pulses: onset attack must make visible progress in one frame; got delta={delta:.4f}"
+    )
+
+
+def test_fireworks_colour_follows_spectrum():
+    """Fireworks captures spectrum hue at onset; bass-heavy bars give red-dominant burst."""
+    from huesync.sync_engine import ColourModeEffect
+    from huesync.types import AudioFeatures
+
+    bars = [1.0] * 8 + [0.1] * 22  # heavy bass, quiet mids and treble
+    features = AudioFeatures(
+        bars=bars, bass=0.9, mid=0.2, full=0.5, centroid=0.1,
+        onset=True, onset_strength=1.0,
+    )
+    effect = ColourModeEffect(_prof(effect="fireworks", effect_speed=1.0))
+    # onset at t=0; origin_x = sin(0) * 0.9 = 0.0; particles near x=0.0 at t=0.05
+    effect.render(features, t=0.0)
+    scene = effect.render(_ef(onset=False, full=0.0), t=0.05)
+    c = scene.color_at(Position(0.0, 0.0, 0.0), 0.05)
+    assert c.r > c.g + 0.1, (
+        f"Fireworks: bass-heavy onset must give red-dominant output; "
+        f"r={c.r:.3f} g={c.g:.3f} b={c.b:.3f}"
+    )
+    assert c.r > c.b + 0.1, (
+        f"Fireworks: bass-heavy onset must dominate blue; r={c.r:.3f} b={c.b:.3f}"
+    )
