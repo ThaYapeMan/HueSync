@@ -18,7 +18,6 @@ lives in hue_output.py.
 from __future__ import annotations
 
 import asyncio
-import dataclasses
 import logging
 import math
 import os
@@ -782,18 +781,20 @@ class LayerMixer:
     mix = smoothstep(features.full, low_threshold, high_threshold),
     EMA-smoothed to avoid flickering between bass hits.
 
-    mix=0.0 → pure mellow layer (profile.mellow_colour_mode).
-    mix=1.0 → pure active layer (profile.color_mode).
+    mix=0.0 → pure mellow layer (mellow_profile.color_mode).
+    mix=1.0 → pure active layer (active_profile.color_mode).
+
+    Mix thresholds come from active_profile.mix_low_threshold etc., since
+    the Coupling owns those parameters.
     """
 
-    def __init__(self, profile: Profile) -> None:
-        mellow_profile = dataclasses.replace(profile, color_mode=profile.mellow_colour_mode)
+    def __init__(self, active_profile: Profile, mellow_profile: Profile) -> None:
         self._mellow = ColourModeEffect(mellow_profile)
-        self._active = ColourModeEffect(profile)
+        self._active = ColourModeEffect(active_profile)
         self._mix: float = 0.0
-        self._ema_alpha: float = profile.mix_ema_alpha
-        self._low: float = profile.mix_low_threshold
-        self._high: float = profile.mix_high_threshold
+        self._ema_alpha: float = active_profile.mix_ema_alpha
+        self._low: float = active_profile.mix_low_threshold
+        self._high: float = active_profile.mix_high_threshold
 
     @property
     def mix(self) -> float:
@@ -847,6 +848,7 @@ class SyncEngine:
         fifo_path: str,
         profile: Profile,
         probe: LatencyProbe | None = None,
+        mellow_profile: Profile | None = None,
     ) -> None:
         self.profile = profile
         self._analyser: Analyser = CavaAnalyser(
@@ -856,7 +858,8 @@ class SyncEngine:
             onset_alpha=profile.onset_alpha,
             exertion_clip=profile.exertion_clip,
         )
-        self._effect: LayerMixer = LayerMixer(profile)
+        effective_mellow = mellow_profile if mellow_profile is not None else profile
+        self._effect: LayerMixer = LayerMixer(profile, effective_mellow)
         self._probe: LatencyProbe = probe if probe is not None else NoLatencyProbe()
         self._delay_buffer: deque[Scene | None] = deque()
         self._last_onset: bool = False
@@ -912,10 +915,11 @@ class SyncEngine:
         """Swap the latency probe live. Safe to call from the asyncio event loop."""
         self._probe = probe
 
-    def update_profile(self, profile: Profile) -> None:
+    def update_profile(self, profile: Profile, mellow_profile: Profile | None = None) -> None:
         """Rebuild the effect with a new profile. Call after saving band/cutoff changes."""
         self.profile = profile
-        self._effect = LayerMixer(profile)
+        effective_mellow = mellow_profile if mellow_profile is not None else profile
+        self._effect = LayerMixer(profile, effective_mellow)
 
     def update_onset_pipeline(self, profile: Profile) -> None:
         """Switch the PCM-tap onset detection method without restarting any process.
@@ -976,14 +980,15 @@ class SyncEngine:
             self._diag_frame,
         )
 
-    def update_render(self, profile: Profile) -> None:
+    def update_render(self, profile: Profile, mellow_profile: Profile | None = None) -> None:
         """Apply render-only profile changes without restarting any process.
 
         Rebuilds LayerMixer and updates BandNormaliser.exertion_clip live.
         Safe to call while run() is active.
         """
         self.profile = profile
-        self._effect = LayerMixer(profile)
+        effective_mellow = mellow_profile if mellow_profile is not None else profile
+        self._effect = LayerMixer(profile, effective_mellow)
         if isinstance(self._analyser, CavaAnalyser):
             self._analyser.normaliser.update_exertion_clip(profile.exertion_clip)
 

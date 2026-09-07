@@ -38,6 +38,8 @@ app.include_router(api_router)
 
 @app.on_event("startup")
 async def on_startup() -> None:
+    # Migrate data from the old single-RC format to the two-RC format if needed.
+    storage.migrate()
     # A previously "active" coupling from before a restart has no real
     # squeezelite/cava process behind it anymore — clear the stale state
     # rather than pretending it's still running.

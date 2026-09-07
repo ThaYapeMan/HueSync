@@ -146,10 +146,6 @@ export interface RenderConfig {
   id: string
   name: string
   color_mode: string
-  mellow_colour_mode: string
-  mix_low_threshold: number
-  mix_high_threshold: number
-  mix_ema_alpha: number
   sensitivity: number
   brightness_floor: number
   bass_hz: number
@@ -165,6 +161,10 @@ export interface Coupling {
   analysis_config_id: string
   light_provider_id: string
   render_config_id: string
+  mellow_render_config_id: string
+  mix_low_threshold: number
+  mix_high_threshold: number
+  mix_ema_alpha: number
   enabled: boolean
 }
 

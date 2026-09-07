@@ -1,3 +1,4 @@
+import json
 import tempfile
 from pathlib import Path
 
@@ -27,6 +28,126 @@ def test_delete_virtual_player():
     storage.save_virtual_player(player)
     storage.delete_virtual_player(player.id)
     assert storage.get_virtual_player(player.id) is None
+
+
+def test_migrate_creates_mellow_render_config(tmp_path: Path):
+    """migrate() creates a cloned RC with the mellow colour mode when mellow differs from active."""
+    config = tmp_path / "config.json"
+    rc_id = "rc-1"
+    coupling_id = "c-1"
+    old_data = {
+        "player_latencies": [],
+        "virtual_players": [],
+        "controllers": [],
+        "light_providers": [],
+        "analysis_configs": [],
+        "render_configs": [
+            {
+                "id": rc_id,
+                "name": "My RC",
+                "color_mode": "spectrum_rgb",
+                "mellow_colour_mode": "mono_pulse",  # different → should clone
+                "mix_low_threshold": 0.2,
+                "mix_high_threshold": 0.6,
+                "mix_ema_alpha": 0.05,
+                "sensitivity": 1.0,
+                "brightness_floor": 0.15,
+                "bass_hz": 250,
+                "mid_hz": 2000,
+                "exertion_clip": 3.0,
+                "onset_flash_intensity": 0.0,
+            }
+        ],
+        "couplings": [
+            {
+                "id": coupling_id,
+                "name": "Test Coupling",
+                "player_id": "p-1",
+                "analysis_config_id": "ac-1",
+                "light_provider_id": "lp-1",
+                "render_config_id": rc_id,
+                "enabled": True,
+            }
+        ],
+        "active_coupling_id": None,
+    }
+    config.write_text(json.dumps(old_data))
+
+    storage = Storage(config)
+    storage.migrate()
+
+    # Coupling now has mellow_render_config_id set (different RC was cloned).
+    couplings = storage.list_couplings()
+    assert len(couplings) == 1
+    c = couplings[0]
+    assert c.mellow_render_config_id != ""
+    assert c.mellow_render_config_id != rc_id  # new, separate RC
+
+    # Mix params were moved from the old RC to the coupling.
+    assert c.mix_low_threshold == 0.2
+    assert c.mix_high_threshold == 0.6
+    assert c.mix_ema_alpha == 0.05
+
+    # A new RC was created with the mellow colour mode.
+    rcs = storage.list_render_configs()
+    mellow_rc = next((r for r in rcs if r.id == c.mellow_render_config_id), None)
+    assert mellow_rc is not None
+    assert mellow_rc.color_mode.value == "mono_pulse"
+    assert "(Mellow)" in mellow_rc.name
+
+    # Calling migrate() again is a no-op (idempotent).
+    storage.migrate()
+    assert len(storage.list_couplings()) == 1
+    assert storage.list_couplings()[0].mellow_render_config_id == c.mellow_render_config_id
+
+
+def test_migrate_same_colour_mode_reuses_rc(tmp_path: Path):
+    """migrate() sets mellow_render_config_id = render_config_id when modes are the same."""
+    config = tmp_path / "config.json"
+    rc_id = "rc-same"
+    old_data = {
+        "player_latencies": [],
+        "virtual_players": [],
+        "controllers": [],
+        "light_providers": [],
+        "analysis_configs": [],
+        "render_configs": [
+            {
+                "id": rc_id,
+                "name": "Same RC",
+                "color_mode": "spectrum_rgb",
+                "mellow_colour_mode": "spectrum_rgb",  # same → reuse
+                "sensitivity": 1.0,
+                "brightness_floor": 0.15,
+                "bass_hz": 250,
+                "mid_hz": 2000,
+                "exertion_clip": 3.0,
+                "onset_flash_intensity": 0.0,
+            }
+        ],
+        "couplings": [
+            {
+                "id": "c-same",
+                "name": "Same Coupling",
+                "player_id": "",
+                "analysis_config_id": "",
+                "light_provider_id": "",
+                "render_config_id": rc_id,
+                "enabled": True,
+            }
+        ],
+        "active_coupling_id": None,
+    }
+    config.write_text(json.dumps(old_data))
+
+    storage = Storage(config)
+    storage.migrate()
+
+    c = storage.list_couplings()[0]
+    # Same colour mode: mellow RC equals active RC.
+    assert c.mellow_render_config_id == rc_id
+    # Only the original RC exists (no clone was created).
+    assert len(storage.list_render_configs()) == 1
 
 
 def test_players_key_migrated_to_virtual_players(tmp_path: Path):

@@ -70,16 +70,69 @@ def _build_engine_profile(coupling: Coupling, storage: Storage) -> Profile | Non
         entertainment_area_name=lp.entertainment_area_name,
         light_count=lp.light_count,
         color_mode=rc.color_mode,
-        mellow_colour_mode=rc.mellow_colour_mode,
-        mix_low_threshold=rc.mix_low_threshold,
-        mix_high_threshold=rc.mix_high_threshold,
-        mix_ema_alpha=rc.mix_ema_alpha,
+        mix_low_threshold=coupling.mix_low_threshold,
+        mix_high_threshold=coupling.mix_high_threshold,
+        mix_ema_alpha=coupling.mix_ema_alpha,
         sensitivity=rc.sensitivity,
         brightness_floor=rc.brightness_floor,
         bass_hz=rc.bass_hz,
         mid_hz=rc.mid_hz,
         exertion_clip=rc.exertion_clip,
         onset_flash_intensity=rc.onset_flash_intensity,
+        onset_method=ac.onset_method,
+        onset_delta=ac.onset_delta,
+        onset_alpha=ac.onset_alpha,
+        superflux_mu=ac.superflux_mu,
+        superflux_lag=ac.superflux_lag,
+        bars=ac.bars,
+        lower_cutoff_freq=ac.lower_cutoff_freq,
+        higher_cutoff_freq=ac.higher_cutoff_freq,
+        enabled=coupling.enabled,
+    )
+
+
+def _build_mellow_profile(coupling: Coupling, storage: Storage) -> Profile | None:
+    """Build a Profile for the mellow (quiet-passage) layer from the Coupling's mellow RC.
+
+    Returns None if mellow_render_config_id is empty or the entity is missing
+    — the caller (SyncEngine) then falls back to the active profile for both
+    layers, which is a valid no-op state.
+    """
+    if not coupling.mellow_render_config_id:
+        return None
+    mellow_rc = storage.get_render_config(coupling.mellow_render_config_id)
+    if mellow_rc is None:
+        return None
+
+    # All non-RC fields (player, LMS, analysis, LP) are the same as the active
+    # profile; only the RC-derived fields differ.
+    player = storage.get_virtual_player(coupling.player_id)
+    lp     = storage.get_light_provider(coupling.light_provider_id)
+    ac     = storage.get_analysis_config(coupling.analysis_config_id)
+    if not all([player, lp, ac]):
+        return None
+    return Profile(
+        id=coupling.id,
+        name=coupling.name,
+        lms_host=player.lms_host,
+        lms_port=player.lms_port,
+        player_name=player.player_name,
+        player_mac=player.player_mac,
+        alsa_device=player.alsa_device,
+        bridge_id=lp.controller_id,
+        entertainment_area_id=lp.entertainment_area_id,
+        entertainment_area_name=lp.entertainment_area_name,
+        light_count=lp.light_count,
+        color_mode=mellow_rc.color_mode,
+        mix_low_threshold=coupling.mix_low_threshold,
+        mix_high_threshold=coupling.mix_high_threshold,
+        mix_ema_alpha=coupling.mix_ema_alpha,
+        sensitivity=mellow_rc.sensitivity,
+        brightness_floor=mellow_rc.brightness_floor,
+        bass_hz=mellow_rc.bass_hz,
+        mid_hz=mellow_rc.mid_hz,
+        exertion_clip=mellow_rc.exertion_clip,
+        onset_flash_intensity=mellow_rc.onset_flash_intensity,
         onset_method=ac.onset_method,
         onset_delta=ac.onset_delta,
         onset_alpha=ac.onset_alpha,
@@ -330,6 +383,9 @@ class PlayerManager:
             entertainment_area_name=lp.entertainment_area_name,
             light_count=lp.light_count,
             color_mode=rc.color_mode,
+            mix_low_threshold=coupling.mix_low_threshold,
+            mix_high_threshold=coupling.mix_high_threshold,
+            mix_ema_alpha=coupling.mix_ema_alpha,
             sensitivity=rc.sensitivity,
             brightness_floor=rc.brightness_floor,
             bass_hz=rc.bass_hz,
@@ -346,6 +402,7 @@ class PlayerManager:
             higher_cutoff_freq=ac.higher_cutoff_freq,
             enabled=coupling.enabled,
         )
+        mellow_profile = _build_mellow_profile(coupling, self.storage)
 
         self.latency_warning = None
         self._detected_sync_master = None
@@ -354,7 +411,10 @@ class PlayerManager:
         try:
             self._start_squeezelite(session, profile)
 
-            engine = SyncEngine(str(session.fifo_path), profile, probe=session.probe)
+            engine = SyncEngine(
+                str(session.fifo_path), profile, probe=session.probe,
+                mellow_profile=mellow_profile,
+            )
             session.sync_engine = engine
 
             self._create_fifo(session)
@@ -503,10 +563,10 @@ class PlayerManager:
         if self._active and self._active.sync_engine:
             self._active.sync_engine.update_onset_pipeline(profile)
 
-    def update_render(self, profile: Profile) -> None:
+    def update_render(self, profile: Profile, mellow_profile: Profile | None = None) -> None:
         """Apply render-only changes live on the active session."""
         if self._active and self._active.sync_engine:
-            self._active.sync_engine.update_render(profile)
+            self._active.sync_engine.update_render(profile, mellow_profile)
 
     async def refresh_probe(self) -> None:
         """Re-evaluate the latency probe for the current sync master.

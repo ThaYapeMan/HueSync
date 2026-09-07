@@ -351,7 +351,6 @@ interface NewRenderConfigDialogProps {
 function NewRenderConfigDialog({ open, onClose, onCreated }: NewRenderConfigDialogProps) {
   const [name, setName] = useState('')
   const [colorMode, setColorMode] = useState('spectrum_rgb')
-  const [mellowMode, setMellowMode] = useState('spectrum_rgb')
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -359,7 +358,6 @@ function NewRenderConfigDialog({ open, onClose, onCreated }: NewRenderConfigDial
     if (open) {
       setName('')
       setColorMode('spectrum_rgb')
-      setMellowMode('spectrum_rgb')
       setError(null)
     }
   }, [open])
@@ -371,10 +369,6 @@ function NewRenderConfigDialog({ open, onClose, onCreated }: NewRenderConfigDial
       const cfg = await createRenderConfig({
         name,
         color_mode: colorMode,
-        mellow_colour_mode: mellowMode,
-        mix_low_threshold: 0.3,
-        mix_high_threshold: 0.7,
-        mix_ema_alpha: 0.1,
         sensitivity: 1.0,
         brightness_floor: 0.15,
         bass_hz: 250,
@@ -403,21 +397,8 @@ function NewRenderConfigDialog({ open, onClose, onCreated }: NewRenderConfigDial
             <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="My render config" />
           </div>
           <div className="space-y-1">
-            <Label className="text-sm">Active layer (loud passages)</Label>
+            <Label className="text-sm">Colour mode</Label>
             <Select value={colorMode} onValueChange={setColorMode}>
-              <SelectTrigger>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {COLOUR_MODES.map((m) => (
-                  <SelectItem key={m.value} value={m.value}>{m.label}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-          <div className="space-y-1">
-            <Label className="text-sm">Mellow layer (quiet passages)</Label>
-            <Select value={mellowMode} onValueChange={setMellowMode}>
               <SelectTrigger>
                 <SelectValue />
               </SelectTrigger>
@@ -477,6 +458,10 @@ function CouplingEditor({
   const [lightProviderId, setLightProviderId] = useState('')
   const [analysisConfigId, setAnalysisConfigId] = useState('')
   const [renderConfigId, setRenderConfigId] = useState('')
+  const [mellowRenderConfigId, setMellowRenderConfigId] = useState('')
+  const [mixLowThreshold, setMixLowThreshold] = useState('0.3')
+  const [mixHighThreshold, setMixHighThreshold] = useState('0.7')
+  const [mixEmaAlpha, setMixEmaAlpha] = useState('0.1')
   const [enabled, setEnabled] = useState(true)
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
@@ -494,6 +479,10 @@ function CouplingEditor({
       setLightProviderId(coupling?.light_provider_id ?? '')
       setAnalysisConfigId(coupling?.analysis_config_id ?? '')
       setRenderConfigId(coupling?.render_config_id ?? '')
+      setMellowRenderConfigId(coupling?.mellow_render_config_id ?? '')
+      setMixLowThreshold(String(coupling?.mix_low_threshold ?? 0.3))
+      setMixHighThreshold(String(coupling?.mix_high_threshold ?? 0.7))
+      setMixEmaAlpha(String(coupling?.mix_ema_alpha ?? 0.1))
       setEnabled(coupling?.enabled ?? true)
       setSaveError(null)
     }
@@ -509,6 +498,10 @@ function CouplingEditor({
         light_provider_id: lightProviderId,
         analysis_config_id: analysisConfigId,
         render_config_id: renderConfigId,
+        mellow_render_config_id: mellowRenderConfigId,
+        mix_low_threshold: parseFloat(mixLowThreshold),
+        mix_high_threshold: parseFloat(mixHighThreshold),
+        mix_ema_alpha: parseFloat(mixEmaAlpha),
         enabled,
       }
       if (isEditing) {
@@ -633,9 +626,9 @@ function CouplingEditor({
               </div>
             </div>
 
-            {/* Render config */}
+            {/* Render config (active layer) */}
             <div className="space-y-1">
-              <Label className="text-sm">Render config</Label>
+              <Label className="text-sm">Render config (active layer)</Label>
               <div className="flex gap-2">
                 <Select value={renderConfigId} onValueChange={setRenderConfigId}>
                   <SelectTrigger className="flex-1">
@@ -650,6 +643,60 @@ function CouplingEditor({
                 <Button size="sm" variant="outline" type="button" onClick={() => setNewRenderConfigOpen(true)}>
                   + New
                 </Button>
+              </div>
+            </div>
+
+            {/* Mellow render config (quiet layer) */}
+            <div className="space-y-1">
+              <Label className="text-sm">Mellow layer render config (quiet passages)</Label>
+              <Select value={mellowRenderConfigId} onValueChange={setMellowRenderConfigId}>
+                <SelectTrigger>
+                  <SelectValue placeholder="Same as active layer" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="">Same as active layer</SelectItem>
+                  {renderConfigs.map((c) => (
+                    <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            {/* Layer mixer */}
+            <div className="space-y-2">
+              <Label className="text-sm font-semibold">Layer mixer</Label>
+              <div className="space-y-1">
+                <Label className="text-sm text-muted-foreground">Low threshold (energy below → pure mellow)</Label>
+                <Input
+                  type="number"
+                  step={0.05}
+                  min={0}
+                  max={1}
+                  value={mixLowThreshold}
+                  onChange={(e) => setMixLowThreshold(e.target.value)}
+                />
+              </div>
+              <div className="space-y-1">
+                <Label className="text-sm text-muted-foreground">High threshold (energy above → pure active)</Label>
+                <Input
+                  type="number"
+                  step={0.05}
+                  min={0}
+                  max={1}
+                  value={mixHighThreshold}
+                  onChange={(e) => setMixHighThreshold(e.target.value)}
+                />
+              </div>
+              <div className="space-y-1">
+                <Label className="text-sm text-muted-foreground">EMA alpha (crossfade speed, 0.01–0.5)</Label>
+                <Input
+                  type="number"
+                  step={0.01}
+                  min={0.01}
+                  max={0.5}
+                  value={mixEmaAlpha}
+                  onChange={(e) => setMixEmaAlpha(e.target.value)}
+                />
               </div>
             </div>
 

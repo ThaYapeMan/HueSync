@@ -615,7 +615,8 @@ def test_update_render_replaces_effect():
     engine = SyncEngine(fifo, profile)
     old_effect = engine._effect
 
-    engine.update_render(Profile(sensitivity=2.0))
+    new_profile = Profile(sensitivity=2.0)
+    engine.update_render(new_profile)
 
     assert engine._effect is not old_effect
     assert isinstance(engine._effect, LayerMixer)
@@ -649,14 +650,19 @@ def test_layer_mixer_low_energy_stays_mellow():
     from huesync.models import ColorMode
     from huesync.sync_engine import LayerMixer
 
-    profile = Profile(
-        color_mode=ColorMode.MONO_PULSE,       # active layer → grey
-        mellow_colour_mode=ColorMode.SPECTRUM_RGB,  # mellow layer → colours
+    active_profile = Profile(
+        color_mode=ColorMode.MONO_PULSE,  # active layer → grey
         mix_low_threshold=0.3,
         mix_high_threshold=0.7,
         mix_ema_alpha=1.0,  # EMA alpha=1 → instantaneous, no lag
     )
-    mixer = LayerMixer(profile)
+    mellow_profile = Profile(
+        color_mode=ColorMode.SPECTRUM_RGB,  # mellow layer → colours
+        mix_low_threshold=0.3,
+        mix_high_threshold=0.7,
+        mix_ema_alpha=1.0,
+    )
+    mixer = LayerMixer(active_profile, mellow_profile)
 
     # Render 5 frames of silence (full=0.0).
     for _ in range(5):
@@ -671,14 +677,19 @@ def test_layer_mixer_high_energy_drives_active():
     from huesync.models import ColorMode
     from huesync.sync_engine import LayerMixer
 
-    profile = Profile(
+    active_profile = Profile(
         color_mode=ColorMode.MONO_PULSE,
-        mellow_colour_mode=ColorMode.SPECTRUM_RGB,
         mix_low_threshold=0.3,
         mix_high_threshold=0.7,
         mix_ema_alpha=1.0,  # instantaneous
     )
-    mixer = LayerMixer(profile)
+    mellow_profile = Profile(
+        color_mode=ColorMode.SPECTRUM_RGB,
+        mix_low_threshold=0.3,
+        mix_high_threshold=0.7,
+        mix_ema_alpha=1.0,
+    )
+    mixer = LayerMixer(active_profile, mellow_profile)
 
     # All bars at maximum → full=1.0 → smoothstep target=1.0.
     for _ in range(5):
@@ -693,14 +704,19 @@ def test_layer_mixer_smooth_transition_no_jumps():
     from huesync.models import ColorMode
     from huesync.sync_engine import LayerMixer
 
-    profile = Profile(
+    active_profile = Profile(
         color_mode=ColorMode.MONO_PULSE,
-        mellow_colour_mode=ColorMode.SPECTRUM_RGB,
         mix_low_threshold=0.2,
         mix_high_threshold=0.8,
         mix_ema_alpha=0.3,
     )
-    mixer = LayerMixer(profile)
+    mellow_profile = Profile(
+        color_mode=ColorMode.SPECTRUM_RGB,
+        mix_low_threshold=0.2,
+        mix_high_threshold=0.8,
+        mix_ema_alpha=0.3,
+    )
+    mixer = LayerMixer(active_profile, mellow_profile)
 
     prev_mix = 0.0
     n = 60
@@ -718,36 +734,37 @@ def test_layer_mixer_smooth_transition_no_jumps():
 
 def test_layer_mixer_output_is_lerp_of_layers():
     """At mix=0.5 (instantaneous EMA), output colour is the midpoint of both layers."""
-    import dataclasses
-
     from huesync.models import ColorMode
     from huesync.sync_engine import ColourModeEffect, LayerMixer
 
-    # Construct a profile where smoothstep(energy=0.5, lo=0.5, hi=0.5) = 1.0
-    # but EMA alpha=1 so we can use a threshold that lands exactly at 0.5.
-    # Easier: set lo=hi=0.0 so any energy instantly gives mix=1.0, then test
-    # the lerp at an intermediate state by checking that the mixer output is
-    # between what the two layers would produce individually.
+    # Construct profiles where smoothstep(energy=0.5, lo=0.5, hi=0.5) lands mid-range.
+    # Check that the mixer output is between what the two layers produce individually.
     energy = 0.5
     bars = [energy] * 30
     features = _make_features(bars)
 
-    profile = Profile(
+    active_profile = Profile(
         color_mode=ColorMode.MONO_PULSE,
-        mellow_colour_mode=ColorMode.SPECTRUM_RGB,
         mix_low_threshold=energy,
         mix_high_threshold=energy,  # smoothstep at exactly lo=hi → 0.5 clamp
         mix_ema_alpha=1.0,
         sensitivity=1.0,
         brightness_floor=0.0,
     )
-    mixer = LayerMixer(profile)
+    mellow_profile = Profile(
+        color_mode=ColorMode.SPECTRUM_RGB,
+        mix_low_threshold=energy,
+        mix_high_threshold=energy,
+        mix_ema_alpha=1.0,
+        sensitivity=1.0,
+        brightness_floor=0.0,
+    )
+    mixer = LayerMixer(active_profile, mellow_profile)
     scene = mixer.render(features, 0.0)
     colour_out = scene.color_at(_ORIGIN, 0.0)
 
-    mellow_profile = dataclasses.replace(profile, color_mode=ColorMode.SPECTRUM_RGB)
     mellow_colour = ColourModeEffect(mellow_profile).render(features, 0.0).color_at(_ORIGIN, 0.0)
-    active_colour = ColourModeEffect(profile).render(features, 0.0).color_at(_ORIGIN, 0.0)
+    active_colour = ColourModeEffect(active_profile).render(features, 0.0).color_at(_ORIGIN, 0.0)
 
     # All three channels must be between their mellow and active values.
     for attr in ("r", "g", "b"):

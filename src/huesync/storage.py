@@ -235,6 +235,65 @@ class Storage:
                 data["active_coupling_id"] = None
             self._write(data)
 
+    def migrate(self) -> None:
+        """One-time data migration: create mellow RenderConfigs from mellow_colour_mode.
+
+        Previous format stored mellow_colour_mode, mix_low_threshold,
+        mix_high_threshold, and mix_ema_alpha on the RenderConfig entity.  The
+        new format moves the mix params to the Coupling and gives each coupling
+        its own mellow_render_config_id pointing to a separate RenderConfig.
+
+        If a coupling already has mellow_render_config_id set it is skipped.
+        """
+        import uuid as _uuid
+
+        with _lock:
+            data = self._read()
+            changed = False
+            rc_by_id = {r["id"]: r for r in data.get("render_configs", [])}
+
+            for c in data.get("couplings", []):
+                if c.get("mellow_render_config_id"):
+                    continue  # already migrated
+
+                rc_id = c.get("render_config_id", "")
+                rc_raw = rc_by_id.get(rc_id, {})
+
+                # Move mix params from RC to coupling (if present in old RC data).
+                for param, default in [
+                    ("mix_low_threshold", 0.3),
+                    ("mix_high_threshold", 0.7),
+                    ("mix_ema_alpha", 0.1),
+                ]:
+                    if param not in c:
+                        c[param] = rc_raw.get(param, default)
+
+                mellow_cm = rc_raw.get("mellow_colour_mode", "")
+                if mellow_cm and mellow_cm != rc_raw.get("color_mode", "spectrum_rgb"):
+                    # Clone the RC with the mellow colour mode as a new entity.
+                    mellow_id = str(_uuid.uuid4())
+                    mellow_rc = dict(rc_raw)
+                    mellow_rc["id"] = mellow_id
+                    mellow_rc["name"] = mellow_rc.get("name", "Render Config") + " (Mellow)"
+                    mellow_rc["color_mode"] = mellow_cm
+                    for old_key in (
+                        "mellow_colour_mode",
+                        "mix_low_threshold",
+                        "mix_high_threshold",
+                        "mix_ema_alpha",
+                    ):
+                        mellow_rc.pop(old_key, None)
+                    data["render_configs"].append(mellow_rc)
+                    rc_by_id[mellow_id] = mellow_rc
+                    c["mellow_render_config_id"] = mellow_id
+                else:
+                    # No distinct mellow mode: reuse the same RC for both layers.
+                    c["mellow_render_config_id"] = rc_id
+                changed = True
+
+            if changed:
+                self._write(data)
+
     # -- Active coupling ----------------------------------------------------
 
     def get_active_coupling_id(self) -> str | None:

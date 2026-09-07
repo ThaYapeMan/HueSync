@@ -133,8 +133,6 @@ class Profile:
 
     # Colour mapping
     color_mode: ColorMode = ColorMode.SPECTRUM_RGB
-    # Mellow layer mode (quiet passages).  See RenderConfig for the full mixer spec.
-    mellow_colour_mode: ColorMode = ColorMode.SPECTRUM_RGB
     mix_low_threshold: float = 0.3
     mix_high_threshold: float = 0.7
     mix_ema_alpha: float = 0.1
@@ -189,7 +187,6 @@ class Profile:
     def to_dict(self) -> dict:
         d = dict(self.__dict__)
         d["color_mode"] = self.color_mode.value
-        d["mellow_colour_mode"] = self.mellow_colour_mode.value
         return d
 
     @classmethod
@@ -197,17 +194,15 @@ class Profile:
         d = dict(d)
 
         # Migrate removed color modes to a safe default.
-        for field_name in ("color_mode", "mellow_colour_mode"):
-            if field_name in d:
-                try:
-                    d[field_name] = ColorMode(d[field_name])
-                except ValueError:
-                    log.warning(
-                        "Unsupported %s %r in saved profile; falling back to spectrum_rgb",
-                        field_name,
-                        d[field_name],
-                    )
-                    d[field_name] = ColorMode.SPECTRUM_RGB
+        if "color_mode" in d:
+            try:
+                d["color_mode"] = ColorMode(d["color_mode"])
+            except ValueError:
+                log.warning(
+                    "Unsupported color_mode %r in saved profile; falling back to spectrum_rgb",
+                    d["color_mode"],
+                )
+                d["color_mode"] = ColorMode.SPECTRUM_RGB
 
         # Strip keys that are not current Profile fields so that loading a
         # config written by a newer version of HueSync never causes a
@@ -376,21 +371,17 @@ _RENDER_CONFIG_FIELDS: frozenset[str] = frozenset()  # filled after class
 
 @dataclass
 class RenderConfig:
-    """Visual output parameters (colour mode, sensitivity, …), provider-neutral."""
+    """Visual output parameters (colour mode, sensitivity, …), provider-neutral.
+
+    Mix parameters (mix_low_threshold, mix_high_threshold, mix_ema_alpha) and
+    the mellow layer reference (mellow_render_config_id) live on Coupling, not
+    here.  A RenderConfig describes a single colour rendering mode; the Coupling
+    picks two RenderConfigs and owns the crossfade settings.
+    """
 
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     name: str = "Default Render"
-    # Active layer: drives ColourModeEffect during loud/energetic passages.
     color_mode: ColorMode = ColorMode.SPECTRUM_RGB
-    # Mellow layer: drives ColourModeEffect during quiet passages.
-    # When equal to color_mode the LayerMixer is a no-op (pure blend of identical outputs).
-    mellow_colour_mode: ColorMode = ColorMode.SPECTRUM_RGB
-    # LayerMixer crossfade thresholds.  mix = smoothstep(energy, lo, hi).
-    mix_low_threshold: float = 0.3   # energy below this → pure mellow (mix=0)
-    mix_high_threshold: float = 0.7  # energy above this → pure active (mix=1)
-    # EMA smoothing on the mix value (α per frame at 30 Hz).
-    # 0.1 → ~10-frame lag ≈ 330 ms; keeps transitions smooth without lagging music.
-    mix_ema_alpha: float = 0.1
     sensitivity: float = 1.0
     brightness_floor: float = 0.15
     bass_hz: int = 250
@@ -403,10 +394,6 @@ class RenderConfig:
             "id": self.id,
             "name": self.name,
             "color_mode": self.color_mode.value,
-            "mellow_colour_mode": self.mellow_colour_mode.value,
-            "mix_low_threshold": self.mix_low_threshold,
-            "mix_high_threshold": self.mix_high_threshold,
-            "mix_ema_alpha": self.mix_ema_alpha,
             "sensitivity": self.sensitivity,
             "brightness_floor": self.brightness_floor,
             "bass_hz": self.bass_hz,
@@ -418,17 +405,17 @@ class RenderConfig:
     @classmethod
     def from_dict(cls, d: dict) -> RenderConfig:
         d = dict(d)
-        for field_name in ("color_mode", "mellow_colour_mode"):
-            if field_name in d:
-                try:
-                    d[field_name] = ColorMode(d[field_name])
-                except ValueError:
-                    log.warning(
-                        "Unsupported %s %r in saved RenderConfig; falling back to spectrum_rgb",
-                        field_name,
-                        d[field_name],
-                    )
-                    d[field_name] = ColorMode.SPECTRUM_RGB
+        if "color_mode" in d:
+            try:
+                d["color_mode"] = ColorMode(d["color_mode"])
+            except ValueError:
+                log.warning(
+                    "Unsupported color_mode %r in saved RenderConfig; falling back to spectrum_rgb",
+                    d["color_mode"],
+                )
+                d["color_mode"] = ColorMode.SPECTRUM_RGB
+        # Old keys (mellow_colour_mode, mix_low_threshold, mix_high_threshold,
+        # mix_ema_alpha) are silently dropped by the field filter below.
         return cls(**{k: v for k, v in d.items() if k in _RENDER_CONFIG_FIELDS})
 
 
@@ -440,10 +427,18 @@ _COUPLING_FIELDS: frozenset[str] = frozenset()  # filled after class
 
 @dataclass
 class Coupling:
-    """Links a Player + AnalysisConfig + LightProvider + RenderConfig.
+    """Links a Player + AnalysisConfig + LightProvider + two RenderConfigs.
 
     Activation happens on a Coupling. The linked entities can be shared
     across multiple Couplings, but each Coupling runs its own cava process.
+
+    Two RenderConfigs are supported:
+    - render_config_id: the active (loud) layer.
+    - mellow_render_config_id: the quiet-passage layer.  When empty or equal
+      to render_config_id, the LayerMixer blends two identical effects (no-op).
+
+    LayerMixer crossfade parameters are owned by the Coupling rather than either
+    RenderConfig because they govern the *relationship* between the two layers.
     """
 
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
@@ -452,6 +447,15 @@ class Coupling:
     analysis_config_id: str = ""
     light_provider_id: str = ""
     render_config_id: str = ""
+    # Mellow layer: separate RenderConfig for quiet passages.
+    # Empty → same RC for both layers (LayerMixer is a no-op blend).
+    mellow_render_config_id: str = ""
+    # LayerMixer crossfade thresholds.  mix = smoothstep(energy, lo, hi).
+    mix_low_threshold: float = 0.3   # energy below this → pure mellow (mix=0)
+    mix_high_threshold: float = 0.7  # energy above this → pure active (mix=1)
+    # EMA smoothing on the mix value (α per frame at 30 Hz).
+    # 0.1 → ~10-frame lag ≈ 330 ms; keeps transitions smooth without lagging music.
+    mix_ema_alpha: float = 0.1
     enabled: bool = True
 
     def to_dict(self) -> dict:
@@ -462,6 +466,10 @@ class Coupling:
             "analysis_config_id": self.analysis_config_id,
             "light_provider_id": self.light_provider_id,
             "render_config_id": self.render_config_id,
+            "mellow_render_config_id": self.mellow_render_config_id,
+            "mix_low_threshold": self.mix_low_threshold,
+            "mix_high_threshold": self.mix_high_threshold,
+            "mix_ema_alpha": self.mix_ema_alpha,
             "enabled": self.enabled,
         }
 

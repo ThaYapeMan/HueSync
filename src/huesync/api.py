@@ -28,7 +28,7 @@ from .models import (
     RenderConfig,
     VirtualPlayer,
 )
-from .player_manager import PlayerManager, _build_engine_profile
+from .player_manager import PlayerManager, _build_engine_profile, _build_mellow_profile
 from .storage import Storage
 from .util import generate_locally_administered_mac
 
@@ -141,10 +141,6 @@ class AnalysisConfigPatchBody(BaseModel):
 class RenderConfigCreateBody(BaseModel):
     name: str = "Default Render"
     color_mode: str = "spectrum_rgb"
-    mellow_colour_mode: str = "spectrum_rgb"
-    mix_low_threshold: float = 0.3
-    mix_high_threshold: float = 0.7
-    mix_ema_alpha: float = 0.1
     sensitivity: float = 1.0
     brightness_floor: float = 0.15
     bass_hz: int = 250
@@ -157,10 +153,6 @@ class RenderConfigPatchBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str | None = None
     color_mode: str | None = None
-    mellow_colour_mode: str | None = None
-    mix_low_threshold: float | None = None
-    mix_high_threshold: float | None = None
-    mix_ema_alpha: float | None = None
     sensitivity: float | None = None
     brightness_floor: float | None = None
     bass_hz: int | None = None
@@ -175,6 +167,10 @@ class CouplingCreateBody(BaseModel):
     analysis_config_id: str
     light_provider_id: str
     render_config_id: str
+    mellow_render_config_id: str = ""
+    mix_low_threshold: float = 0.3
+    mix_high_threshold: float = 0.7
+    mix_ema_alpha: float = 0.1
     enabled: bool = True
 
 
@@ -197,6 +193,8 @@ class CouplingPatchBody(BaseModel):
     analysis_config_id: str | None = None
     light_provider_id: str | None = None
     render_config_id: str | None = None
+    # Mellow layer FK (live update_render, no deactivate)
+    mellow_render_config_id: str | None = None
     # Player inline (deactivate if active)
     lms_host: str | None = None
     lms_port: int | None = None
@@ -214,10 +212,6 @@ class CouplingPatchBody(BaseModel):
     superflux_lag: int | None = None
     # RenderConfig fields (update_render)
     color_mode: str | None = None
-    mellow_colour_mode: str | None = None
-    mix_low_threshold: float | None = None
-    mix_high_threshold: float | None = None
-    mix_ema_alpha: float | None = None
     sensitivity: float | None = None
     brightness_floor: float | None = None
     exertion_clip: float | None = None
@@ -225,6 +219,10 @@ class CouplingPatchBody(BaseModel):
     # bass_hz/mid_hz: stored in RenderConfig but pcm-category for restart
     bass_hz: int | None = None
     mid_hz: int | None = None
+    # LayerMixer crossfade params — live on Coupling, update_render triggers
+    mix_low_threshold: float | None = None
+    mix_high_threshold: float | None = None
+    mix_ema_alpha: float | None = None
     # LightProvider render fields
     entertainment_area_name: str | None = None
     light_count: int | None = None
@@ -251,8 +249,9 @@ _C_DEACTIVATE_FIELDS: frozenset[str] = frozenset({
 # FK fields that do NOT require a full restart — handled via lighter live-update
 # paths in _apply_coupling_action().
 _C_LIVE_FK_FIELDS: frozenset[str] = frozenset({
-    "analysis_config_id",  # → cava restart + PCM pipeline rebuild
-    "render_config_id",    # → update_render only
+    "analysis_config_id",       # → cava restart + PCM pipeline rebuild
+    "render_config_id",         # → update_render only
+    "mellow_render_config_id",  # → update_render only (new mellow layer RC)
 })
 _C_CAVA_FIELDS: frozenset[str] = frozenset({
     "bars", "lower_cutoff_freq", "higher_cutoff_freq",
@@ -262,7 +261,7 @@ _C_PCM_FIELDS: frozenset[str] = frozenset({
     "bass_hz", "mid_hz",
 })
 _C_RENDER_FIELDS: frozenset[str] = frozenset({
-    "color_mode", "mellow_colour_mode", "mix_low_threshold", "mix_high_threshold",
+    "color_mode", "mix_low_threshold", "mix_high_threshold",
     "mix_ema_alpha", "sensitivity", "brightness_floor", "exertion_clip",
     "onset_flash_intensity", "entertainment_area_name", "light_count",
 })
@@ -276,13 +275,18 @@ _C_AC_INLINE: frozenset[str] = frozenset({
     "onset_method", "onset_delta", "onset_alpha", "superflux_mu", "superflux_lag",
 })
 _C_RC_INLINE: frozenset[str] = frozenset({
-    "color_mode", "mellow_colour_mode", "mix_low_threshold", "mix_high_threshold",
-    "mix_ema_alpha", "sensitivity", "brightness_floor", "exertion_clip",
+    "color_mode", "sensitivity", "brightness_floor", "exertion_clip",
     "onset_flash_intensity", "bass_hz", "mid_hz",
 })
 _C_LP_INLINE: frozenset[str] = frozenset({"entertainment_area_name", "light_count"})
 _C_FK_FIELDS: frozenset[str] = frozenset({
     "player_id", "analysis_config_id", "light_provider_id", "render_config_id",
+    "mellow_render_config_id",
+})
+# Fields that live directly on Coupling (not on a sub-entity) and are set
+# via setattr(coupling, field, value) in the patch handler.
+_C_COUPLING_DIRECT_FIELDS: frozenset[str] = frozenset({
+    "name", "enabled", "mix_low_threshold", "mix_high_threshold", "mix_ema_alpha",
 })
 
 
@@ -300,6 +304,7 @@ async def _apply_coupling_action(
     profile = _build_engine_profile(coupling, storage)
     if not profile:
         return
+    mellow_profile = _build_mellow_profile(coupling, storage)
 
     if changed & _C_DEACTIVATE_FIELDS:
         await manager.deactivate()
@@ -311,7 +316,7 @@ async def _apply_coupling_action(
         await manager.restart_cava()
     if changed & (_C_PCM_FIELDS | {"analysis_config_id"}):
         manager.update_onset_pipeline(profile)
-    manager.update_render(profile)
+    manager.update_render(profile, mellow_profile)
 
 
 def _storage(request: Request) -> Storage:
@@ -714,19 +719,9 @@ async def create_render_config(request: Request, body: RenderConfigCreateBody):
         raise HTTPException(
             status_code=422, detail=f"Unknown color_mode: {body.color_mode!r}"
         ) from exc
-    try:
-        mellow_cm = ColorMode(body.mellow_colour_mode)
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=422, detail=f"Unknown mellow_colour_mode: {body.mellow_colour_mode!r}"
-        ) from exc
     rc = RenderConfig(
         name=body.name,
         color_mode=cm,
-        mellow_colour_mode=mellow_cm,
-        mix_low_threshold=body.mix_low_threshold,
-        mix_high_threshold=body.mix_high_threshold,
-        mix_ema_alpha=body.mix_ema_alpha,
         sensitivity=body.sensitivity,
         brightness_floor=body.brightness_floor,
         bass_hz=body.bass_hz,
@@ -755,7 +750,7 @@ async def patch_render_config(rc_id: str, request: Request, body: RenderConfigPa
         raise HTTPException(status_code=404, detail="RenderConfig not found")
     updates = body.model_dump(exclude_unset=True)
     for field, value in updates.items():
-        if field in ("color_mode", "mellow_colour_mode"):
+        if field == "color_mode":
             try:
                 value = ColorMode(value)
             except ValueError as exc:
@@ -798,6 +793,10 @@ async def create_coupling(request: Request, body: CouplingCreateBody):
         analysis_config_id=body.analysis_config_id,
         light_provider_id=body.light_provider_id,
         render_config_id=body.render_config_id,
+        mellow_render_config_id=body.mellow_render_config_id,
+        mix_low_threshold=body.mix_low_threshold,
+        mix_high_threshold=body.mix_high_threshold,
+        mix_ema_alpha=body.mix_ema_alpha,
         enabled=body.enabled,
     )
     storage.save_coupling(coupling)
@@ -924,7 +923,7 @@ async def patch_coupling(coupling_id: str, request: Request, body: CouplingPatch
     player_changed = ac_changed = rc_changed = lp_changed = False
 
     for field, value in updates.items():
-        if field in {"name", "enabled"} | _C_FK_FIELDS:
+        if field in _C_COUPLING_DIRECT_FIELDS | _C_FK_FIELDS:
             setattr(coupling, field, value)
         elif field in _C_PLAYER_INLINE and player:
             setattr(player, field, value)
@@ -933,7 +932,7 @@ async def patch_coupling(coupling_id: str, request: Request, body: CouplingPatch
             setattr(ac, field, value)
             ac_changed = True
         elif field in _C_RC_INLINE and rc:
-            if field in ("color_mode", "mellow_colour_mode"):
+            if field == "color_mode":
                 value = ColorMode(value)
             setattr(rc, field, value)
             rc_changed = True
