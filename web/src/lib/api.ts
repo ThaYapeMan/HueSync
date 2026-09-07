@@ -36,7 +36,7 @@ export const EFFECTS = [
   { id: 'swirl',       label: 'Swirl',         description: 'Rotating colour gradient',          hasSpeed: true,  hasDecay: false },
   { id: 'wave',        label: 'Wave',          description: 'Colour wave across positions',      hasSpeed: true,  hasDecay: false },
   { id: 'solid',       label: 'Solid',         description: 'Steady colour, drifts with music',  hasSpeed: false, hasDecay: false },
-  { id: 'none',        label: 'None',          description: 'Layer off',                         hasSpeed: false, hasDecay: false },
+  { id: 'none',        label: 'None',          description: 'No output',                         hasSpeed: false, hasDecay: false },
 ] as const
 
 export type EffectId = typeof EFFECTS[number]['id']

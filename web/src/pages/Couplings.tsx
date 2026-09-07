@@ -112,8 +112,8 @@ function NewPlayerDialog({ open, onClose, onCreated }: NewPlayerDialogProps) {
     <Dialog open={open} onOpenChange={(o) => { if (!o) onClose() }}>
       <DialogContent className="max-w-sm">
         <DialogHeader>
-          <DialogTitle>New player</DialogTitle>
-          <DialogDescription>Create a new squeezelite player.</DialogDescription>
+          <DialogTitle>New virtual player</DialogTitle>
+          <DialogDescription>Create a new virtual player.</DialogDescription>
         </DialogHeader>
         <div className="space-y-3">
           <div className="space-y-1">
@@ -634,11 +634,11 @@ function CouplingEditor({
 
             {/* Player */}
             <div className="space-y-1">
-              <Label className="text-sm">Player</Label>
+              <Label className="text-sm">Virtual Player</Label>
               <div className="flex gap-2">
                 <Select value={playerId} onValueChange={setPlayerId}>
                   <SelectTrigger className="flex-1">
-                    <SelectValue placeholder="Select player" />
+                    <SelectValue placeholder="Select virtual player" />
                   </SelectTrigger>
                   <SelectContent>
                     {players.map((p) => (
@@ -654,7 +654,7 @@ function CouplingEditor({
 
             {/* Zone */}
             <div className="space-y-1">
-              <Label className="text-sm">Zone (area)</Label>
+              <Label className="text-sm">Zone</Label>
               <div className="flex gap-2">
                 <Select value={zoneId} onValueChange={setZoneId}>
                   <SelectTrigger className="flex-1">
@@ -701,7 +701,7 @@ function CouplingEditor({
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1.5">
                 <div>
-                  <div className="text-sm font-semibold">Active layer</div>
+                  <div className="text-sm font-semibold">Active scene</div>
                   <div className="text-xs text-muted-foreground">Loud passages</div>
                 </div>
                 <div className="flex gap-1.5">
@@ -722,7 +722,7 @@ function CouplingEditor({
               </div>
               <div className="space-y-1.5">
                 <div>
-                  <div className="text-sm font-semibold">Mellow layer</div>
+                  <div className="text-sm font-semibold">Mellow scene</div>
                   <div className="text-xs text-muted-foreground">Quiet passages</div>
                 </div>
                 <div className="flex gap-1.5">

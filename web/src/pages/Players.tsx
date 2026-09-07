@@ -147,7 +147,7 @@ export function Players() {
       </div>
 
       {players.length === 0 ? (
-        <p className="text-sm text-muted-foreground">No players yet. Create one to get started.</p>
+        <p className="text-sm text-muted-foreground">No virtual players yet. Create one to get started.</p>
       ) : (
         <Table>
           <TableHeader>
@@ -177,8 +177,8 @@ export function Players() {
                           Delete
                         </Button>
                       }
-                      title="Delete player"
-                      description={`Delete player "${p.player_name}" (${p.lms_host})? This cannot be undone.`}
+                      title="Delete virtual player"
+                      description={`Delete virtual player "${p.player_name}" (${p.lms_host})? This cannot be undone.`}
                       onConfirm={() => handleDelete(p.id)}
                     />
                   </div>

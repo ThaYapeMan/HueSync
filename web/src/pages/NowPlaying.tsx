@@ -393,7 +393,7 @@ export function NowPlaying({ colour, onset, onset_bass = false, onset_mid = fals
               <div
                 className="h-full bg-primary transition-none"
                 style={{ width: `${mix * 100}%` }}
-                title={`Active layer: ${Math.round(mix * 100)}% (Mellow: ${Math.round((1 - mix) * 100)}%)`}
+                title={`Active scene: ${Math.round(mix * 100)}% (Mellow: ${Math.round((1 - mix) * 100)}%)`}
               />
             </div>
             <div className="flex justify-between mt-0.5">
