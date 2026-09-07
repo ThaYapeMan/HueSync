@@ -54,7 +54,6 @@ import {
   createScene,
   getCrossfaders,
   createCrossfader,
-  updateCrossfader,
   getControllers,
   getControllerAreas,
   getStatus,
@@ -434,6 +433,136 @@ function NewSceneDialog({ open, onClose, onCreated }: NewSceneDialogProps) {
   )
 }
 
+// ---- Inline mini-dialog: New Crossfader ----
+
+interface NewCrossfaderDialogProps {
+  open: boolean
+  onClose: () => void
+  onCreated: (cf: Crossfader) => void
+  scenes: Scene[]
+  onScenesChanged: (scenes: Scene[]) => void
+}
+
+function NewCrossfaderDialog({ open, onClose, onCreated, scenes, onScenesChanged }: NewCrossfaderDialogProps) {
+  const [name, setName] = useState('')
+  const [activeSceneId, setActiveSceneId] = useState('')
+  const [mellowSceneId, setMellowSceneId] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [newSceneOpen, setNewSceneOpen] = useState(false)
+  const [newSceneTarget, setNewSceneTarget] = useState<'active' | 'mellow'>('active')
+
+  useEffect(() => {
+    if (open) {
+      setName('')
+      setActiveSceneId('')
+      setMellowSceneId('')
+      setError(null)
+    }
+  }, [open])
+
+  async function handleSceneCreated(cfg: Scene) {
+    setNewSceneOpen(false)
+    const updated = await getScenes().catch(() => scenes)
+    onScenesChanged(updated)
+    if (newSceneTarget === 'mellow') {
+      setMellowSceneId(cfg.id)
+    } else {
+      setActiveSceneId(cfg.id)
+    }
+  }
+
+  async function handleSave() {
+    if (!activeSceneId) {
+      setError('Select an active scene')
+      return
+    }
+    setSaving(true)
+    setError(null)
+    try {
+      const cf = await createCrossfader({
+        name: name || 'Crossfader',
+        active_scene_id: activeSceneId,
+        mellow_scene_id: mellowSceneId,
+        low_threshold: 0.3,
+        high_threshold: 0.7,
+        fade_speed: 0.1,
+      })
+      onCreated(cf)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Save failed')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <>
+      <Dialog open={open} onOpenChange={(o) => { if (!o) onClose() }}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>New crossfader</DialogTitle>
+            <DialogDescription>Adjust thresholds and fade speed in the Crossfaders tab.</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div className="space-y-1">
+              <Label className="text-sm">Name</Label>
+              <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="My crossfader" />
+            </div>
+            <div className="space-y-1">
+              <Label className="text-sm">Active scene</Label>
+              <div className="flex gap-1.5">
+                <Select value={activeSceneId} onValueChange={setActiveSceneId}>
+                  <SelectTrigger className="flex-1">
+                    <SelectValue placeholder="Select scene…" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {scenes.map((s) => (
+                      <SelectItem key={s.id} value={s.id}>{s.name}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <Button size="sm" variant="outline" type="button" onClick={() => { setNewSceneTarget('active'); setNewSceneOpen(true) }}>
+                  + New
+                </Button>
+              </div>
+            </div>
+            <div className="space-y-1">
+              <Label className="text-sm">Mellow scene</Label>
+              <div className="flex gap-1.5">
+                <Select value={mellowSceneId} onValueChange={setMellowSceneId}>
+                  <SelectTrigger className="flex-1">
+                    <SelectValue placeholder="Same as active" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="">Same as active</SelectItem>
+                    {scenes.map((s) => (
+                      <SelectItem key={s.id} value={s.id}>{s.name}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <Button size="sm" variant="outline" type="button" onClick={() => { setNewSceneTarget('mellow'); setNewSceneOpen(true) }}>
+                  + New
+                </Button>
+              </div>
+            </div>
+          </div>
+          {error && <p className="text-destructive text-sm mt-2">{error}</p>}
+          <DialogFooter className="mt-4">
+            <Button variant="outline" onClick={onClose} disabled={saving}>Cancel</Button>
+            <Button onClick={handleSave} disabled={saving || !activeSceneId}>{saving ? 'Saving…' : 'Create'}</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      <NewSceneDialog
+        open={newSceneOpen}
+        onClose={() => setNewSceneOpen(false)}
+        onCreated={handleSceneCreated}
+      />
+    </>
+  )
+}
+
 // ---- CouplingEditor dialog ----
 
 interface CouplingEditorProps {
@@ -478,11 +607,7 @@ function CouplingEditor({
   const [playerId, setPlayerId] = useState('')
   const [zoneId, setZoneId] = useState('')
   const [analysisConfigId, setAnalysisConfigId] = useState('')
-  const [activeSceneId, setActiveSceneId] = useState('')
-  const [mellowSceneId, setMellowSceneId] = useState('')
-  const [lowThreshold, setLowThreshold] = useState('0.3')
-  const [highThreshold, setHighThreshold] = useState('0.7')
-  const [fadeSpeed, setFadeSpeed] = useState('0.1')
+  const [crossfaderId, setCrossfaderId] = useState('')
   const [enabled, setEnabled] = useState(true)
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
@@ -491,8 +616,7 @@ function CouplingEditor({
   const [newPlayerOpen, setNewPlayerOpen] = useState(false)
   const [newZoneOpen, setNewZoneOpen] = useState(false)
   const [newAnalysisConfigOpen, setNewAnalysisConfigOpen] = useState(false)
-  const [newSceneOpen, setNewSceneOpen] = useState(false)
-  const [newSceneTarget, setNewSceneTarget] = useState<'active' | 'mellow'>('active')
+  const [newCrossfaderOpen, setNewCrossfaderOpen] = useState(false)
 
   useEffect(() => {
     if (open) {
@@ -500,67 +624,32 @@ function CouplingEditor({
       setPlayerId(coupling?.player_id ?? '')
       setZoneId(coupling?.zone_id ?? '')
       setAnalysisConfigId(coupling?.analysis_config_id ?? '')
+      setCrossfaderId(coupling?.crossfader_id ?? '')
       setEnabled(coupling?.enabled ?? true)
       setSaveError(null)
-
-      // Resolve crossfader settings
-      if (coupling?.crossfader_id) {
-        const cf = crossfaders.find((x) => x.id === coupling.crossfader_id)
-        setActiveSceneId(cf?.active_scene_id ?? '')
-        setMellowSceneId(cf?.mellow_scene_id ?? '')
-        setLowThreshold(String(cf?.low_threshold ?? 0.3))
-        setHighThreshold(String(cf?.high_threshold ?? 0.7))
-        setFadeSpeed(String(cf?.fade_speed ?? 0.1))
-      } else {
-        setActiveSceneId('')
-        setMellowSceneId('')
-        setLowThreshold('0.3')
-        setHighThreshold('0.7')
-        setFadeSpeed('0.1')
-      }
     }
-  }, [open, coupling, crossfaders])
+  }, [open, coupling])
 
   async function handleSave() {
     setSaving(true)
     setSaveError(null)
     try {
       if (isEditing && coupling) {
-        // Update crossfader with changed scene/threshold settings
-        if (coupling.crossfader_id) {
-          await updateCrossfader(coupling.crossfader_id, {
-            active_scene_id: activeSceneId,
-            mellow_scene_id: mellowSceneId,
-            low_threshold: parseFloat(lowThreshold),
-            high_threshold: parseFloat(highThreshold),
-            fade_speed: parseFloat(fadeSpeed),
-          })
-        }
-        // Update coupling (name, enabled, player_id, zone_id, analysis_config_id)
         await updateCoupling(coupling.id, {
           name,
           enabled,
           player_id: playerId,
           zone_id: zoneId,
           analysis_config_id: analysisConfigId,
+          crossfader_id: crossfaderId,
         })
       } else {
-        // Create crossfader first
-        const cf = await createCrossfader({
-          name: `${name} Crossfader`,
-          active_scene_id: activeSceneId,
-          mellow_scene_id: mellowSceneId,
-          low_threshold: parseFloat(lowThreshold),
-          high_threshold: parseFloat(highThreshold),
-          fade_speed: parseFloat(fadeSpeed),
-        })
-        // Create coupling
         await createCoupling({
           name,
           player_id: playerId,
           zone_id: zoneId,
           analysis_config_id: analysisConfigId,
-          crossfader_id: cf.id,
+          crossfader_id: crossfaderId,
           enabled,
         })
       }
@@ -593,23 +682,11 @@ function CouplingEditor({
     setAnalysisConfigId(cfg.id)
   }
 
-  function openNewScene(target: 'active' | 'mellow') {
-    setNewSceneTarget(target)
-    setNewSceneOpen(true)
-  }
-
-  async function handleSceneCreated(cfg: Scene) {
-    setNewSceneOpen(false)
-    const updated = await getScenes().catch(() => scenes)
-    onScenesChanged(updated)
-    if (newSceneTarget === 'mellow') {
-      setMellowSceneId(cfg.id)
-    } else {
-      setActiveSceneId(cfg.id)
-    }
-    // Refresh crossfaders list too
-    const updatedCf = await getCrossfaders().catch(() => crossfaders)
-    onCrossfadersChanged(updatedCf)
+  async function handleCrossfaderCreated(cf: Crossfader) {
+    setNewCrossfaderOpen(false)
+    const updated = await getCrossfaders().catch(() => crossfaders)
+    onCrossfadersChanged(updated)
+    setCrossfaderId(cf.id)
   }
 
   const selectedZone = zones.find((z) => z.id === zoneId)
@@ -698,88 +775,26 @@ function CouplingEditor({
               </div>
             </div>
 
-            {/* Two-column Active/Mellow scene selectors */}
-            <div className="grid grid-cols-2 gap-3">
-              <div className="space-y-1.5">
-                <div>
-                  <div className="text-sm font-semibold">Active scene</div>
-                  <div className="text-xs text-muted-foreground">Loud passages</div>
-                </div>
-                <div className="flex gap-1.5">
-                  <Select value={activeSceneId} onValueChange={setActiveSceneId}>
-                    <SelectTrigger className="flex-1 min-w-0">
-                      <SelectValue placeholder="Select…" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {scenes.map((c) => (
-                        <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                  <Button size="sm" variant="outline" type="button" onClick={() => openNewScene('active')}>
-                    + New
-                  </Button>
-                </div>
-              </div>
-              <div className="space-y-1.5">
-                <div>
-                  <div className="text-sm font-semibold">Mellow scene</div>
-                  <div className="text-xs text-muted-foreground">Quiet passages</div>
-                </div>
-                <div className="flex gap-1.5">
-                  <Select value={mellowSceneId} onValueChange={setMellowSceneId}>
-                    <SelectTrigger className="flex-1 min-w-0">
-                      <SelectValue placeholder="Same as active" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="">Same as active</SelectItem>
-                      {scenes.map((c) => (
-                        <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                  <Button size="sm" variant="outline" type="button" onClick={() => openNewScene('mellow')}>
-                    + New
-                  </Button>
-                </div>
-              </div>
-            </div>
-
-            {/* Crossfade mix controls */}
-            <div className="space-y-3 border-t pt-3">
-              <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Crossfade</div>
-              <div className="space-y-1">
-                <Label className="text-sm text-muted-foreground">Low threshold (energy below → pure mellow)</Label>
-                <Input
-                  type="number"
-                  step={0.05}
-                  min={0}
-                  max={1}
-                  value={lowThreshold}
-                  onChange={(e) => setLowThreshold(e.target.value)}
-                />
-              </div>
-              <div className="space-y-1">
-                <Label className="text-sm text-muted-foreground">High threshold (energy above → pure active)</Label>
-                <Input
-                  type="number"
-                  step={0.05}
-                  min={0}
-                  max={1}
-                  value={highThreshold}
-                  onChange={(e) => setHighThreshold(e.target.value)}
-                />
-              </div>
-              <div className="space-y-1">
-                <Label className="text-sm text-muted-foreground">Fade speed / EMA alpha (0.01–0.5)</Label>
-                <Input
-                  type="number"
-                  step={0.01}
-                  min={0.01}
-                  max={0.5}
-                  value={fadeSpeed}
-                  onChange={(e) => setFadeSpeed(e.target.value)}
-                />
+            {/* Crossfader */}
+            <div className="space-y-1">
+              <Label className="text-sm">Crossfader</Label>
+              <p className="text-xs text-muted-foreground">
+                Controls which scenes play and how they blend. Edit details in the Crossfaders tab.
+              </p>
+              <div className="flex gap-2">
+                <Select value={crossfaderId} onValueChange={setCrossfaderId}>
+                  <SelectTrigger className="flex-1">
+                    <SelectValue placeholder="Select crossfader" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {crossfaders.map((cf) => (
+                      <SelectItem key={cf.id} value={cf.id}>{cf.name}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <Button size="sm" variant="outline" type="button" onClick={() => setNewCrossfaderOpen(true)}>
+                  + New
+                </Button>
               </div>
             </div>
 
@@ -822,10 +837,12 @@ function CouplingEditor({
         onClose={() => setNewAnalysisConfigOpen(false)}
         onCreated={handleAnalysisConfigCreated}
       />
-      <NewSceneDialog
-        open={newSceneOpen}
-        onClose={() => setNewSceneOpen(false)}
-        onCreated={handleSceneCreated}
+      <NewCrossfaderDialog
+        open={newCrossfaderOpen}
+        onClose={() => setNewCrossfaderOpen(false)}
+        onCreated={handleCrossfaderCreated}
+        scenes={scenes}
+        onScenesChanged={onScenesChanged}
       />
     </>
   )
