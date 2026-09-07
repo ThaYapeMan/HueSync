@@ -957,3 +957,68 @@ def test_all_active_effects_non_black_on_onset():
         assert colour != Colour.BLACK, (
             f"Effect '{effect_id}' returned black on onset frame with full=0.5"
         )
+
+
+def test_pulses_colour_follows_spectrum():
+    """Pulses uses spectrum colour direction, not fixed white.
+
+    Bass-heavy bars (first 8 high, rest low) must give red-dominant output
+    because bass maps to the R channel in the spectrum colour split.
+    """
+    from huesync.sync_engine import ColourModeEffect
+
+    bars = [1.0] * 8 + [0.1] * 22  # heavy bass, quiet mids and treble
+    features = AudioFeatures(
+        bars=bars, bass=0.9, mid=0.2, full=0.5, centroid=0.1,
+        onset=True, onset_strength=1.0,
+    )
+    effect = ColourModeEffect(_prof(effect="pulses"))
+    c = effect.render(features, 0.0).color_at(_ORIGIN, 0.0)
+    assert c.r > c.g + 0.1, (
+        f"Pulses: bass-heavy input must give red-dominant output; "
+        f"r={c.r:.3f} g={c.g:.3f} b={c.b:.3f}"
+    )
+    assert c.r > c.b + 0.1, (
+        f"Pulses: bass-heavy input must dominate blue; r={c.r:.3f} b={c.b:.3f}"
+    )
+
+
+def test_fireworks_dark_before_any_onset():
+    """Fireworks shows no ambient glow before the first onset."""
+    from huesync.sync_engine import ColourModeEffect
+    from huesync.types import Colour
+
+    effect = ColourModeEffect(_prof(effect="fireworks"))
+    scene = effect.render(_ef(onset=False, full=0.5), t=5.0)
+    for pos in (Position(-0.9, 0.0, 0.0), _ORIGIN, Position(0.9, 0.0, 0.0)):
+        c = scene.color_at(pos, 5.0)
+        assert c == Colour.BLACK, (
+            f"Fireworks: expected black before any onset, got {c} at x={pos.x}"
+        )
+
+
+def test_fireworks_burst_and_decay():
+    """Fireworks: peak brightness right after onset, clear decay over subsequent frames."""
+    from huesync.sync_engine import ColourModeEffect
+
+    effect = ColourModeEffect(_prof(effect="fireworks", effect_speed=1.0, effect_decay=0.3))
+    positions = [Position(x, 0.0, 0.0) for x in (-0.9, -0.45, 0.0, 0.45, 0.9)]
+
+    # onset at t=0; origin_x = sin(0 * 127) * 0.9 = 0.0
+    effect.render(_ef(onset=True, full=0.5), t=0.0)
+
+    def peak_r(t_val: float) -> float:
+        scene = effect.render(_ef(onset=False, full=0.0), t=t_val)
+        return max(scene.color_at(p, t_val).r for p in positions)
+
+    b_01 = peak_r(0.1)   # fresh burst — wavefront near origin
+    b_10 = peak_r(1.0)   # 1 s later — wavefront at 0.8, envelope decayed
+    b_25 = peak_r(2.5)   # 2.5 s — wavefront past all lights, essentially dark
+
+    assert b_01 > 0.5, f"Fireworks: expected bright burst at t=0.1, got {b_01:.4f}"
+    assert b_10 < b_01, (
+        f"Fireworks: expected decay from {b_01:.4f} by t=1.0, got {b_10:.4f}"
+    )
+    assert b_25 < b_10, (
+        f"Fireworks: expected further decay from {b_10:.4f} by t=2.5, got {b_25:.4f}"
+    )

@@ -748,7 +748,12 @@ class _MonoPulseRenderer(_EffectRenderer):
 
 
 class _PulsesRenderer(_EffectRenderer):
-    """Sharp onset attack, exponential decay; no continuous energy following."""
+    """Onset-driven brightness pulse with spectrum-derived colour.
+
+    The envelope spikes to 1.0 on each onset and decays exponentially.
+    The *hue* comes from the spectrum (bass→R, mid→G, treble→B), so
+    the flash colour follows the music rather than being fixed white.
+    """
 
     def __init__(self) -> None:
         self._envelope: float = 0.0
@@ -758,8 +763,25 @@ class _PulsesRenderer(_EffectRenderer):
             self._envelope = 1.0
         else:
             self._envelope *= (1.0 - min(profile.effect_decay, 0.99))
-        brightness = max(self._envelope * profile.sensitivity, profile.brightness_floor)
-        return UniformScene(Colour(brightness, brightness, brightness))
+
+        # Spectrum colour direction — same band split as _SpectrumRgbRenderer.
+        bars = features.bars
+        n = len(bars)
+        lo, hi = profile.lower_cutoff_freq, profile.higher_cutoff_freq
+        bass_hi = int(_hz_to_frac(profile.bass_hz, lo, hi) * n)
+        mid_hi = int(_hz_to_frac(profile.mid_hz, lo, hi) * n)
+        r_raw = _band_avg(bars, 0, bass_hi) * profile.sensitivity
+        g_raw = _band_avg(bars, bass_hi, mid_hi) * profile.sensitivity
+        b_raw = _band_avg(bars, mid_hi, n) * profile.sensitivity
+        # Normalise to the peak channel so the envelope controls brightness,
+        # not the raw band amplitude.  Fall back to white at near-silence.
+        peak = max(r_raw, g_raw, b_raw, 1e-3)
+        brightness = max(self._envelope, profile.brightness_floor)
+        return UniformScene(Colour(
+            min(r_raw / peak * brightness, 1.0),
+            min(g_raw / peak * brightness, 1.0),
+            min(b_raw / peak * brightness, 1.0),
+        ))
 
 
 class _FlashesRenderer(_EffectRenderer):
@@ -816,39 +838,95 @@ class _SplotchesRenderer(_EffectRenderer):
 
 
 class _FireworkScene:
-    """Spatial scene: expanding burst wave from an origin point."""
+    """Spatial scene: expanding burst wave from an origin point.
 
-    __slots__ = ("_ox", "_onset_t", "_speed", "_floor")
+    The burst travels outward from origin_x, with peak brightness at the
+    wavefront and an exponential decay envelope over time.  Returns black
+    before the triggering onset or after the burst has fully decayed (5 s),
+    so there is no ambient glow between explosions.
+    """
 
-    def __init__(self, origin_x: float, onset_t: float, speed: float, floor: float) -> None:
+    __slots__ = ("_ox", "_onset_t", "_speed", "_r", "_g", "_b", "_decay_rate")
+
+    def __init__(
+        self,
+        origin_x: float,
+        onset_t: float,
+        speed: float,
+        r: float,
+        g: float,
+        b: float,
+        decay_rate: float,
+    ) -> None:
         self._ox = origin_x
         self._onset_t = onset_t
         self._speed = speed
-        self._floor = floor
+        self._r = r
+        self._g = g
+        self._b = b
+        self._decay_rate = decay_rate
 
     def color_at(self, position: Position, t: float) -> Colour:
-        age = max(0.0, t - self._onset_t)
+        age = t - self._onset_t
+        # Outside the burst window: black (no ambient glow between onsets)
+        if age < 0.0 or age > 5.0:
+            return Colour.BLACK
         dist = abs(position.x - self._ox)
         wavefront = age * self._speed * 0.8
         proximity = max(0.0, 1.0 - abs(dist - wavefront) * 4.0)
-        envelope = math.exp(-age * 2.5)
-        brightness = max(proximity * envelope, self._floor)
-        return Colour(brightness, brightness * 0.7, brightness * 0.2)
+        envelope = math.exp(-age * self._decay_rate)
+        burst = proximity * envelope
+        return Colour(
+            min(burst * self._r, 1.0),
+            min(burst * self._g, 1.0),
+            min(burst * self._b, 1.0),
+        )
 
 
 class _FireworksRenderer(_EffectRenderer):
-    """Expanding burst from a pseudo-random point on onset."""
+    """Expanding burst from a pseudo-random point on onset.
+
+    The burst colour is captured from the spectrum at the moment of each
+    onset, so different onsets can have different colours.  effect_speed
+    controls how fast the wavefront expands; effect_decay controls how
+    quickly the burst envelope fades.
+    """
 
     def __init__(self) -> None:
         self._origin_x: float = 0.0
-        self._onset_t: float = -999.0
+        self._onset_t: float = -999.0  # far in the past → color_at returns black
+        self._r: float = 1.0
+        self._g: float = 1.0
+        self._b: float = 1.0
 
     def render(self, profile: Profile, features: AudioFeatures, t: float) -> Scene:
         if features.onset:
             self._origin_x = math.sin(t * 127.0) * 0.9
             self._onset_t = t
+            # Capture spectrum colour at the onset moment
+            bars = features.bars
+            n = len(bars)
+            lo, hi = profile.lower_cutoff_freq, profile.higher_cutoff_freq
+            bass_hi = int(_hz_to_frac(profile.bass_hz, lo, hi) * n)
+            mid_hi = int(_hz_to_frac(profile.mid_hz, lo, hi) * n)
+            r_raw = _band_avg(bars, 0, bass_hi) * profile.sensitivity
+            g_raw = _band_avg(bars, bass_hi, mid_hi) * profile.sensitivity
+            b_raw = _band_avg(bars, mid_hi, n) * profile.sensitivity
+            peak = max(r_raw, g_raw, b_raw, 1e-3)
+            self._r = r_raw / peak
+            self._g = g_raw / peak
+            self._b = b_raw / peak
+        # effect_decay controls burst duration:
+        # 0.1 → slow (rate≈1.6, visible ~3 s), 0.9 → fast (rate≈6.4, gone in <1 s)
+        decay_rate = 1.0 + profile.effect_decay * 6.0
         return _FireworkScene(
-            self._origin_x, self._onset_t, profile.effect_speed, profile.brightness_floor
+            self._origin_x,
+            self._onset_t,
+            profile.effect_speed,
+            self._r,
+            self._g,
+            self._b,
+            decay_rate,
         )
 
 
