@@ -291,6 +291,20 @@ class Storage:
                     c["mellow_render_config_id"] = rc_id
                 changed = True
 
+            # Rename color_mode → effect in all render_config dicts (after the
+            # mellow-RC-clone loop so newly created mellow RCs also get renamed).
+            for rc in data.get("render_configs", []):
+                if "color_mode" in rc and "effect" not in rc:
+                    rc["effect"] = rc.pop("color_mode")
+                    changed = True
+                elif "color_mode" in rc:
+                    rc.pop("color_mode")
+                    changed = True
+                # Remove obsolete mellow_colour_mode if still present.
+                if "mellow_colour_mode" in rc:
+                    rc.pop("mellow_colour_mode")
+                    changed = True
+
             if changed:
                 self._write(data)
 

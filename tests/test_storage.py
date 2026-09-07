@@ -92,7 +92,7 @@ def test_migrate_creates_mellow_render_config(tmp_path: Path):
     rcs = storage.list_render_configs()
     mellow_rc = next((r for r in rcs if r.id == c.mellow_render_config_id), None)
     assert mellow_rc is not None
-    assert mellow_rc.color_mode.value == "mono_pulse"
+    assert mellow_rc.effect == "mono_pulse"
     assert "(Mellow)" in mellow_rc.name
 
     # Calling migrate() again is a no-op (idempotent).
@@ -148,6 +148,62 @@ def test_migrate_same_colour_mode_reuses_rc(tmp_path: Path):
     assert c.mellow_render_config_id == rc_id
     # Only the original RC exists (no clone was created).
     assert len(storage.list_render_configs()) == 1
+
+
+def test_migrate_renames_color_mode_to_effect(tmp_path: Path):
+    """migrate() renames color_mode → effect in render_config raw dicts."""
+    import json
+
+    config = tmp_path / "config.json"
+    rc_id = "rc-migrate"
+    old_data = {
+        "player_latencies": [],
+        "virtual_players": [],
+        "controllers": [],
+        "light_providers": [],
+        "analysis_configs": [],
+        "render_configs": [
+            {
+                "id": rc_id,
+                "name": "Old RC",
+                "color_mode": "mono_pulse",
+                "sensitivity": 1.0,
+                "brightness_floor": 0.15,
+                "bass_hz": 250,
+                "mid_hz": 2000,
+                "exertion_clip": 3.0,
+                "onset_flash_intensity": 0.0,
+            }
+        ],
+        "couplings": [
+            {
+                "id": "c-1",
+                "name": "Test",
+                "player_id": "p-1",
+                "analysis_config_id": "ac-1",
+                "light_provider_id": "lp-1",
+                "render_config_id": rc_id,
+                "mellow_render_config_id": rc_id,
+                "enabled": True,
+            }
+        ],
+        "active_coupling_id": None,
+    }
+    config.write_text(json.dumps(old_data))
+
+    storage = Storage(config)
+    storage.migrate()
+
+    rc = storage.get_render_config(rc_id)
+    assert rc is not None
+    assert rc.effect == "mono_pulse"
+    # RenderConfig no longer has a color_mode attribute.
+    assert not hasattr(rc, "color_mode")
+
+    # Verify the raw JSON also has the renamed key.
+    raw = json.loads(config.read_text())
+    assert raw["render_configs"][0].get("effect") == "mono_pulse"
+    assert "color_mode" not in raw["render_configs"][0]
 
 
 def test_players_key_migrated_to_virtual_players(tmp_path: Path):

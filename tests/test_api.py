@@ -226,7 +226,7 @@ def test_create_and_get_analysis_config(client: TestClient):
 
 
 def test_create_and_get_render_config(client: TestClient):
-    payload = {"name": "Vivid", "color_mode": "spectrum_rgb", "sensitivity": 1.5}
+    payload = {"name": "Vivid", "effect": "spectrum_rgb", "sensitivity": 1.5}
     resp = client.post("/api/render-configs", json=payload)
     assert resp.status_code == 201
     body = resp.json()
@@ -505,7 +505,7 @@ def test_clone_coupling_analysis_and_render_configs_are_independent(client: Test
     assert new_ac.bars == orig_ac.bars
     assert new_ac.lower_cutoff_freq == orig_ac.lower_cutoff_freq
     assert new_ac.higher_cutoff_freq == orig_ac.higher_cutoff_freq
-    assert new_rc.color_mode == orig_rc.color_mode
+    assert new_rc.effect == orig_rc.effect
     assert new_rc.sensitivity == orig_rc.sensitivity
     assert new_rc.brightness_floor == orig_rc.brightness_floor
     assert new_rc.bass_hz == orig_rc.bass_hz

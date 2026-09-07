@@ -1,6 +1,6 @@
 import pytest
 
-from huesync.models import ColorMode, Profile
+from huesync.models import Profile
 from huesync.sync_engine import (
     BandNormaliser,
     ColourModeEffect,
@@ -65,7 +65,7 @@ def test_band_average_full_scale():
 
 def test_colour_mode_effect_returns_valid_scene():
     """render() must return a Scene whose color_at() yields values in [0, 1]."""
-    profile = Profile(color_mode=ColorMode.SPECTRUM_RGB, bars=30)
+    profile = Profile(effect="spectrum_rgb", bars=30)
     effect = ColourModeEffect(profile)
     scene = effect.render(_make_features(), 0.0)
     colour = scene.color_at(_ORIGIN, 0.0)
@@ -76,7 +76,7 @@ def test_colour_mode_effect_returns_valid_scene():
 
 def test_colour_mode_effect_mono_pulse_equal_rgb():
     """MONO_PULSE must produce equal R/G/B (white-light brightness control)."""
-    profile = Profile(color_mode=ColorMode.MONO_PULSE, bars=30)
+    profile = Profile(effect="mono_pulse", bars=30)
     effect = ColourModeEffect(profile)
     features = _make_features([200 / 255.0] * 30)
     colour = effect.render(features, 0.0).color_at(_ORIGIN, 0.0)
@@ -85,7 +85,7 @@ def test_colour_mode_effect_mono_pulse_equal_rgb():
 
 def test_colour_mode_effect_respects_brightness_floor_on_silence():
     """Silence with brightness_floor=0.2 → every component >= 0.2."""
-    profile = Profile(color_mode=ColorMode.MONO_PULSE, brightness_floor=0.2, bars=30)
+    profile = Profile(effect="mono_pulse", brightness_floor=0.2, bars=30)
     effect = ColourModeEffect(profile)
     features = _make_features([0.0] * 30)
     colour = effect.render(features, 0.0).color_at(_ORIGIN, 0.0)
@@ -96,7 +96,7 @@ def test_colour_mode_effect_respects_brightness_floor_on_silence():
 
 def test_colour_mode_effect_spectrum_rgb_full_treble():
     """Pure treble energy → blue channel active; bass and mid channels are zero."""
-    profile = Profile(color_mode=ColorMode.SPECTRUM_RGB, sensitivity=1.0, bars=30)
+    profile = Profile(effect="spectrum_rgb", sensitivity=1.0, bars=30)
     effect = ColourModeEffect(profile)
     n = 30
     mid_frac = _hz_to_frac(profile.mid_hz, profile.lower_cutoff_freq, profile.higher_cutoff_freq)
@@ -111,8 +111,8 @@ def test_colour_mode_effect_spectrum_rgb_full_treble():
 def test_colour_mode_effect_sensitivity_scales_output():
     """Higher sensitivity → brighter output (up to the 1.0 clip)."""
     bars = [0.3] * 30
-    profile_low = Profile(color_mode=ColorMode.MONO_PULSE, sensitivity=0.5, bars=30)
-    profile_high = Profile(color_mode=ColorMode.MONO_PULSE, sensitivity=2.0, bars=30)
+    profile_low = Profile(effect="mono_pulse", sensitivity=0.5, bars=30)
+    profile_high = Profile(effect="mono_pulse", sensitivity=2.0, bars=30)
     low = ColourModeEffect(profile_low).render(_make_features(bars), 0.0).color_at(_ORIGIN, 0.0)
     high = ColourModeEffect(profile_high).render(_make_features(bars), 0.0).color_at(_ORIGIN, 0.0)
     assert high.r >= low.r
@@ -129,10 +129,10 @@ def test_onset_flash_intensity_brightens_on_onset():
     features_onset.onset = True
 
     profile_no_flash = Profile(
-        color_mode=ColorMode.SPECTRUM_RGB, onset_flash_intensity=0.0, bars=30
+        effect="spectrum_rgb", onset_flash_intensity=0.0, bars=30
     )
     profile_flash = Profile(
-        color_mode=ColorMode.SPECTRUM_RGB, onset_flash_intensity=0.5, bars=30
+        effect="spectrum_rgb", onset_flash_intensity=0.5, bars=30
     )
 
     no_flash = ColourModeEffect(profile_no_flash).render(features_onset, 0.0).color_at(_ORIGIN, 0.0)
@@ -153,10 +153,10 @@ def test_onset_flash_intensity_no_effect_without_onset():
     # onset defaults to False in AudioFeatures
 
     profile_no_flash = Profile(
-        color_mode=ColorMode.MONO_PULSE, onset_flash_intensity=0.0, bars=30
+        effect="mono_pulse", onset_flash_intensity=0.0, bars=30
     )
     profile_flash = Profile(
-        color_mode=ColorMode.MONO_PULSE, onset_flash_intensity=0.8, bars=30
+        effect="mono_pulse", onset_flash_intensity=0.8, bars=30
     )
 
     no_flash = ColourModeEffect(profile_no_flash).render(
@@ -178,7 +178,7 @@ def test_onset_flash_intensity_full_white_at_1():
     features_onset.onset = True
 
     profile = Profile(
-        color_mode=ColorMode.SPECTRUM_RGB, onset_flash_intensity=1.0, sensitivity=1.0, bars=30
+        effect="spectrum_rgb", onset_flash_intensity=1.0, sensitivity=1.0, bars=30
     )
     colour = ColourModeEffect(profile).render(features_onset, 0.0).color_at(_ORIGIN, 0.0)
 
@@ -440,13 +440,13 @@ def test_colour_mode_effect_bass_hz_shifts_red_green_boundary():
         bars[i] = 1.0
 
     # With default bass_hz (250 Hz) those bars land in the bass band → R > 0.
-    profile_default = Profile(color_mode=ColorMode.SPECTRUM_RGB, bars=30)
+    profile_default = Profile(effect="spectrum_rgb", bars=30)
     colour_default = (
         ColourModeEffect(profile_default).render(_make_features(bars), 0.0).color_at(_ORIGIN, 0.0)
     )
 
     # With a very low bass_hz (e.g. 60 Hz) bars 5–9 move into mid → G > 0, R small.
-    profile_low_bass = Profile(color_mode=ColorMode.SPECTRUM_RGB, bars=30, bass_hz=60)
+    profile_low_bass = Profile(effect="spectrum_rgb", bars=30, bass_hz=60)
     colour_low_bass = (
         ColourModeEffect(profile_low_bass).render(_make_features(bars), 0.0).color_at(_ORIGIN, 0.0)
     )
@@ -468,7 +468,7 @@ def test_colour_mode_effect_onset_signals_do_not_affect_brightness():
     causing a persistent brightness difference that cannot be tuned away.
     """
     profile = Profile(
-        color_mode=ColorMode.SPECTRUM_RGB,
+        effect="spectrum_rgb",
         sensitivity=1.0,
         brightness_floor=0.0,
         bars=30,
@@ -529,7 +529,7 @@ def test_sync_engine_update_profile_takes_effect():
     is immediately reflected in the rendered colour without restarting the engine.
     """
     fifo = "/tmp/_nonexistent_fifo_for_test"  # SyncEngine only opens FIFO on start()
-    profile_a = Profile(color_mode=ColorMode.SPECTRUM_RGB, bars=30, bass_hz=250)
+    profile_a = Profile(effect="spectrum_rgb", bars=30, bass_hz=250)
     engine = SyncEngine(fifo, profile_a)
 
     # A bar pattern where bars 5–9 are active (in bass band for default bass_hz).
@@ -542,7 +542,7 @@ def test_sync_engine_update_profile_takes_effect():
     colour_before = effect.render(features, 0.0).color_at(_ORIGIN, 0.0)
 
     # Update to a very low bass_hz so those bars shift into mid (green).
-    profile_b = Profile(color_mode=ColorMode.SPECTRUM_RGB, bars=30, bass_hz=60)
+    profile_b = Profile(effect="spectrum_rgb", bars=30, bass_hz=60)
     engine.update_profile(profile_b)
 
     new_effect = engine._effect  # type: ignore[union-attr]
@@ -647,17 +647,16 @@ def test_band_normaliser_update_exertion_clip_preserves_ema():
 
 def test_layer_mixer_low_energy_stays_mellow():
     """At energy=0.0, mix stays near 0 (pure mellow output)."""
-    from huesync.models import ColorMode
     from huesync.sync_engine import LayerMixer
 
     active_profile = Profile(
-        color_mode=ColorMode.MONO_PULSE,  # active layer → grey
+        effect="mono_pulse",  # active layer → grey
         mix_low_threshold=0.3,
         mix_high_threshold=0.7,
         mix_ema_alpha=1.0,  # EMA alpha=1 → instantaneous, no lag
     )
     mellow_profile = Profile(
-        color_mode=ColorMode.SPECTRUM_RGB,  # mellow layer → colours
+        effect="spectrum_rgb",  # mellow layer → colours
         mix_low_threshold=0.3,
         mix_high_threshold=0.7,
         mix_ema_alpha=1.0,
@@ -674,17 +673,16 @@ def test_layer_mixer_low_energy_stays_mellow():
 
 def test_layer_mixer_high_energy_drives_active():
     """At energy=1.0, mix converges toward 1 (pure active output)."""
-    from huesync.models import ColorMode
     from huesync.sync_engine import LayerMixer
 
     active_profile = Profile(
-        color_mode=ColorMode.MONO_PULSE,
+        effect="mono_pulse",
         mix_low_threshold=0.3,
         mix_high_threshold=0.7,
         mix_ema_alpha=1.0,  # instantaneous
     )
     mellow_profile = Profile(
-        color_mode=ColorMode.SPECTRUM_RGB,
+        effect="spectrum_rgb",
         mix_low_threshold=0.3,
         mix_high_threshold=0.7,
         mix_ema_alpha=1.0,
@@ -701,17 +699,16 @@ def test_layer_mixer_high_energy_drives_active():
 
 def test_layer_mixer_smooth_transition_no_jumps():
     """A gradual energy ramp must produce a monotonically non-decreasing mix."""
-    from huesync.models import ColorMode
     from huesync.sync_engine import LayerMixer
 
     active_profile = Profile(
-        color_mode=ColorMode.MONO_PULSE,
+        effect="mono_pulse",
         mix_low_threshold=0.2,
         mix_high_threshold=0.8,
         mix_ema_alpha=0.3,
     )
     mellow_profile = Profile(
-        color_mode=ColorMode.SPECTRUM_RGB,
+        effect="spectrum_rgb",
         mix_low_threshold=0.2,
         mix_high_threshold=0.8,
         mix_ema_alpha=0.3,
@@ -734,7 +731,6 @@ def test_layer_mixer_smooth_transition_no_jumps():
 
 def test_layer_mixer_output_is_lerp_of_layers():
     """At mix=0.5 (instantaneous EMA), output colour is the midpoint of both layers."""
-    from huesync.models import ColorMode
     from huesync.sync_engine import ColourModeEffect, LayerMixer
 
     # Construct profiles where smoothstep(energy=0.5, lo=0.5, hi=0.5) lands mid-range.
@@ -744,7 +740,7 @@ def test_layer_mixer_output_is_lerp_of_layers():
     features = _make_features(bars)
 
     active_profile = Profile(
-        color_mode=ColorMode.MONO_PULSE,
+        effect="mono_pulse",
         mix_low_threshold=energy,
         mix_high_threshold=energy,  # smoothstep at exactly lo=hi → 0.5 clamp
         mix_ema_alpha=1.0,
@@ -752,7 +748,7 @@ def test_layer_mixer_output_is_lerp_of_layers():
         brightness_floor=0.0,
     )
     mellow_profile = Profile(
-        color_mode=ColorMode.SPECTRUM_RGB,
+        effect="spectrum_rgb",
         mix_low_threshold=energy,
         mix_high_threshold=energy,
         mix_ema_alpha=1.0,
@@ -782,3 +778,182 @@ def test_sync_engine_publishes_last_mix():
 
     engine = SyncEngine("/tmp/_nonexistent_fifo_last_mix", Profile())
     assert engine.last_mix == pytest.approx(0.0)
+
+
+# ---------------------------------------------------------------------------
+# Effect catalogue tests
+# ---------------------------------------------------------------------------
+
+
+def _ef(onset: bool = False, full: float = 0.5, centroid: float = 0.5) -> AudioFeatures:
+    return AudioFeatures(
+        bars=[0.5] * 30, bass=full * 0.8, mid=full * 0.9,
+        full=full, centroid=centroid,
+        onset=onset, onset_strength=1.0 if onset else 0.0,
+    )
+
+
+def _prof(**kw) -> Profile:
+    return Profile(
+        effect=kw.get("effect", "spectrum_rgb"),
+        effect_speed=kw.get("effect_speed", 1.0),
+        effect_decay=kw.get("effect_decay", 0.3),
+        sensitivity=kw.get("sensitivity", 1.0),
+        brightness_floor=0.0,
+    )
+
+
+def test_none_effect_is_black():
+    """None effect returns Colour.BLACK regardless of input (even onset=True, full=1.0)."""
+    from huesync.sync_engine import ColourModeEffect
+    from huesync.types import Colour
+
+    effect = ColourModeEffect(_prof(effect="none"))
+    for onset in (False, True):
+        scene = effect.render(_ef(onset=onset, full=1.0), 0.0)
+        colour = scene.color_at(_ORIGIN, 0.0)
+        assert colour == Colour.BLACK, f"Expected black, got {colour} (onset={onset})"
+
+
+def test_pulses_spikes_on_onset():
+    """Brightness after onset frame is significantly brighter than before."""
+    from huesync.sync_engine import ColourModeEffect
+
+    effect = ColourModeEffect(_prof(effect="pulses", effect_decay=0.3))
+    before = effect.render(_ef(onset=False, full=0.0), 0.0).color_at(_ORIGIN, 0.0)
+    after = effect.render(_ef(onset=True, full=0.0), 0.0).color_at(_ORIGIN, 0.0)
+    assert after.r > before.r + 0.5, (
+        f"Pulses: onset must spike brightness by >0.5, before={before.r:.3f}, after={after.r:.3f}"
+    )
+
+
+def test_pulses_decays_after_onset():
+    """After an onset, brightness decreases monotonically over 10 silence frames."""
+    from huesync.sync_engine import ColourModeEffect
+
+    effect = ColourModeEffect(_prof(effect="pulses", effect_decay=0.3))
+    effect.render(_ef(onset=True, full=0.0), 0.0)  # trigger onset
+    prev_brightness = 1.0
+    for _ in range(10):
+        colour = effect.render(_ef(onset=False, full=0.0), 0.0).color_at(_ORIGIN, 0.0)
+        assert colour.r <= prev_brightness + 1e-9, (
+            f"Pulses: brightness must decay monotonically, "
+            f"got {colour.r:.4f} after {prev_brightness:.4f}"
+        )
+        prev_brightness = colour.r
+
+
+def test_flashes_dark_without_onset():
+    """After 15 no-onset frames, brightness falls below 0.05."""
+    from huesync.sync_engine import ColourModeEffect
+
+    effect = ColourModeEffect(_prof(effect="flashes", effect_decay=0.5))
+    for _ in range(15):
+        colour = effect.render(_ef(onset=False, full=0.0), 0.0).color_at(_ORIGIN, 0.0)
+    assert colour.r < 0.05, f"Flashes: expected dark after 15 silent frames, got {colour.r:.4f}"
+
+
+def test_flashes_bright_on_onset():
+    """Onset frame produces brightness significantly above the floor."""
+    from huesync.sync_engine import ColourModeEffect
+
+    # Use very small decay so the envelope stays high after onset.
+    effect = ColourModeEffect(_prof(effect="flashes", effect_decay=0.01))
+    scene = effect.render(_ef(onset=True, full=0.5), 0.0)
+    colour = scene.color_at(_ORIGIN, 0.0)
+    assert colour.r > 0.8, f"Flashes: onset must produce brightness >0.8, got {colour.r:.4f}"
+
+
+def test_splotches_differs_by_position():
+    """After onset, positions with different sin(x*3.7+seed*1.1) signs must differ.
+
+    With seed=1 (post first onset): sin(0.0*3.7+1.1)≈+0.89, sin(-0.5*3.7+1.1)≈-0.68.
+    The positive position gets envelope*sensitivity; the negative position gets floor=0.
+    """
+    from huesync.sync_engine import ColourModeEffect
+
+    effect = ColourModeEffect(_prof(effect="splotches", effect_decay=0.1, sensitivity=1.5))
+    scene = effect.render(_ef(onset=True, full=0.5), 0.0)
+    pos_bright = Position(0.0, 0.0, 0.0)   # sin > 0 with seed=1
+    pos_dark = Position(-0.5, 0.0, 0.0)    # sin < 0 with seed=1
+    colour_bright = scene.color_at(pos_bright, 0.0)
+    colour_dark = scene.color_at(pos_dark, 0.0)
+    assert colour_bright != colour_dark, (
+        f"Splotches: positions (0.0) and (-0.5) must differ, "
+        f"got bright={colour_bright.r:.4f} dark={colour_dark.r:.4f}"
+    )
+
+
+def test_fireworks_radiates_spatially():
+    """After onset, scene has spatial variation across 5 spread positions."""
+    from huesync.sync_engine import ColourModeEffect
+
+    effect = ColourModeEffect(_prof(effect="fireworks", effect_speed=1.0))
+    # Trigger onset at t=0; sample the scene at a slightly later time so the
+    # wavefront has propagated
+    effect.render(_ef(onset=True, full=0.5), 0.0)
+    scene = effect.render(_ef(onset=False, full=0.0), 0.03)
+
+    positions = [Position(x, 0.0, 0.0) for x in (-0.9, -0.45, 0.0, 0.45, 0.9)]
+    brightnesses = [scene.color_at(p, 0.03).r for p in positions]
+    # At least one position must differ from the others
+    assert max(brightnesses) - min(brightnesses) > 1e-6, (
+        f"Fireworks: no spatial variation found across positions, brightnesses={brightnesses}"
+    )
+
+
+def test_swirl_differs_by_position():
+    """Swirl scene produces different colours at different x-positions."""
+    from huesync.sync_engine import ColourModeEffect
+
+    effect = ColourModeEffect(_prof(effect="swirl", effect_speed=1.0))
+    scene = effect.render(_ef(onset=False, full=0.5), 0.0)
+    pos_left = Position(-0.9, 0.0, 0.0)
+    pos_right = Position(0.9, 0.0, 0.0)
+    colour_left = scene.color_at(pos_left, 0.0)
+    colour_right = scene.color_at(pos_right, 0.0)
+    assert colour_left != colour_right, (
+        f"Swirl: positions must differ, left={colour_left}, right={colour_right}"
+    )
+
+
+def test_wave_differs_by_position():
+    """Wave scene produces different brightness at different x-positions."""
+    from huesync.sync_engine import ColourModeEffect
+
+    effect = ColourModeEffect(_prof(effect="wave", effect_speed=1.0))
+    scene = effect.render(_ef(onset=False, full=0.5), 1.0)
+    pos_left = Position(-0.9, 0.0, 0.0)
+    pos_right = Position(0.9, 0.0, 0.0)
+    colour_left = scene.color_at(pos_left, 1.0)
+    colour_right = scene.color_at(pos_right, 1.0)
+    assert colour_left != colour_right, (
+        f"Wave: positions must differ, left={colour_left}, right={colour_right}"
+    )
+
+
+def test_solid_uniform_across_positions():
+    """Solid effect returns the same colour at all positions."""
+    from huesync.sync_engine import ColourModeEffect
+
+    effect = ColourModeEffect(_prof(effect="solid"))
+    scene = effect.render(_ef(onset=False, full=0.5, centroid=0.5), 0.0)
+    positions = [Position(x, 0.0, 0.0) for x in (-0.9, -0.45, 0.0, 0.45, 0.9)]
+    colours = [scene.color_at(p, 0.0) for p in positions]
+    for c in colours[1:]:
+        assert c == colours[0], f"Solid: all positions must be equal, got {colours[0]} vs {c}"
+
+
+def test_all_active_effects_non_black_on_onset():
+    """spectrum_rgb, mono_pulse, pulses, flashes each produce non-black on onset."""
+    from huesync.sync_engine import ColourModeEffect
+    from huesync.types import Colour
+
+    effects_to_test = ["spectrum_rgb", "mono_pulse", "pulses", "flashes"]
+    features = _ef(onset=True, full=0.5)
+    for effect_id in effects_to_test:
+        effect = ColourModeEffect(_prof(effect=effect_id))
+        colour = effect.render(features, 0.0).color_at(_ORIGIN, 0.0)
+        assert colour != Colour.BLACK, (
+            f"Effect '{effect_id}' returned black on onset frame with full=0.5"
+        )

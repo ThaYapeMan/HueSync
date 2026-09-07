@@ -20,11 +20,13 @@ log = logging.getLogger(__name__)
 ONSET_METHODS: frozenset[str] = frozenset({"combined", "multiband", "superflux"})
 
 class ColorMode(StrEnum):
-    """How cava's spectrum bars are translated into a Hue colour.
+    """Legacy colour mode enum — kept for migration code only.
 
     bass_brightness was removed: it was a poorly behaved legacy mode that
     mapped bass energy to a fixed warm hue.  Profiles that stored it are
-    migrated to spectrum_rgb on load (see Profile.from_dict).
+    migrated to spectrum_rgb on load.
+
+    New code should use EFFECT_IDS and the ``effect`` field on RenderConfig.
     """
 
     # Whole spectrum split in three bands (bass/mid/treble) mapped to R/G/B.
@@ -36,6 +38,21 @@ class ColorMode(StrEnum):
 # Derived from ColorMode so it can never go out of sync with the enum.
 # Keep in sync with COLOUR_MODES in web/src/lib/api.ts.
 COLOUR_MODES: frozenset[str] = frozenset(cm.value for cm in ColorMode)
+
+# Canonical set of effect IDs.  SyncEngine's _make_renderer() switches on
+# these exact strings.  Keep in sync with EFFECTS in web/src/lib/api.ts.
+EFFECT_IDS: frozenset[str] = frozenset({
+    "spectrum_rgb",
+    "mono_pulse",
+    "pulses",
+    "flashes",
+    "splotches",
+    "fireworks",
+    "swirl",
+    "wave",
+    "solid",
+    "none",
+})
 
 
 @dataclass
@@ -131,8 +148,10 @@ class Profile:
     entertainment_area_name: str = ""
     light_count: int = 0
 
-    # Colour mapping
-    color_mode: ColorMode = ColorMode.SPECTRUM_RGB
+    # Colour mapping / effect selection
+    effect: str = "spectrum_rgb"
+    effect_speed: float = 1.0
+    effect_decay: float = 0.3
     mix_low_threshold: float = 0.3
     mix_high_threshold: float = 0.7
     mix_ema_alpha: float = 0.1
@@ -185,24 +204,26 @@ class Profile:
     enabled: bool = True
 
     def to_dict(self) -> dict:
-        d = dict(self.__dict__)
-        d["color_mode"] = self.color_mode.value
-        return d
+        return dict(self.__dict__)
 
     @classmethod
     def from_dict(cls, d: dict) -> Profile:
         d = dict(d)
 
-        # Migrate removed color modes to a safe default.
-        if "color_mode" in d:
-            try:
-                d["color_mode"] = ColorMode(d["color_mode"])
-            except ValueError:
+        # Migrate legacy color_mode field to effect.
+        if "color_mode" in d and "effect" not in d:
+            cm_val = d.pop("color_mode")
+            # Map legacy ColorMode values; unknown values fall back to spectrum_rgb.
+            if cm_val in ("spectrum_rgb", "mono_pulse"):
+                d["effect"] = cm_val
+            else:
                 log.warning(
                     "Unsupported color_mode %r in saved profile; falling back to spectrum_rgb",
-                    d["color_mode"],
+                    cm_val,
                 )
-                d["color_mode"] = ColorMode.SPECTRUM_RGB
+                d["effect"] = "spectrum_rgb"
+        elif "color_mode" in d:
+            d.pop("color_mode")
 
         # Strip keys that are not current Profile fields so that loading a
         # config written by a newer version of HueSync never causes a
@@ -381,7 +402,9 @@ class RenderConfig:
 
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     name: str = "Default Render"
-    color_mode: ColorMode = ColorMode.SPECTRUM_RGB
+    effect: str = "spectrum_rgb"
+    effect_speed: float = 1.0
+    effect_decay: float = 0.3
     sensitivity: float = 1.0
     brightness_floor: float = 0.15
     bass_hz: int = 250
@@ -393,7 +416,9 @@ class RenderConfig:
         return {
             "id": self.id,
             "name": self.name,
-            "color_mode": self.color_mode.value,
+            "effect": self.effect,
+            "effect_speed": self.effect_speed,
+            "effect_decay": self.effect_decay,
             "sensitivity": self.sensitivity,
             "brightness_floor": self.brightness_floor,
             "bass_hz": self.bass_hz,
@@ -405,15 +430,19 @@ class RenderConfig:
     @classmethod
     def from_dict(cls, d: dict) -> RenderConfig:
         d = dict(d)
-        if "color_mode" in d:
-            try:
-                d["color_mode"] = ColorMode(d["color_mode"])
-            except ValueError:
+        # Migrate legacy color_mode field to effect.
+        if "color_mode" in d and "effect" not in d:
+            cm_val = d.pop("color_mode")
+            if cm_val in ("spectrum_rgb", "mono_pulse"):
+                d["effect"] = cm_val
+            else:
                 log.warning(
                     "Unsupported color_mode %r in saved RenderConfig; falling back to spectrum_rgb",
-                    d["color_mode"],
+                    cm_val,
                 )
-                d["color_mode"] = ColorMode.SPECTRUM_RGB
+                d["effect"] = "spectrum_rgb"
+        elif "color_mode" in d:
+            d.pop("color_mode")
         # Old keys (mellow_colour_mode, mix_low_threshold, mix_high_threshold,
         # mix_ema_alpha) are silently dropped by the field filter below.
         return cls(**{k: v for k, v in d.items() if k in _RENDER_CONFIG_FIELDS})

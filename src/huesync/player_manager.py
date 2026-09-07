@@ -69,7 +69,9 @@ def _build_engine_profile(coupling: Coupling, storage: Storage) -> Profile | Non
         entertainment_area_id=lp.entertainment_area_id,
         entertainment_area_name=lp.entertainment_area_name,
         light_count=lp.light_count,
-        color_mode=rc.color_mode,
+        effect=rc.effect,
+        effect_speed=rc.effect_speed,
+        effect_decay=rc.effect_decay,
         mix_low_threshold=coupling.mix_low_threshold,
         mix_high_threshold=coupling.mix_high_threshold,
         mix_ema_alpha=coupling.mix_ema_alpha,
@@ -123,7 +125,9 @@ def _build_mellow_profile(coupling: Coupling, storage: Storage) -> Profile | Non
         entertainment_area_id=lp.entertainment_area_id,
         entertainment_area_name=lp.entertainment_area_name,
         light_count=lp.light_count,
-        color_mode=mellow_rc.color_mode,
+        effect=mellow_rc.effect,
+        effect_speed=mellow_rc.effect_speed,
+        effect_decay=mellow_rc.effect_decay,
         mix_low_threshold=coupling.mix_low_threshold,
         mix_high_threshold=coupling.mix_high_threshold,
         mix_ema_alpha=coupling.mix_ema_alpha,
@@ -308,10 +312,16 @@ class PlayerManager:
         return self._active.profile.mid_hz if self._active is not None else None
 
     @property
-    def active_color_mode(self) -> str | None:
+    def active_effect(self) -> str | None:
+        """Return the currently active effect ID, or None if no session is active."""
         if self._active:
-            return self._active.profile.color_mode.value
+            return self._active.profile.effect
         return None
+
+    @property
+    def active_color_mode(self) -> str | None:
+        """Deprecated alias for active_effect; kept for backward compatibility."""
+        return self.active_effect
 
     @property
     def active_onset_method(self) -> str | None:
@@ -382,7 +392,9 @@ class PlayerManager:
             entertainment_area_id=lp.entertainment_area_id,
             entertainment_area_name=lp.entertainment_area_name,
             light_count=lp.light_count,
-            color_mode=rc.color_mode,
+            effect=rc.effect,
+            effect_speed=rc.effect_speed,
+            effect_decay=rc.effect_decay,
             mix_low_threshold=coupling.mix_low_threshold,
             mix_high_threshold=coupling.mix_high_threshold,
             mix_ema_alpha=coupling.mix_ema_alpha,

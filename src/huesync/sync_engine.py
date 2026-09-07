@@ -28,7 +28,7 @@ from collections import deque
 import numpy as np
 
 from .latency import NoLatencyProbe
-from .models import ColorMode, Profile
+from .models import Profile
 from .pcm_source import WINDOW_SIZE, PcmStft, SqueezeliteShmSource
 from .types import (
     Analyser,
@@ -673,20 +673,291 @@ class CavaAnalyser:
 
 
 # ---------------------------------------------------------------------------
+# HSV helper
+# ---------------------------------------------------------------------------
+
+
+def _hsv_to_colour(h: float, s: float, v: float) -> Colour:
+    """Convert HSV (each in 0.0–1.0) to a Colour."""
+    if s == 0.0:
+        return Colour(v, v, v)
+    h6 = h * 6.0
+    i = int(h6) % 6
+    f = h6 - int(h6)
+    p = v * (1.0 - s)
+    q = v * (1.0 - s * f)
+    t_v = v * (1.0 - s * (1.0 - f))
+    r, g, b = ((v, t_v, p), (q, v, p), (p, v, t_v), (p, q, v), (t_v, p, v), (v, p, q))[i]
+    return Colour(r, g, b)
+
+
+# ---------------------------------------------------------------------------
+# _EffectRenderer protocol and individual renderer implementations
+# ---------------------------------------------------------------------------
+
+
+class _EffectRenderer:
+    """Internal protocol: render one frame to a Scene."""
+
+    def render(self, profile: Profile, features: AudioFeatures, t: float) -> Scene:
+        raise NotImplementedError
+
+
+class _SpectrumRgbRenderer(_EffectRenderer):
+    """Bass→R, mid→G, treble→B with optional onset flash."""
+
+    def render(self, profile: Profile, features: AudioFeatures, t: float) -> Scene:  # noqa: ARG002
+        sens = profile.sensitivity
+        floor = profile.brightness_floor
+        bars = features.bars
+        n = len(bars)
+        lo = profile.lower_cutoff_freq
+        hi = profile.higher_cutoff_freq
+        bass_frac = _hz_to_frac(profile.bass_hz, lo, hi)
+        mid_frac = _hz_to_frac(profile.mid_hz, lo, hi)
+        bass_hi = int(bass_frac * n)
+        mid_hi = int(mid_frac * n)
+        r = min(_band_avg(bars, 0, bass_hi) * sens, 1.0)
+        g = min(_band_avg(bars, bass_hi, mid_hi) * sens, 1.0)
+        b = min(_band_avg(bars, mid_hi, n) * sens, 1.0)
+        if features.onset:
+            fi = profile.onset_flash_intensity
+            if fi > 0.0:
+                r = r + fi * (1.0 - r)
+                g = g + fi * (1.0 - g)
+                b = b + fi * (1.0 - b)
+        # spectrum_rgb does not apply a brightness floor per-channel
+        # (silent channels are intentionally dark)
+        del floor  # unused for spectrum_rgb
+        return UniformScene(Colour(r=r, g=g, b=b))
+
+
+class _MonoPulseRenderer(_EffectRenderer):
+    """Single colour; brightness follows overall energy."""
+
+    def render(self, profile: Profile, features: AudioFeatures, t: float) -> Scene:  # noqa: ARG002
+        sens = profile.sensitivity
+        floor = profile.brightness_floor
+        overall = min(_slice_avg(features.bars, 0.0, 1.0) * sens, 1.0)
+        brightness = max(overall, floor)
+        if features.onset:
+            fi = profile.onset_flash_intensity
+            if fi > 0.0:
+                brightness = brightness + fi * (1.0 - brightness)
+        return UniformScene(Colour(brightness, brightness, brightness))
+
+
+class _PulsesRenderer(_EffectRenderer):
+    """Sharp onset attack, exponential decay; no continuous energy following."""
+
+    def __init__(self) -> None:
+        self._envelope: float = 0.0
+
+    def render(self, profile: Profile, features: AudioFeatures, t: float) -> Scene:  # noqa: ARG002
+        if features.onset:
+            self._envelope = 1.0
+        else:
+            self._envelope *= (1.0 - min(profile.effect_decay, 0.99))
+        brightness = max(self._envelope * profile.sensitivity, profile.brightness_floor)
+        return UniformScene(Colour(brightness, brightness, brightness))
+
+
+class _FlashesRenderer(_EffectRenderer):
+    """Hard flash on onset with cooldown; very dark between flashes."""
+
+    def __init__(self) -> None:
+        self._envelope: float = 0.0
+        self._cooldown: int = 0
+
+    def render(self, profile: Profile, features: AudioFeatures, t: float) -> Scene:  # noqa: ARG002
+        if features.onset and self._cooldown == 0:
+            self._envelope = 1.0
+            self._cooldown = 4
+        self._envelope *= (1.0 - min(profile.effect_decay * 2.0, 0.99))
+        self._cooldown = max(0, self._cooldown - 1)
+        brightness = max(self._envelope, profile.brightness_floor * 0.3)
+        return UniformScene(Colour(brightness, brightness, brightness))
+
+
+class _SplotchScene:
+    """Spatial scene: lights vary by x-position based on onset seed."""
+
+    __slots__ = ("_envelope", "_seed", "_floor", "_sens")
+
+    def __init__(self, envelope: float, seed: int, floor: float, sens: float) -> None:
+        self._envelope = envelope
+        self._seed = seed
+        self._floor = floor
+        self._sens = sens
+
+    def color_at(self, position: Position, t: float) -> Colour:  # noqa: ARG002
+        v = math.sin(position.x * 3.7 + self._seed * 1.1)
+        brightness = (self._envelope * self._sens) if v > 0 else self._floor
+        brightness = max(brightness, self._floor)
+        return Colour(brightness, brightness, brightness)
+
+
+class _SplotchesRenderer(_EffectRenderer):
+    """Random splotch of light flares on onset."""
+
+    def __init__(self) -> None:
+        self._envelope: float = 0.0
+        self._seed: int = 0
+
+    def render(self, profile: Profile, features: AudioFeatures, t: float) -> Scene:  # noqa: ARG002
+        if features.onset:
+            self._seed += 1
+            self._envelope = 1.0
+        else:
+            self._envelope *= (1.0 - min(profile.effect_decay * 0.5, 0.99))
+        return _SplotchScene(
+            self._envelope, self._seed, profile.brightness_floor, profile.sensitivity
+        )
+
+
+class _FireworkScene:
+    """Spatial scene: expanding burst wave from an origin point."""
+
+    __slots__ = ("_ox", "_onset_t", "_speed", "_floor")
+
+    def __init__(self, origin_x: float, onset_t: float, speed: float, floor: float) -> None:
+        self._ox = origin_x
+        self._onset_t = onset_t
+        self._speed = speed
+        self._floor = floor
+
+    def color_at(self, position: Position, t: float) -> Colour:
+        age = max(0.0, t - self._onset_t)
+        dist = abs(position.x - self._ox)
+        wavefront = age * self._speed * 0.8
+        proximity = max(0.0, 1.0 - abs(dist - wavefront) * 4.0)
+        envelope = math.exp(-age * 2.5)
+        brightness = max(proximity * envelope, self._floor)
+        return Colour(brightness, brightness * 0.7, brightness * 0.2)
+
+
+class _FireworksRenderer(_EffectRenderer):
+    """Expanding burst from a pseudo-random point on onset."""
+
+    def __init__(self) -> None:
+        self._origin_x: float = 0.0
+        self._onset_t: float = -999.0
+
+    def render(self, profile: Profile, features: AudioFeatures, t: float) -> Scene:
+        if features.onset:
+            self._origin_x = math.sin(t * 127.0) * 0.9
+            self._onset_t = t
+        return _FireworkScene(
+            self._origin_x, self._onset_t, profile.effect_speed, profile.brightness_floor
+        )
+
+
+class _SwirlScene:
+    """Spatial scene: rotating colour gradient."""
+
+    __slots__ = ("_speed", "_brightness")
+
+    def __init__(self, speed: float, brightness: float) -> None:
+        self._speed = speed
+        self._brightness = brightness
+
+    def color_at(self, position: Position, t: float) -> Colour:
+        hue = (position.x * 0.4 + t * self._speed * 0.05) % 1.0
+        return _hsv_to_colour(hue, 0.8, self._brightness)
+
+
+class _SwirlRenderer(_EffectRenderer):
+    """Rotating colour gradient across position."""
+
+    def render(self, profile: Profile, features: AudioFeatures, t: float) -> Scene:  # noqa: ARG002
+        brightness = max(features.full * profile.sensitivity, profile.brightness_floor)
+        return _SwirlScene(profile.effect_speed, brightness)
+
+
+class _WaveScene:
+    """Spatial scene: colour wave across positions."""
+
+    __slots__ = ("_hue", "_brightness", "_speed", "_floor")
+
+    def __init__(self, hue: float, brightness: float, speed: float, floor: float) -> None:
+        self._hue = hue
+        self._brightness = brightness
+        self._speed = speed
+        self._floor = floor
+
+    def color_at(self, position: Position, t: float) -> Colour:
+        phase = position.x * 2.0 - t * self._speed * 0.15
+        wave_factor = (math.sin(phase * math.pi) + 1.0) / 2.0
+        actual_brightness = self._floor + (self._brightness - self._floor) * wave_factor
+        return _hsv_to_colour(self._hue, 0.7, actual_brightness)
+
+
+class _WaveRenderer(_EffectRenderer):
+    """Colour wave across positions, hue drifts with spectral centroid."""
+
+    def __init__(self) -> None:
+        self._hue: float = 0.0
+
+    def render(self, profile: Profile, features: AudioFeatures, t: float) -> Scene:  # noqa: ARG002
+        self._hue = self._hue * 0.98 + features.centroid * 0.7 * 0.02
+        brightness = max(features.full * profile.sensitivity, profile.brightness_floor)
+        return _WaveScene(self._hue, brightness, profile.effect_speed, profile.brightness_floor)
+
+
+class _SolidRenderer(_EffectRenderer):
+    """Steady colour that drifts slowly with spectral centroid."""
+
+    def __init__(self) -> None:
+        self._hue: float = 0.0
+
+    def render(self, profile: Profile, features: AudioFeatures, t: float) -> Scene:  # noqa: ARG002
+        self._hue = self._hue * 0.99 + features.centroid * 0.7 * 0.01
+        brightness = max(features.full * profile.sensitivity, profile.brightness_floor)
+        return UniformScene(_hsv_to_colour(self._hue, 0.7, brightness))
+
+
+class _NoneRenderer(_EffectRenderer):
+    """Layer off — always black."""
+
+    def render(self, profile: Profile, features: AudioFeatures, t: float) -> Scene:  # noqa: ARG002
+        return UniformScene(Colour.BLACK)
+
+
+def _make_renderer(effect: str) -> _EffectRenderer:
+    """Factory: map an effect ID string to an _EffectRenderer instance."""
+    match effect:
+        case "spectrum_rgb":
+            return _SpectrumRgbRenderer()
+        case "mono_pulse":
+            return _MonoPulseRenderer()
+        case "pulses":
+            return _PulsesRenderer()
+        case "flashes":
+            return _FlashesRenderer()
+        case "splotches":
+            return _SplotchesRenderer()
+        case "fireworks":
+            return _FireworksRenderer()
+        case "swirl":
+            return _SwirlRenderer()
+        case "wave":
+            return _WaveRenderer()
+        case "solid":
+            return _SolidRenderer()
+        case "none":
+            return _NoneRenderer()
+        case _:
+            log.warning("Unknown effect %r; falling back to spectrum_rgb", effect)
+            return _SpectrumRgbRenderer()
+
+
+# ---------------------------------------------------------------------------
 # ColourModeEffect — implements the Effect protocol
 # ---------------------------------------------------------------------------
 
 
 class ColourModeEffect:
-    """The two remaining ColorMode strategies wrapped as a stateful Effect.
-
-    bass_brightness has been removed.  The two surviving modes are:
-    - SPECTRUM_RGB:  bass/mid/treble bands mapped to R/G/B channels.
-    - MONO_PULSE:    single colour; brightness follows overall loudness.
-
-    This is stateless per-frame (rendered colour depends only on the current
-    AudioFeatures), but implemented as a class so future stateful Effects
-    (onset cooldowns, decay envelopes, palette drift) follow the same pattern.
+    """Dispatches to one of the _EffectRenderer implementations based on profile.effect.
 
     Clipping: each band value is multiplied by profile.sensitivity and clipped
     to 1.0.  This is the *second* ceiling in the pipeline (the first is
@@ -694,58 +965,14 @@ class ColourModeEffect:
     steady-state music at roughly half-brightness with brief peaks at full;
     raising sensitivity above ~2.0 pushes the steady state into saturation.
     See BandNormaliser for the full picture.
-
-    Band proportions: the legacy exclusive splits (0-15 %, 15-50 %, 50-100 %)
-    are preserved here for backwards compatibility with existing profiles.
-    New effects should use the cumulative fields on AudioFeatures instead.
     """
 
     def __init__(self, profile: Profile) -> None:
         self.profile = profile
+        self._renderer = _make_renderer(profile.effect)
 
-    def render(self, features: AudioFeatures, t: float) -> Scene:  # noqa: ARG002
-        sens = self.profile.sensitivity
-        floor = self.profile.brightness_floor
-        bars = features.bars
-
-        n = len(bars)
-        bass_frac = _hz_to_frac(
-            self.profile.bass_hz,
-            self.profile.lower_cutoff_freq,
-            self.profile.higher_cutoff_freq,
-        )
-        mid_frac = _hz_to_frac(
-            self.profile.mid_hz,
-            self.profile.lower_cutoff_freq,
-            self.profile.higher_cutoff_freq,
-        )
-        bass_hi = int(bass_frac * n)
-        mid_hi = int(mid_frac * n)
-        bass = min(_band_avg(bars, 0, bass_hi) * sens, 1.0)
-        mid = min(_band_avg(bars, bass_hi, mid_hi) * sens, 1.0)
-        treble = min(_band_avg(bars, mid_hi, n) * sens, 1.0)
-        overall = min(_slice_avg(bars, 0.0, 1.0) * sens, 1.0)
-
-        mode = self.profile.color_mode
-        if mode == ColorMode.SPECTRUM_RGB:
-            r, g, b = bass, mid, treble
-        else:  # MONO_PULSE
-            brightness = max(overall, floor)
-            r = g = b = brightness
-
-        if mode != ColorMode.SPECTRUM_RGB:
-            r = max(r, floor)
-            g = max(g, floor)
-            b = max(b, floor)
-
-        if features.onset:
-            fi = self.profile.onset_flash_intensity
-            if fi > 0.0:
-                r = r + fi * (1.0 - r)
-                g = g + fi * (1.0 - g)
-                b = b + fi * (1.0 - b)
-
-        return UniformScene(Colour(r=r, g=g, b=b))
+    def render(self, features: AudioFeatures, t: float) -> Scene:
+        return self._renderer.render(self.profile, features, t)
 
 
 # ---------------------------------------------------------------------------

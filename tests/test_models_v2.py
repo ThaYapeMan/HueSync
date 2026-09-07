@@ -5,7 +5,6 @@ from pathlib import Path
 
 from huesync.models import (
     AnalysisConfig,
-    ColorMode,
     Controller,
     ControllerType,
     Coupling,
@@ -123,21 +122,21 @@ def test_analysis_config_from_dict_strips_unknown_keys():
 
 
 def test_render_config_roundtrip():
-    rc = RenderConfig(name="Vivid", color_mode=ColorMode.MONO_PULSE,
+    rc = RenderConfig(name="Vivid", effect="mono_pulse",
                       sensitivity=2.0, brightness_floor=0.1,
                       bass_hz=300, mid_hz=2500, exertion_clip=4.0)
     rc2 = RenderConfig.from_dict(rc.to_dict())
     assert rc2.id == rc.id
-    assert rc2.color_mode == ColorMode.MONO_PULSE
+    assert rc2.effect == "mono_pulse"
     assert rc2.sensitivity == 2.0
     assert rc2.exertion_clip == 4.0
 
 
 def test_render_config_bad_color_mode_falls_back():
     d = RenderConfig().to_dict()
-    d["color_mode"] = "bass_brightness"  # legacy value
+    d["color_mode"] = "bass_brightness"  # legacy value — should migrate to spectrum_rgb
     rc = RenderConfig.from_dict(d)
-    assert rc.color_mode == ColorMode.SPECTRUM_RGB
+    assert rc.effect == "spectrum_rgb"
 
 
 # ---------------------------------------------------------------------------

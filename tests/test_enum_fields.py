@@ -17,7 +17,7 @@ from typing import NamedTuple
 
 import pytest
 
-from huesync.models import COLOUR_MODES, ONSET_METHODS, ColorMode
+from huesync.models import COLOUR_MODES, EFFECT_IDS, ONSET_METHODS, ColorMode
 
 _ROOT = Path(__file__).parent.parent
 _API_PY = _ROOT / "src" / "huesync" / "api.py"
@@ -41,13 +41,6 @@ _FIELD_CHECKS: list[FieldCheck] = [
         canonical=ONSET_METHODS,
         source_file=_SYNC_ENGINE_PY,
         pattern=r'method\s*==\s*["\']([^"\']+)["\']',
-    ),
-    FieldCheck(
-        name="color_mode (API guard)",
-        canonical=COLOUR_MODES,
-        source_file=_API_PY,
-        # The API uses ColorMode("...") — the string literal is the arg
-        pattern=r'ColorMode\(\s*["\']([^"\']+)["\']\s*\)',
     ),
 ]
 
@@ -74,7 +67,7 @@ def test_no_string_literal_outside_canonical(fc: FieldCheck) -> None:
 
 
 # ---------------------------------------------------------------------------
-# colour_mode-specific: enum consistency
+# colour_mode-specific: enum consistency (legacy compat)
 # ---------------------------------------------------------------------------
 
 def test_colour_modes_matches_color_mode_enum() -> None:
@@ -87,22 +80,33 @@ def test_colour_modes_contains_expected_values() -> None:
 
 
 # ---------------------------------------------------------------------------
-# API PATCH handler: must return 422, not 500, for invalid color_mode
+# EFFECT_IDS: all known effect IDs must be present
 # ---------------------------------------------------------------------------
 
-def test_patch_handler_has_colormode_guard() -> None:
-    """The PATCH /render-configs handler must wrap ColorMode() in try/except.
+def test_effect_ids_contains_expected_effects() -> None:
+    """EFFECT_IDS must contain all documented effect identifiers."""
+    expected = {
+        "spectrum_rgb", "mono_pulse", "pulses", "flashes",
+        "splotches", "fireworks", "swirl", "wave", "solid", "none",
+    }
+    assert EFFECT_IDS == expected
 
-    Without the guard, an invalid color_mode raises ValueError → FastAPI
-    returns 500 Internal Server Error instead of 422 Unprocessable Entity.
+
+# ---------------------------------------------------------------------------
+# API PATCH handler: must return 422, not 500, for invalid effect
+# ---------------------------------------------------------------------------
+
+def test_patch_handler_has_effect_guard() -> None:
+    """The PATCH /render-configs handler must validate effect against EFFECT_IDS.
+
+    Without the guard, an unknown effect silently falls through to the
+    fallback renderer instead of returning 422 Unprocessable Entity.
     """
     source = _API_PY.read_text()
     patch_section = source[source.index("patch_render_config"):]
-    # Look for a try block around ColorMode() within the patch handler
-    # (before the next @router decorator).
     next_router = patch_section.find("@router", 1)
     handler_body = patch_section[:next_router] if next_router != -1 else patch_section
-    assert "try:" in handler_body and "ColorMode(" in handler_body, (
-        "patch_render_config must wrap ColorMode() in try/except to return 422 "
-        "instead of 500 for unknown color_mode values"
+    assert "EFFECT_IDS" in handler_body, (
+        "patch_render_config must check effect against EFFECT_IDS to return 422 "
+        "for unknown effect values"
     )

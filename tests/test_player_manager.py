@@ -13,7 +13,6 @@ import pytest
 
 from huesync.models import (
     AnalysisConfig,
-    ColorMode,
     Controller,
     ControllerType,
     Coupling,
@@ -224,7 +223,7 @@ def _make_full_storage(tmp_path: Path) -> tuple[Storage, Coupling]:
     storage.save_analysis_config(ac)
 
     rc = RenderConfig(
-        id="rc-1", name="Default", color_mode=ColorMode.SPECTRUM_RGB,
+        id="rc-1", name="Default", effect="spectrum_rgb",
         sensitivity=1.0, brightness_floor=0.15, bass_hz=250, mid_hz=2000,
         exertion_clip=3.0,
     )
@@ -258,7 +257,7 @@ def test_build_profile_from_coupling_maps_all_fields(tmp_path: Path) -> None:
     assert profile.entertainment_area_id == "ae-001"
     assert profile.entertainment_area_name == "Living Room AE"
     assert profile.light_count == 4
-    assert profile.color_mode == ColorMode.SPECTRUM_RGB
+    assert profile.effect == "spectrum_rgb"
     assert profile.sensitivity == 1.0
     assert profile.bass_hz == 250
     assert profile.onset_method == "combined"

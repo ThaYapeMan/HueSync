@@ -17,9 +17,9 @@ from pydantic import BaseModel, ConfigDict
 from . import __git_hash__, __version__, hue_bridge
 from .lms_discovery import discover_lms
 from .models import (
+    EFFECT_IDS,
     AnalysisConfig,
     BridgeConfig,
-    ColorMode,
     Controller,
     ControllerType,
     Coupling,
@@ -140,7 +140,9 @@ class AnalysisConfigPatchBody(BaseModel):
 
 class RenderConfigCreateBody(BaseModel):
     name: str = "Default Render"
-    color_mode: str = "spectrum_rgb"
+    effect: str = "spectrum_rgb"
+    effect_speed: float = 1.0
+    effect_decay: float = 0.3
     sensitivity: float = 1.0
     brightness_floor: float = 0.15
     bass_hz: int = 250
@@ -152,7 +154,9 @@ class RenderConfigCreateBody(BaseModel):
 class RenderConfigPatchBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str | None = None
-    color_mode: str | None = None
+    effect: str | None = None
+    effect_speed: float | None = None
+    effect_decay: float | None = None
     sensitivity: float | None = None
     brightness_floor: float | None = None
     bass_hz: int | None = None
@@ -211,7 +215,9 @@ class CouplingPatchBody(BaseModel):
     superflux_mu: int | None = None
     superflux_lag: int | None = None
     # RenderConfig fields (update_render)
-    color_mode: str | None = None
+    effect: str | None = None
+    effect_speed: float | None = None
+    effect_decay: float | None = None
     sensitivity: float | None = None
     brightness_floor: float | None = None
     exertion_clip: float | None = None
@@ -261,7 +267,8 @@ _C_PCM_FIELDS: frozenset[str] = frozenset({
     "bass_hz", "mid_hz",
 })
 _C_RENDER_FIELDS: frozenset[str] = frozenset({
-    "color_mode", "mix_low_threshold", "mix_high_threshold",
+    "effect", "effect_speed", "effect_decay",
+    "mix_low_threshold", "mix_high_threshold",
     "mix_ema_alpha", "sensitivity", "brightness_floor", "exertion_clip",
     "onset_flash_intensity", "entertainment_area_name", "light_count",
 })
@@ -275,7 +282,8 @@ _C_AC_INLINE: frozenset[str] = frozenset({
     "onset_method", "onset_delta", "onset_alpha", "superflux_mu", "superflux_lag",
 })
 _C_RC_INLINE: frozenset[str] = frozenset({
-    "color_mode", "sensitivity", "brightness_floor", "exertion_clip",
+    "effect", "effect_speed", "effect_decay",
+    "sensitivity", "brightness_floor", "exertion_clip",
     "onset_flash_intensity", "bass_hz", "mid_hz",
 })
 _C_LP_INLINE: frozenset[str] = frozenset({"entertainment_area_name", "light_count"})
@@ -416,7 +424,7 @@ async def get_status(request: Request):
         "latency_warning": manager.latency_warning,
         "processes": manager.process_status,
         "bridge_connected": manager.bridge_connected,
-        "color_mode": manager.active_color_mode,
+        "active_effect": manager.active_effect,
         "onset_method": manager.active_onset_method,
         "bars_stats": bars_stats,
     }
@@ -713,15 +721,15 @@ async def list_render_configs(request: Request):
 @router.post("/render-configs", status_code=201)
 async def create_render_config(request: Request, body: RenderConfigCreateBody):
     storage = _storage(request)
-    try:
-        cm = ColorMode(body.color_mode)
-    except ValueError as exc:
+    if body.effect not in EFFECT_IDS:
         raise HTTPException(
-            status_code=422, detail=f"Unknown color_mode: {body.color_mode!r}"
-        ) from exc
+            status_code=422, detail=f"Unknown effect: {body.effect!r}"
+        )
     rc = RenderConfig(
         name=body.name,
-        color_mode=cm,
+        effect=body.effect,
+        effect_speed=body.effect_speed,
+        effect_decay=body.effect_decay,
         sensitivity=body.sensitivity,
         brightness_floor=body.brightness_floor,
         bass_hz=body.bass_hz,
@@ -750,13 +758,10 @@ async def patch_render_config(rc_id: str, request: Request, body: RenderConfigPa
         raise HTTPException(status_code=404, detail="RenderConfig not found")
     updates = body.model_dump(exclude_unset=True)
     for field, value in updates.items():
-        if field == "color_mode":
-            try:
-                value = ColorMode(value)
-            except ValueError as exc:
-                raise HTTPException(
-                    status_code=422, detail=f"Unknown {field}: {value!r}"
-                ) from exc
+        if field == "effect" and value not in EFFECT_IDS:
+            raise HTTPException(
+                status_code=422, detail=f"Unknown effect: {value!r}"
+            )
         setattr(rc, field, value)
     storage.save_render_config(rc)
     # Trigger render/pcm update if the active coupling uses this RenderConfig.
@@ -932,8 +937,6 @@ async def patch_coupling(coupling_id: str, request: Request, body: CouplingPatch
             setattr(ac, field, value)
             ac_changed = True
         elif field in _C_RC_INLINE and rc:
-            if field == "color_mode":
-                value = ColorMode(value)
             setattr(rc, field, value)
             rc_changed = True
         elif field in _C_LP_INLINE and lp:
