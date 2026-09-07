@@ -63,7 +63,7 @@ function StatusGrid({ status }: { status: SocketStatus | null }) {
       </StatusRow>
 
       {status.color_mode && (
-        <StatusRow label="Colour mode">
+        <StatusRow label="Effect">
           <code className="text-xs font-mono">{status.color_mode}</code>
         </StatusRow>
       )}
