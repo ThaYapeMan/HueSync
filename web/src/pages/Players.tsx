@@ -3,6 +3,13 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
+import {
   Table,
   TableBody,
   TableCell,
@@ -20,10 +27,12 @@ import {
 import { ConfirmDialog } from '@/components/ConfirmDialog'
 import {
   type VirtualPlayer,
+  type LmsPlayer,
   getVirtualPlayers,
   createVirtualPlayer,
   updateVirtualPlayer,
   deleteVirtualPlayer,
+  listLmsPlayers,
 } from '@/lib/api'
 
 interface FormState {
@@ -31,6 +40,7 @@ interface FormState {
   lms_port: string
   player_name: string
   alsa_device: string
+  follow_player_mac: string
 }
 
 function defaultForm(player?: VirtualPlayer): FormState {
@@ -39,6 +49,7 @@ function defaultForm(player?: VirtualPlayer): FormState {
     lms_port: String(player?.lms_port ?? 9000),
     player_name: player?.player_name ?? 'HueSync',
     alsa_device: player?.alsa_device ?? '',
+    follow_player_mac: player?.follow_player_mac ?? '',
   }
 }
 
@@ -60,6 +71,9 @@ export function Players() {
   const [form, setForm] = useState<FormState>(defaultForm())
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
+  const [lmsPlayers, setLmsPlayers] = useState<LmsPlayer[]>([])
+  const [discovering, setDiscovering] = useState(false)
+  const [discoverError, setDiscoverError] = useState<string | null>(null)
 
   async function load() {
     try {
@@ -80,19 +94,41 @@ export function Players() {
   function openNew() {
     setEditingPlayer(undefined)
     setForm(defaultForm())
+    setLmsPlayers([])
     setSaveError(null)
+    setDiscoverError(null)
     setEditorOpen(true)
   }
 
   function openEdit(player: VirtualPlayer) {
     setEditingPlayer(player)
     setForm(defaultForm(player))
+    setLmsPlayers([])
     setSaveError(null)
+    setDiscoverError(null)
     setEditorOpen(true)
   }
 
   function set(key: keyof FormState, value: string) {
     setForm((f) => ({ ...f, [key]: value }))
+  }
+
+  async function discoverPlayers() {
+    if (!form.lms_host) {
+      setDiscoverError('Enter an LMS host first')
+      return
+    }
+    setDiscovering(true)
+    setDiscoverError(null)
+    try {
+      const result = await listLmsPlayers(form.lms_host)
+      setLmsPlayers(result)
+      if (result.length === 0) setDiscoverError('No players found on this LMS server')
+    } catch (e) {
+      setDiscoverError(e instanceof Error ? e.message : 'Discovery failed')
+    } finally {
+      setDiscovering(false)
+    }
   }
 
   async function handleSave() {
@@ -105,6 +141,7 @@ export function Players() {
           lms_port: parseInt(form.lms_port, 10),
           player_name: form.player_name,
           alsa_device: form.alsa_device,
+          follow_player_mac: form.follow_player_mac,
         })
       } else {
         await createVirtualPlayer({
@@ -113,6 +150,7 @@ export function Players() {
           lms_port: parseInt(form.lms_port, 10),
           player_name: form.player_name,
           alsa_device: form.alsa_device,
+          follow_player_mac: form.follow_player_mac,
         })
       }
       setEditorOpen(false)
@@ -127,6 +165,17 @@ export function Players() {
   async function handleDelete(id: string) {
     await deleteVirtualPlayer(id)
     await load()
+  }
+
+  // Build options for the Follow player dropdown. If the current follow_player_mac
+  // is not in the discovered list (e.g. discovery hasn't run yet), inject it as a
+  // bare MAC so the selection is not lost.
+  const followOptions: LmsPlayer[] = [...lmsPlayers]
+  if (
+    form.follow_player_mac &&
+    !lmsPlayers.some((p) => p.playerid === form.follow_player_mac)
+  ) {
+    followOptions.unshift({ playerid: form.follow_player_mac, name: form.follow_player_mac })
   }
 
   if (loading) {
@@ -226,6 +275,42 @@ export function Players() {
                 placeholder="hw:CARD=Dummy,DEV=0"
               />
             </FormRow>
+
+            <div className="space-y-1">
+              <Label className="text-sm">Follow player</Label>
+              <p className="text-xs text-muted-foreground">
+                HueSync mirrors track changes from this LMS player without joining its sync group.
+              </p>
+              <div className="flex gap-2">
+                <Select
+                  value={form.follow_player_mac || '__none__'}
+                  onValueChange={(v) => set('follow_player_mac', v === '__none__' ? '' : v)}
+                >
+                  <SelectTrigger className="flex-1">
+                    <SelectValue placeholder="None — track mirroring disabled" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="__none__">None — track mirroring disabled</SelectItem>
+                    {followOptions.map((p) => (
+                      <SelectItem key={p.playerid} value={p.playerid}>
+                        {p.name !== p.playerid ? `${p.name} (${p.playerid})` : p.playerid}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={discoverPlayers}
+                  disabled={discovering}
+                >
+                  {discovering ? '…' : 'Discover'}
+                </Button>
+              </div>
+              {discoverError && (
+                <p className="text-xs text-destructive">{discoverError}</p>
+              )}
+            </div>
 
             {editingPlayer && (
               <div className="space-y-1">

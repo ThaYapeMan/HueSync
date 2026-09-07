@@ -7,6 +7,7 @@ used by the HTML routes in app.py.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from dataclasses import replace
 
@@ -16,6 +17,7 @@ from pydantic import BaseModel, ConfigDict
 
 from . import __git_hash__, __version__, hue_bridge
 from .lms_discovery import discover_lms
+from .lms_status import list_lms_players
 from .models import (
     EFFECT_IDS,
     VIRTUAL_PLAYER_TYPES,
@@ -90,6 +92,7 @@ class VirtualPlayerCreateBody(BaseModel):
     player_name: str = "HueSync"
     player_mac: str = ""
     alsa_device: str = ""
+    follow_player_mac: str = ""
 
 
 class VirtualPlayerPatchBody(BaseModel):
@@ -99,6 +102,7 @@ class VirtualPlayerPatchBody(BaseModel):
     lms_port: int | None = None
     player_name: str | None = None
     alsa_device: str | None = None
+    follow_player_mac: str | None = None
 
 
 class ZoneCreateBody(BaseModel):
@@ -255,7 +259,7 @@ _C_DEACTIVATE_FIELDS: frozenset[str] = frozenset({
     # a new process (player_id) or a new Zone cannot be hot-swapped into a
     # running session.
     "player_id", "zone_id",
-    "lms_host", "lms_port", "player_name", "alsa_device",
+    "lms_host", "lms_port", "player_name", "alsa_device", "follow_player_mac",
 })
 # FK fields that do NOT require a full restart — handled via lighter live-update
 # paths in _apply_coupling_action().
@@ -399,6 +403,24 @@ async def delete_player_latency(player_mac: str, request: Request):
 async def lms_discover():
     servers = await discover_lms(timeout=3.0)
     return [{"host": s.host, "name": s.name, "port": s.json_port} for s in servers]
+
+
+@router.get("/lms/players")
+async def lms_list_players(host: str):
+    """Return all LMS players on *host* as a list of {playerid, name} objects.
+
+    Used by the Virtual Player editor to populate the 'Follow player' dropdown.
+    Raises 400 if host is empty, 502 if the LMS CLI is unreachable.
+    """
+    if not host:
+        raise HTTPException(status_code=400, detail="host query parameter is required")
+    try:
+        players = await asyncio.to_thread(list_lms_players, host)
+    except OSError as exc:
+        raise HTTPException(
+            status_code=502, detail=f"Cannot reach LMS at {host}: {exc}"
+        ) from exc
+    return players
 
 
 # ---------------------------------------------------------------------------
@@ -552,6 +574,7 @@ async def create_virtual_player(request: Request, body: VirtualPlayerCreateBody)
         player_name=body.player_name,
         player_mac=mac,
         alsa_device=body.alsa_device,
+        follow_player_mac=body.follow_player_mac,
     )
     storage.save_virtual_player(player)
     return JSONResponse(content=player.to_dict(), status_code=201)

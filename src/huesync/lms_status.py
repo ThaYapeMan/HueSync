@@ -149,6 +149,62 @@ def _parse_sync_response(text: str) -> list[str]:
     return [p for p in unquote(peers_raw).split(",") if p and p != "-"]
 
 
+def unsync_player(host: str, mac: str, port: int = DEFAULT_PORT) -> None:
+    """Remove *mac* from any LMS sync group.
+
+    Safe to call when the player is already standalone — LMS silently
+    accepts 'sync -' in that case.  Raises ValueError if *host* is empty.
+    """
+    if not host:
+        raise ValueError("LMS host is not configured")
+    command = f"{mac} sync -\n"
+    log.debug("LMS unsync: %s:%d player=%s", host, port, mac)
+    with socket.create_connection((host, port), timeout=_SOCKET_TIMEOUT_S) as sock:
+        sock.sendall(command.encode("utf-8"))
+        _recv_line(sock)  # consume echoed response
+    log.info("Removed LMS player %s from sync group (if any)", mac)
+
+
+def list_lms_players(host: str, port: int = DEFAULT_PORT) -> list[dict]:
+    """Return all LMS players as a list of dicts with 'playerid' and 'name'.
+
+    Uses 'players 0 100 tags:' — returns up to 100 players.
+    Raises ValueError if *host* is empty; raises OSError on connection failure.
+    """
+    if not host:
+        raise ValueError("LMS host is not configured")
+    log.debug("LMS list players: %s:%d", host, port)
+    with socket.create_connection((host, port), timeout=_SOCKET_TIMEOUT_S) as sock:
+        sock.sendall(b"players 0 100 tags:\n")
+        raw = _recv_line(sock).decode("utf-8", errors="replace").strip()
+    return _parse_players(raw)
+
+
+def _parse_players(text: str) -> list[dict]:
+    """Parse the LMS 'players 0 N' CLI response into a list of player dicts.
+
+    LMS URL-encodes the entire response.  Player fields are interleaved:
+    each new 'playerid' key starts a new player record.
+    """
+    players: list[dict] = []
+    current: dict | None = None
+    for token in text.split():
+        key_raw, sep, value_raw = token.replace("%3a", "%3A").partition("%3A")
+        if not sep:
+            continue
+        key = unquote(key_raw)
+        value = unquote(value_raw)
+        if key == "playerid":
+            if current is not None:
+                players.append(current)
+            current = {"playerid": value}
+        elif current is not None:
+            current[key] = value
+    if current is not None:
+        players.append(current)
+    return players
+
+
 if __name__ == "__main__":
     import sys
 

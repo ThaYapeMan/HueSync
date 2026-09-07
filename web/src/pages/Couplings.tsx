@@ -99,6 +99,7 @@ function NewPlayerDialog({ open, onClose, onCreated }: NewPlayerDialogProps) {
         lms_port: 9000,
         player_name: playerName,
         alsa_device: alsaDevice,
+        follow_player_mac: '',
       })
       onCreated(player)
     } catch (e) {

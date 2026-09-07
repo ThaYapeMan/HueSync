@@ -209,6 +209,71 @@ def test_virtual_player_has_no_name_field(client: TestClient):
     assert "name" not in resp.json()
 
 
+def test_create_virtual_player_with_follow_player_mac(client: TestClient):
+    payload = {"lms_host": "10.0.0.9", "follow_player_mac": "aa:bb:cc:dd:ee:ff"}
+    resp = client.post("/api/virtual-players", json=payload)
+    assert resp.status_code == 201
+    assert resp.json()["follow_player_mac"] == "aa:bb:cc:dd:ee:ff"
+
+
+def test_patch_virtual_player_follow_player_mac(client: TestClient):
+    create_resp = client.post("/api/virtual-players", json={"lms_host": "10.0.0.10"})
+    player_id = create_resp.json()["id"]
+
+    patch_resp = client.patch(
+        f"/api/virtual-players/{player_id}",
+        json={"follow_player_mac": "11:22:33:44:55:66"},
+    )
+    assert patch_resp.status_code == 200
+    assert patch_resp.json()["follow_player_mac"] == "11:22:33:44:55:66"
+
+    get_resp = client.get(f"/api/virtual-players/{player_id}")
+    assert get_resp.json()["follow_player_mac"] == "11:22:33:44:55:66"
+
+
+def test_patch_virtual_player_clear_follow_player_mac(client: TestClient):
+    create_resp = client.post(
+        "/api/virtual-players",
+        json={"lms_host": "10.0.0.11", "follow_player_mac": "aa:bb:cc:dd:ee:ff"},
+    )
+    player_id = create_resp.json()["id"]
+
+    patch_resp = client.patch(
+        f"/api/virtual-players/{player_id}",
+        json={"follow_player_mac": ""},
+    )
+    assert patch_resp.status_code == 200
+    assert patch_resp.json()["follow_player_mac"] == ""
+
+
+def test_lms_players_endpoint_missing_host(client: TestClient):
+    resp = client.get("/api/lms/players")
+    assert resp.status_code == 422  # missing required query param
+
+
+def test_lms_players_endpoint_empty_host(client: TestClient):
+    resp = client.get("/api/lms/players?host=")
+    assert resp.status_code == 400
+
+
+def test_lms_players_endpoint_returns_list(client: TestClient, monkeypatch):
+    from huesync import api as api_module
+
+    fake_players = [
+        {"playerid": "aa:bb:cc:dd:ee:ff", "name": "Sonos Living Room"},
+        {"playerid": "11:22:33:44:55:66", "name": "Kitchen"},
+    ]
+
+    async def mock_to_thread(fn, *args, **kwargs):
+        return fake_players
+
+    monkeypatch.setattr(api_module.asyncio, "to_thread", mock_to_thread)
+
+    resp = client.get("/api/lms/players?host=10.0.0.1")
+    assert resp.status_code == 200
+    assert resp.json() == fake_players
+
+
 # ---------------------------------------------------------------------------
 # Zones (was LightProviders)
 # ---------------------------------------------------------------------------

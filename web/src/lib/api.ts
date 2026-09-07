@@ -140,6 +140,12 @@ export interface VirtualPlayer {
   player_name: string
   player_mac: string
   alsa_device: string
+  follow_player_mac: string
+}
+
+export interface LmsPlayer {
+  playerid: string
+  name: string
 }
 
 export interface Zone {
@@ -209,6 +215,8 @@ export const createVirtualPlayer = (body: Omit<VirtualPlayer, 'id' | 'player_mac
 export const updateVirtualPlayer = (id: string, body: Partial<Omit<VirtualPlayer, 'id'>>) =>
   request<VirtualPlayer>(`/api/virtual-players/${id}`, json('PATCH', body))
 export const deleteVirtualPlayer = (id: string) => request<void>(`/api/virtual-players/${id}`, { method: 'DELETE' })
+export const listLmsPlayers = (host: string) =>
+  request<LmsPlayer[]>(`/api/lms/players?host=${encodeURIComponent(host)}`)
 
 // Zones
 export const getZones = () => request<Zone[]>('/api/zones')

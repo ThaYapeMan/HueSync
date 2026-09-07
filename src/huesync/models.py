@@ -303,6 +303,12 @@ class VirtualPlayer:
     player_name: str = "HueSync"
     player_mac: str = ""
     alsa_device: str = ""
+    # MAC address of the LMS player to follow for track-mirroring.
+    # When set, HueSync leaves the LMS sync group (preventing drift
+    # correction) and instead mirrors track changes via the listen 1
+    # event feed.  Empty string means no following — HueSync plays
+    # whatever LMS sends it directly.
+    follow_player_mac: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -313,6 +319,7 @@ class VirtualPlayer:
             "player_name": self.player_name,
             "player_mac": self.player_mac,
             "alsa_device": self.alsa_device,
+            "follow_player_mac": self.follow_player_mac,
         }
 
     @classmethod

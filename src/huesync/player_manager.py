@@ -22,7 +22,8 @@ from .hue_bridge import list_entertainment_areas
 from .hue_output import HueDriver, HueOutputConfig, get_channel_infos
 from .latency import FixedLatencyProbe, NoLatencyProbe
 from .lms_discovery import discover_lms
-from .lms_status import query_lms_status, query_lms_sync_peers
+from .lms_follower import LmsFollower
+from .lms_status import query_lms_status, unsync_player
 from .models import BridgeConfig, Controller, Coupling, Profile
 from .pcm_source import SqueezeliteShmSource
 from .storage import Storage
@@ -161,19 +162,6 @@ def _log_task_failure(task: asyncio.Task) -> None:
 _RUN_DIR = Path(tempfile.gettempdir()) / "huesync"
 
 
-class _Unset:
-    """Sentinel for "never polled yet" in _poll_sync_master.
-
-    Distinct from None (standalone player) and produces a readable repr
-    rather than <object object at 0x...> in log lines.
-    """
-    def __repr__(self) -> str:
-        return "(unset)"
-
-
-_UNSET: str | None = _Unset()  # type: ignore[assignment]
-
-
 class ActiveSession:
     def __init__(self, profile: Profile, coupling: Coupling | None = None):
         self.profile = profile
@@ -189,6 +177,9 @@ class ActiveSession:
         self.probe: LatencyProbe = NoLatencyProbe()
         self.poller_task: asyncio.Task | None = None
         self.shm_source: SqueezeliteShmSource | None = None
+        self.follower: LmsFollower | None = None
+        self.follower_task: asyncio.Task | None = None
+        self.unsync_task: asyncio.Task | None = None
 
 
 class PlayerManager:
@@ -461,6 +452,25 @@ class PlayerManager:
             session.task.add_done_callback(_log_task_failure)
             session.poller_task = asyncio.create_task(self._poll_sync_master(session))
             session.poller_task.add_done_callback(_log_task_failure)
+
+            follow_mac = player.follow_player_mac
+            if follow_mac:
+                session.follower = LmsFollower(
+                    lms_host=player.lms_host,
+                    follow_mac=follow_mac,
+                    huesync_mac=profile.player_mac,
+                )
+            else:
+                log.warning(
+                    "Coupling %r: follow_player_mac not configured — "
+                    "track mirroring disabled. Set it in the Virtual Player editor.",
+                    coupling.name,
+                )
+            session.unsync_task = asyncio.create_task(
+                self._delayed_unsync_and_follow(session, player.lms_host, profile.player_mac),
+                name="lms-unsync",
+            )
+            session.unsync_task.add_done_callback(_log_task_failure)
         except Exception:
             await self._teardown_session(session)
             raise
@@ -485,6 +495,12 @@ class PlayerManager:
             log.info("Deactivated profile %s", session.profile.name)
 
     async def _teardown_session(self, session: ActiveSession) -> None:
+        if session.unsync_task:
+            session.unsync_task.cancel()
+        if session.follower:
+            session.follower.stop()
+        if session.follower_task:
+            session.follower_task.cancel()
         if session.poller_task:
             session.poller_task.cancel()
         if session.task:
@@ -639,36 +655,26 @@ class PlayerManager:
         )
 
     async def _poll_sync_master(self, session: ActiveSession) -> None:
-        """Periodically query LMS for the sync master and update the probe.
+        """Apply the latency probe for the followed player and refresh its display name.
 
-        Runs as a background task for the lifetime of the active session.
-        The first poll happens after a short delay; subsequent polls every 15 s.
-        A failed or timed-out query is logged and skipped — it never affects
-        the running session.  The probe is only swapped when the sync master
-        MAC actually changes, so routine steady-state polls are a no-op.
-        Use refresh_probe() to force an immediate re-evaluation (e.g. after
-        the user saves a PlayerLatency config for the current sync master).
-
-        Two-stage detection:
-          1. Primary:  'status' response — includes sync_master only when the
-             player is actively playing.  Gives the definitive LMS sync master.
-          2. Fallback: 'sync ?' command — always returns configured sync peers
-             regardless of play state.  Used when the status gives no master.
+        With LMS sync-group membership removed (Option B), the reference player
+        is follow_player_mac on the VirtualPlayer — no sync-group discovery is
+        needed.  The probe is applied immediately; the display name is refreshed
+        every 60 s.  Use refresh_probe() to force an immediate re-evaluation.
         """
         profile = session.profile
-        current_master: str | None = _UNSET
-        first = True
-        poll_n = 0
 
-        # If lms_host is empty (profile saved without filling in the LMS host
-        # field), squeezelite still works via its own UDP discovery, but the
-        # poll loop needs a real host to open a TCP CLI connection.  Attempt
-        # one-shot discovery here so the poller can still function.
+        follow_mac: str | None = None
+        if session.coupling:
+            vp = self.storage.get_virtual_player(session.coupling.player_id)
+            if vp:
+                follow_mac = vp.follow_player_mac or None
+
         lms_host = profile.lms_host
         if not lms_host:
             log.warning(
                 "profile %r has no lms_host configured; "
-                "attempting UDP discovery to find LMS for sync-master polling",
+                "attempting UDP discovery for latency probe",
                 profile.name,
             )
             try:
@@ -676,87 +682,77 @@ class PlayerManager:
                 if servers:
                     lms_host = servers[0].host
                     log.info(
-                        "LMS discovered at %s (%s) — using for sync-master poll; "
-                        "set lms_host in the profile to avoid this",
+                        "LMS discovered at %s (%s) — using for latency probe; "
+                        "set lms_host in the Virtual Player to avoid this",
                         lms_host, servers[0].name,
                     )
                 else:
-                    log.warning(
-                        "LMS discovery found nothing; sync-master polling disabled "
-                        "until lms_host is configured in the profile"
-                    )
+                    log.warning("LMS discovery found nothing; latency probe disabled")
                     return
             except Exception as exc:
-                log.warning("LMS discovery failed (%s); sync-master polling disabled", exc)
+                log.warning("LMS discovery failed (%s); latency probe disabled", exc)
                 return
 
+        if not follow_mac:
+            log.warning(
+                "Coupling %r has no follow_player_mac — "
+                "no latency compensation applied. "
+                "Set it in the Virtual Player editor.",
+                profile.name,
+            )
+            self._detected_sync_master = None
+            await self._apply_probe_for_master(session, None)
+            return
+
+        self._detected_sync_master = follow_mac
+        try:
+            master_status = await asyncio.to_thread(
+                query_lms_status, lms_host, follow_mac
+            )
+            self._detected_sync_master_name = master_status.player_name
+        except Exception as exc:
+            log.debug("Could not fetch name for follow player %s: %s", follow_mac, exc)
+            self._detected_sync_master_name = None
+        await self._apply_probe_for_master(session, follow_mac)
+
         while True:
-            await asyncio.sleep(2 if first else 15)
-            first = False
-            poll_n += 1
-
-            # --- Stage 1: status query ---
+            await asyncio.sleep(60)
             try:
-                status = await asyncio.to_thread(
-                    query_lms_status, lms_host, profile.player_mac
+                master_status = await asyncio.to_thread(
+                    query_lms_status, lms_host, follow_mac
                 )
-                new_master = status.sync_master
-                log.debug(
-                    "Poll #%d player=%s player_name=%r sync_master=%r sync_slaves=%r",
-                    poll_n, profile.player_mac,
-                    status.player_name, status.sync_master, status.sync_slaves,
-                )
+                self._detected_sync_master_name = master_status.player_name
             except Exception as exc:
-                log.info("LMS status poll #%d failed for %s: %s", poll_n, profile.player_mac, exc)
-                continue
+                log.debug(
+                    "Could not refresh name for follow player %s: %s", follow_mac, exc
+                )
 
-            # --- Stage 2: sync? fallback ---
-            # LMS omits sync_master from the status response when the player is
-            # stopped or idle (the sync group persists in LMS config but is not
-            # reflected in runtime status without active playback).
-            if new_master is None:
-                try:
-                    peers = await asyncio.to_thread(
-                        query_lms_sync_peers, lms_host, profile.player_mac
-                    )
-                    log.debug("Poll #%d sync? peers=%r", poll_n, peers)
-                    if peers:
-                        # Prefer a peer that already has a PlayerLatency entry,
-                        # otherwise take the first peer (the probable Sonos master).
-                        new_master = next(
-                            (p for p in peers if self.storage.get_player_latency(p) is not None),
-                            peers[0],
-                        )
-                        log.debug(
-                            "Poll #%d sync? fallback -> master=%r", poll_n, new_master
-                        )
-                except Exception as exc:
-                    log.debug("Poll #%d sync? fallback failed for %s: %s",
-                              poll_n, profile.player_mac, exc)
+    async def _delayed_unsync_and_follow(
+        self, session: ActiveSession, lms_host: str, player_mac: str
+    ) -> None:
+        """Wait for squeezelite to register with LMS, then unsync and start the follower.
 
-            if new_master == current_master:
-                continue
+        The 5-second delay ensures LMS recognises the player before the unsync
+        command is sent.  Without it, the command silently no-ops because LMS
+        has not yet seen the player's slimproto connection.
+        """
+        if not lms_host:
+            log.warning(
+                "LMS host not configured; skipping unsync and follower start. "
+                "Set lms_host in the Virtual Player editor."
+            )
+            return
+        await asyncio.sleep(5)
+        try:
+            await asyncio.to_thread(unsync_player, lms_host, player_mac)
+            log.info("Player %s removed from LMS sync group", player_mac)
+        except Exception as exc:
+            log.warning("Could not unsync player %s: %s", player_mac, exc)
 
-            log.info("Sync master changed: %r -> %r", current_master, new_master)
-            current_master = new_master
-            self._detected_sync_master = new_master
-
-            # Fetch the sync master's display name for the status UI.
-            # Only query when there is an external master (not standalone and
-            # not HueSync itself leading the sync group).
-            if new_master and new_master != profile.player_mac:
-                try:
-                    master_status = await asyncio.to_thread(
-                        query_lms_status, lms_host, new_master
-                    )
-                    self._detected_sync_master_name = master_status.player_name
-                except Exception as exc:
-                    log.debug("Could not fetch name for sync master %s: %s", new_master, exc)
-                    self._detected_sync_master_name = None
-            else:
-                self._detected_sync_master_name = None
-
-            await self._apply_probe_for_master(session, new_master)
+        if session.follower is not None:
+            follower_task = session.follower.start()
+            follower_task.add_done_callback(_log_task_failure)
+            session.follower_task = follower_task
 
     # ALSA output device for the virtual player. This is deliberately NOT
     # "null": ALSA's null plugin discards samples the instant they arrive,
