@@ -39,9 +39,26 @@ def _make_mock_manager() -> MagicMock:
     type(manager).applied_delay_ms = PropertyMock(return_value=0)
     type(manager).bridge_connected = PropertyMock(return_value=False)
     type(manager).process_status = PropertyMock(return_value={"squeezelite": False, "cava": False})
+    # WebSocket frame properties
+    type(manager).last_colours = PropertyMock(return_value=[])
     type(manager).last_bars = PropertyMock(return_value=[])
+    type(manager).last_onset = PropertyMock(return_value=False)
+    type(manager).last_pcm_onset = PropertyMock(return_value=False)
+    type(manager).last_onset_bass = PropertyMock(return_value=False)
+    type(manager).last_onset_mid = PropertyMock(return_value=False)
+    type(manager).last_onset_treble = PropertyMock(return_value=False)
+    type(manager).last_mix = PropertyMock(return_value=0.0)
+    # WebSocket status properties
     type(manager).active_coupling_id = PropertyMock(return_value=None)
     type(manager).active_coupling_name = PropertyMock(return_value=None)
+    type(manager).detected_sync_master_name = PropertyMock(return_value=None)
+    type(manager).active_color_mode = PropertyMock(return_value=None)
+    type(manager).active_effect = PropertyMock(return_value=None)
+    type(manager).active_bass_hz = PropertyMock(return_value=None)
+    type(manager).active_mid_hz = PropertyMock(return_value=None)
+    type(manager).active_onset_method = PropertyMock(return_value=None)
+    type(manager).active_lower_cutoff_freq = PropertyMock(return_value=None)
+    type(manager).active_higher_cutoff_freq = PropertyMock(return_value=None)
     # Async methods
     manager.activate_coupling = AsyncMock()
     manager.deactivate = AsyncMock()
@@ -543,3 +560,52 @@ def test_clone_coupling_modifying_clone_does_not_affect_original(client: TestCli
     # Original's AnalysisConfig still has combined (unchanged).
     orig_ac = client._storage.get_analysis_config(coupling.analysis_config_id)
     assert orig_ac.onset_method == "combined"
+
+
+# ---------------------------------------------------------------------------
+# WebSocket /ws/preview — status frame regression guard
+# ---------------------------------------------------------------------------
+
+
+def _read_ws_status(client: TestClient, max_messages: int = 40) -> dict | None:
+    """Connect to /ws/preview and return the first 'status' type message."""
+    with client.websocket_connect("/ws/preview") as ws:
+        for _ in range(max_messages):
+            msg = ws.receive_json()
+            if msg.get("type") == "status":
+                return msg
+    return None
+
+
+def test_ws_preview_status_frame_has_color_mode_and_band_hz(client: TestClient):
+    """WebSocket /ws/preview status frame must include color_mode, bass_hz, mid_hz.
+
+    Regression guard: these fields silently disappeared twice during large renames.
+    When an active coupling uses spectrum_rgb, the frontend needs color_mode ==
+    'spectrum_rgb' to enable the R/G/B bar colouring in SpectrumBars.
+    """
+    manager = client._manager
+    type(manager).active_color_mode = PropertyMock(return_value="spectrum_rgb")
+    type(manager).active_bass_hz = PropertyMock(return_value=250)
+    type(manager).active_mid_hz = PropertyMock(return_value=2000)
+    type(manager).active_coupling_id = PropertyMock(return_value="coupling-1")
+
+    status = _read_ws_status(client)
+
+    assert status is not None, "No status message received from /ws/preview"
+    assert status.get("color_mode") == "spectrum_rgb", (
+        "color_mode missing or wrong in WebSocket status frame — "
+        "SpectrumBars will show all bars in accent colour instead of R/G/B"
+    )
+    assert status.get("bass_hz") == 250, "bass_hz missing from WebSocket status frame"
+    assert status.get("mid_hz") == 2000, "mid_hz missing from WebSocket status frame"
+
+
+def test_ws_preview_status_frame_null_when_no_session(client: TestClient):
+    """color_mode must be null when no coupling is active."""
+    status = _read_ws_status(client)
+
+    assert status is not None, "No status message received from /ws/preview"
+    assert status.get("color_mode") is None
+    assert status.get("bass_hz") is None
+    assert status.get("mid_hz") is None

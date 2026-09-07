@@ -58,6 +58,7 @@ async def on_shutdown() -> None:
 
 @app.websocket("/ws/preview")
 async def ws_preview(websocket: WebSocket):
+    player_manager = websocket.app.state.player_manager
     await websocket.accept()
     last_status_json: str | None = None
     tick = 0

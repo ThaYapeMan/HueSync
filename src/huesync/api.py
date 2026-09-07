@@ -978,8 +978,14 @@ async def patch_coupling(coupling_id: str, request: Request, body: CouplingPatch
         if coupling.zone_id
         else None
     )
+    cf_inline = storage.get_crossfader(coupling.crossfader_id) if coupling.crossfader_id else None
+    scene_inline = (
+        storage.get_scene(cf_inline.active_scene_id)
+        if cf_inline and cf_inline.active_scene_id
+        else None
+    )
 
-    player_changed = ac_changed = zone_changed = False
+    player_changed = ac_changed = zone_changed = scene_changed = False
 
     for field, value in updates.items():
         if field in _C_COUPLING_DIRECT_FIELDS | _C_FK_FIELDS:
@@ -993,6 +999,9 @@ async def patch_coupling(coupling_id: str, request: Request, body: CouplingPatch
         elif field in _C_ZONE_INLINE and zone:
             setattr(zone, field, value)
             zone_changed = True
+        elif field in _C_SCENE_INLINE and scene_inline:
+            setattr(scene_inline, field, value)
+            scene_changed = True
 
     storage.save_coupling(coupling)
     if player_changed and player:
@@ -1001,6 +1010,8 @@ async def patch_coupling(coupling_id: str, request: Request, body: CouplingPatch
         storage.save_analysis_config(ac)
     if zone_changed and zone:
         storage.save_zone(zone)
+    if scene_changed and scene_inline:
+        storage.save_scene(scene_inline)
 
     if was_active:
         changed = set(updates.keys())

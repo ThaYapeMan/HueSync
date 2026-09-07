@@ -580,11 +580,13 @@ class PlayerManager:
     def update_onset_pipeline(self, profile: Profile) -> None:
         """Switch PCM onset method live on the active session."""
         if self._active and self._active.sync_engine:
+            self._active.profile = profile
             self._active.sync_engine.update_onset_pipeline(profile)
 
     def update_render(self, profile: Profile, mellow_profile: Profile | None = None) -> None:
         """Apply render-only changes live on the active session."""
         if self._active and self._active.sync_engine:
+            self._active.profile = profile
             self._active.sync_engine.update_render(profile, mellow_profile)
 
     async def refresh_probe(self) -> None:
