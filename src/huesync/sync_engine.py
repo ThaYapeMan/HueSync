@@ -18,6 +18,7 @@ lives in hue_output.py.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 import math
 import os
@@ -34,9 +35,9 @@ from .types import (
     Analyser,
     AudioFeatures,
     Colour,
-    Effect,
     LatencyProbe,
     Output,
+    Position,
     Scene,
     UniformScene,
 )
@@ -749,6 +750,69 @@ class ColourModeEffect:
 
 
 # ---------------------------------------------------------------------------
+# LerpScene, _smoothstep, LayerMixer — two-layer crossfade
+# ---------------------------------------------------------------------------
+
+
+class LerpScene:
+    """Linearly interpolates between two Scenes per light position."""
+
+    __slots__ = ("_a", "_b", "_t")
+
+    def __init__(self, a: Scene, b: Scene, t: float) -> None:
+        self._a = a
+        self._b = b
+        self._t = t
+
+    def color_at(self, position: Position, t: float) -> Colour:
+        ca = self._a.color_at(position, t)
+        cb = self._b.color_at(position, t)
+        return ca.lerp(cb, self._t)
+
+
+def _smoothstep(x: float, lo: float, hi: float) -> float:
+    """Clamp x into [lo, hi], normalise, then apply cubic smoothstep."""
+    t = max(0.0, min(1.0, (x - lo) / max(hi - lo, 1e-9)))
+    return t * t * (3.0 - 2.0 * t)
+
+
+class LayerMixer:
+    """Crossfades a Mellow and an Active ColourModeEffect by energy.
+
+    mix = smoothstep(features.full, low_threshold, high_threshold),
+    EMA-smoothed to avoid flickering between bass hits.
+
+    mix=0.0 → pure mellow layer (profile.mellow_colour_mode).
+    mix=1.0 → pure active layer (profile.color_mode).
+    """
+
+    def __init__(self, profile: Profile) -> None:
+        mellow_profile = dataclasses.replace(profile, color_mode=profile.mellow_colour_mode)
+        self._mellow = ColourModeEffect(mellow_profile)
+        self._active = ColourModeEffect(profile)
+        self._mix: float = 0.0
+        self._ema_alpha: float = profile.mix_ema_alpha
+        self._low: float = profile.mix_low_threshold
+        self._high: float = profile.mix_high_threshold
+
+    @property
+    def mix(self) -> float:
+        """Current crossfade value: 0.0 = pure mellow, 1.0 = pure active."""
+        return self._mix
+
+    def render(self, features: AudioFeatures, t: float) -> Scene:
+        target = _smoothstep(features.full, self._low, self._high)
+        self._mix += self._ema_alpha * (target - self._mix)
+        mellow_scene = self._mellow.render(features, t)
+        active_scene = self._active.render(features, t)
+        if self._mix < 1e-6:
+            return mellow_scene
+        if self._mix > 1.0 - 1e-6:
+            return active_scene
+        return LerpScene(mellow_scene, active_scene, self._mix)
+
+
+# ---------------------------------------------------------------------------
 # SyncEngine — orchestrates Analyser + Effect + Output at 30 Hz
 # ---------------------------------------------------------------------------
 
@@ -792,10 +856,11 @@ class SyncEngine:
             onset_alpha=profile.onset_alpha,
             exertion_clip=profile.exertion_clip,
         )
-        self._effect: Effect = ColourModeEffect(profile)
+        self._effect: LayerMixer = LayerMixer(profile)
         self._probe: LatencyProbe = probe if probe is not None else NoLatencyProbe()
         self._delay_buffer: deque[Scene | None] = deque()
         self._last_onset: bool = False
+        self._last_mix: float = 0.0
         self._last_bars: list[float] = []
         self._shm_source: SqueezeliteShmSource | None = None
         self._pcm_onset: StftOnsetPipeline | None = None
@@ -850,7 +915,7 @@ class SyncEngine:
     def update_profile(self, profile: Profile) -> None:
         """Rebuild the effect with a new profile. Call after saving band/cutoff changes."""
         self.profile = profile
-        self._effect = ColourModeEffect(profile)
+        self._effect = LayerMixer(profile)
 
     def update_onset_pipeline(self, profile: Profile) -> None:
         """Switch the PCM-tap onset detection method without restarting any process.
@@ -914,17 +979,22 @@ class SyncEngine:
     def update_render(self, profile: Profile) -> None:
         """Apply render-only profile changes without restarting any process.
 
-        Updates ColourModeEffect and BandNormaliser.exertion_clip live.
+        Rebuilds LayerMixer and updates BandNormaliser.exertion_clip live.
         Safe to call while run() is active.
         """
         self.profile = profile
-        self._effect = ColourModeEffect(profile)
+        self._effect = LayerMixer(profile)
         if isinstance(self._analyser, CavaAnalyser):
             self._analyser.normaliser.update_exertion_clip(profile.exertion_clip)
 
     @property
     def last_onset(self) -> bool:
         return self._last_onset
+
+    @property
+    def last_mix(self) -> float:
+        """Current LayerMixer crossfade value (0.0 = mellow, 1.0 = active)."""
+        return self._last_mix
 
     @property
     def last_pcm_onset(self) -> bool:
@@ -1009,6 +1079,7 @@ class SyncEngine:
                 self._last_onset = features.onset
                 self._last_bars = features.bars
                 scene: Scene = self._effect.render(features, t)
+                self._last_mix = self._effect.mix
                 self._delay_buffer.append(scene)
                 self._diag_frame += 1
                 if self._diag_frame % 60 == 0:

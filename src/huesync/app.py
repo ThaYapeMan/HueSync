@@ -76,6 +76,7 @@ async def ws_preview(websocket: WebSocket):
                 "onset_bass": player_manager.last_onset_bass,
                 "onset_mid": player_manager.last_onset_mid,
                 "onset_treble": player_manager.last_onset_treble,
+                "mix": player_manager.last_mix,
             })
 
             if tick % 3 == 0:

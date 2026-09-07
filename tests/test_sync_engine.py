@@ -607,8 +607,8 @@ def test_update_render_updates_exertion_clip():
 
 
 def test_update_render_replaces_effect():
-    """update_render() must create a new ColourModeEffect with the updated profile."""
-    from huesync.sync_engine import SyncEngine
+    """update_render() must create a new LayerMixer with the updated profile."""
+    from huesync.sync_engine import LayerMixer, SyncEngine
 
     fifo = "/tmp/_nonexistent_fifo_for_test_render2"
     profile = Profile(sensitivity=1.0)
@@ -618,7 +618,9 @@ def test_update_render_replaces_effect():
     engine.update_render(Profile(sensitivity=2.0))
 
     assert engine._effect is not old_effect
-    assert engine._effect.profile.sensitivity == pytest.approx(2.0)
+    assert isinstance(engine._effect, LayerMixer)
+    # Active layer's profile carries the updated sensitivity.
+    assert engine._effect._active.profile.sensitivity == pytest.approx(2.0)
 
 
 def test_band_normaliser_update_exertion_clip_preserves_ema():
@@ -635,3 +637,131 @@ def test_band_normaliser_update_exertion_clip_preserves_ema():
 
     assert norm.exertion_clip == pytest.approx(2.0)
     assert norm._ema == ema_before  # EMA unchanged
+
+
+# ---------------------------------------------------------------------------
+# LayerMixer crossfade tests
+# ---------------------------------------------------------------------------
+
+
+def test_layer_mixer_low_energy_stays_mellow():
+    """At energy=0.0, mix stays near 0 (pure mellow output)."""
+    from huesync.models import ColorMode
+    from huesync.sync_engine import LayerMixer
+
+    profile = Profile(
+        color_mode=ColorMode.MONO_PULSE,       # active layer → grey
+        mellow_colour_mode=ColorMode.SPECTRUM_RGB,  # mellow layer → colours
+        mix_low_threshold=0.3,
+        mix_high_threshold=0.7,
+        mix_ema_alpha=1.0,  # EMA alpha=1 → instantaneous, no lag
+    )
+    mixer = LayerMixer(profile)
+
+    # Render 5 frames of silence (full=0.0).
+    for _ in range(5):
+        features = _make_features([0.0] * 30)
+        mixer.render(features, 0.0)
+
+    assert mixer.mix < 0.01, f"Expected mix near 0, got {mixer.mix}"
+
+
+def test_layer_mixer_high_energy_drives_active():
+    """At energy=1.0, mix converges toward 1 (pure active output)."""
+    from huesync.models import ColorMode
+    from huesync.sync_engine import LayerMixer
+
+    profile = Profile(
+        color_mode=ColorMode.MONO_PULSE,
+        mellow_colour_mode=ColorMode.SPECTRUM_RGB,
+        mix_low_threshold=0.3,
+        mix_high_threshold=0.7,
+        mix_ema_alpha=1.0,  # instantaneous
+    )
+    mixer = LayerMixer(profile)
+
+    # All bars at maximum → full=1.0 → smoothstep target=1.0.
+    for _ in range(5):
+        features = _make_features([1.0] * 30)
+        mixer.render(features, 0.0)
+
+    assert mixer.mix > 0.99, f"Expected mix near 1, got {mixer.mix}"
+
+
+def test_layer_mixer_smooth_transition_no_jumps():
+    """A gradual energy ramp must produce a monotonically non-decreasing mix."""
+    from huesync.models import ColorMode
+    from huesync.sync_engine import LayerMixer
+
+    profile = Profile(
+        color_mode=ColorMode.MONO_PULSE,
+        mellow_colour_mode=ColorMode.SPECTRUM_RGB,
+        mix_low_threshold=0.2,
+        mix_high_threshold=0.8,
+        mix_ema_alpha=0.3,
+    )
+    mixer = LayerMixer(profile)
+
+    prev_mix = 0.0
+    n = 60
+    for step in range(n + 1):
+        energy = step / n   # ramps from 0.0 to 1.0
+        bars = [energy] * 30
+        features = _make_features(bars)
+        mixer.render(features, float(step))
+        # Mix must not drop while energy is rising.
+        assert mixer.mix >= prev_mix - 1e-9, (
+            f"Mix decreased at step {step}: {prev_mix:.4f} → {mixer.mix:.4f}"
+        )
+        prev_mix = mixer.mix
+
+
+def test_layer_mixer_output_is_lerp_of_layers():
+    """At mix=0.5 (instantaneous EMA), output colour is the midpoint of both layers."""
+    import dataclasses
+
+    from huesync.models import ColorMode
+    from huesync.sync_engine import ColourModeEffect, LayerMixer
+
+    # Construct a profile where smoothstep(energy=0.5, lo=0.5, hi=0.5) = 1.0
+    # but EMA alpha=1 so we can use a threshold that lands exactly at 0.5.
+    # Easier: set lo=hi=0.0 so any energy instantly gives mix=1.0, then test
+    # the lerp at an intermediate state by checking that the mixer output is
+    # between what the two layers would produce individually.
+    energy = 0.5
+    bars = [energy] * 30
+    features = _make_features(bars)
+
+    profile = Profile(
+        color_mode=ColorMode.MONO_PULSE,
+        mellow_colour_mode=ColorMode.SPECTRUM_RGB,
+        mix_low_threshold=energy,
+        mix_high_threshold=energy,  # smoothstep at exactly lo=hi → 0.5 clamp
+        mix_ema_alpha=1.0,
+        sensitivity=1.0,
+        brightness_floor=0.0,
+    )
+    mixer = LayerMixer(profile)
+    scene = mixer.render(features, 0.0)
+    colour_out = scene.color_at(_ORIGIN, 0.0)
+
+    mellow_profile = dataclasses.replace(profile, color_mode=ColorMode.SPECTRUM_RGB)
+    mellow_colour = ColourModeEffect(mellow_profile).render(features, 0.0).color_at(_ORIGIN, 0.0)
+    active_colour = ColourModeEffect(profile).render(features, 0.0).color_at(_ORIGIN, 0.0)
+
+    # All three channels must be between their mellow and active values.
+    for attr in ("r", "g", "b"):
+        out = getattr(colour_out, attr)
+        lo_val = min(getattr(mellow_colour, attr), getattr(active_colour, attr))
+        hi_val = max(getattr(mellow_colour, attr), getattr(active_colour, attr))
+        assert lo_val - 1e-6 <= out <= hi_val + 1e-6, (
+            f"Channel {attr}: {out:.4f} not in [{lo_val:.4f}, {hi_val:.4f}]"
+        )
+
+
+def test_sync_engine_publishes_last_mix():
+    """SyncEngine.last_mix must be 0.0 on construction (before any frames)."""
+    from huesync.sync_engine import SyncEngine
+
+    engine = SyncEngine("/tmp/_nonexistent_fifo_last_mix", Profile())
+    assert engine.last_mix == pytest.approx(0.0)

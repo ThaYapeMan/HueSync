@@ -33,7 +33,7 @@ function ConnectionBadge({ connected, attempt }: { connected: boolean; attempt: 
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<Tab>('now-playing')
-  const { colour, onset, onset_bass, onset_mid, onset_treble, bars, status, connected, reconnectAttempt } = usePreviewSocket()
+  const { colour, onset, onset_bass, onset_mid, onset_treble, mix, bars, status, connected, reconnectAttempt } = usePreviewSocket()
 
   return (
     <div className="min-h-screen flex flex-col bg-background">
@@ -70,7 +70,7 @@ export default function App() {
         <main className="flex-1 overflow-y-auto">
           <div className={cn('mx-auto px-6 py-6', activeTab === 'now-playing' ? 'max-w-xl' : 'max-w-3xl')}>
             {activeTab === 'now-playing' && (
-              <NowPlaying colour={colour} onset={onset} onset_bass={onset_bass} onset_mid={onset_mid} onset_treble={onset_treble} bars={bars} status={status} />
+              <NowPlaying colour={colour} onset={onset} onset_bass={onset_bass} onset_mid={onset_mid} onset_treble={onset_treble} mix={mix} bars={bars} status={status} />
             )}
             {activeTab === 'latency' && (
               <Latency

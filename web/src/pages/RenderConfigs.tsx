@@ -37,6 +37,10 @@ import {
 interface FormState {
   name: string
   color_mode: string
+  mellow_colour_mode: string
+  mix_low_threshold: string
+  mix_high_threshold: string
+  mix_ema_alpha: string
   sensitivity: string
   brightness_floor: string
   bass_hz: string
@@ -49,6 +53,10 @@ function defaultForm(cfg?: RenderConfig): FormState {
   return {
     name: cfg?.name ?? '',
     color_mode: cfg?.color_mode ?? 'spectrum_rgb',
+    mellow_colour_mode: cfg?.mellow_colour_mode ?? 'spectrum_rgb',
+    mix_low_threshold: String(cfg?.mix_low_threshold ?? 0.3),
+    mix_high_threshold: String(cfg?.mix_high_threshold ?? 0.7),
+    mix_ema_alpha: String(cfg?.mix_ema_alpha ?? 0.1),
     sensitivity: String(cfg?.sensitivity ?? 1.0),
     brightness_floor: String(cfg?.brightness_floor ?? 0.15),
     bass_hz: String(cfg?.bass_hz ?? 250),
@@ -118,6 +126,10 @@ export function RenderConfigs() {
       const body = {
         name: form.name,
         color_mode: form.color_mode,
+        mellow_colour_mode: form.mellow_colour_mode,
+        mix_low_threshold: parseFloat(form.mix_low_threshold),
+        mix_high_threshold: parseFloat(form.mix_high_threshold),
+        mix_ema_alpha: parseFloat(form.mix_ema_alpha),
         sensitivity: parseFloat(form.sensitivity),
         brightness_floor: parseFloat(form.brightness_floor),
         bass_hz: parseInt(form.bass_hz, 10),
@@ -218,7 +230,7 @@ export function RenderConfigs() {
                 placeholder="My render config"
               />
             </FormRow>
-            <FormRow label="Color mode">
+            <FormRow label="Active layer — colour mode (loud passages)">
               <Select value={form.color_mode} onValueChange={(v) => set('color_mode', v)}>
                 <SelectTrigger>
                   <SelectValue />
@@ -229,6 +241,48 @@ export function RenderConfigs() {
                   ))}
                 </SelectContent>
               </Select>
+            </FormRow>
+            <FormRow label="Mellow layer — colour mode (quiet passages)">
+              <Select value={form.mellow_colour_mode} onValueChange={(v) => set('mellow_colour_mode', v)}>
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {COLOUR_MODES.map((m) => (
+                    <SelectItem key={m.value} value={m.value}>{m.label}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </FormRow>
+            <FormRow label="Mix low threshold (energy below → pure mellow)">
+              <Input
+                type="number"
+                step={0.05}
+                min={0}
+                max={1}
+                value={form.mix_low_threshold}
+                onChange={(e) => set('mix_low_threshold', e.target.value)}
+              />
+            </FormRow>
+            <FormRow label="Mix high threshold (energy above → pure active)">
+              <Input
+                type="number"
+                step={0.05}
+                min={0}
+                max={1}
+                value={form.mix_high_threshold}
+                onChange={(e) => set('mix_high_threshold', e.target.value)}
+              />
+            </FormRow>
+            <FormRow label="Mix EMA alpha (crossfade speed, 0.01–0.5)">
+              <Input
+                type="number"
+                step={0.01}
+                min={0.01}
+                max={0.5}
+                value={form.mix_ema_alpha}
+                onChange={(e) => set('mix_ema_alpha', e.target.value)}
+              />
             </FormRow>
             <FormRow label="Sensitivity">
               <Input

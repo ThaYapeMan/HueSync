@@ -133,6 +133,11 @@ class Profile:
 
     # Colour mapping
     color_mode: ColorMode = ColorMode.SPECTRUM_RGB
+    # Mellow layer mode (quiet passages).  See RenderConfig for the full mixer spec.
+    mellow_colour_mode: ColorMode = ColorMode.SPECTRUM_RGB
+    mix_low_threshold: float = 0.3
+    mix_high_threshold: float = 0.7
+    mix_ema_alpha: float = 0.1
     sensitivity: float = 1.0  # multiplier applied to bar values before mapping
     brightness_floor: float = 0.15  # minimum brightness so lights never go fully dark
     bars: int = 30  # number of cava bars (more = finer frequency detail)
@@ -184,6 +189,7 @@ class Profile:
     def to_dict(self) -> dict:
         d = dict(self.__dict__)
         d["color_mode"] = self.color_mode.value
+        d["mellow_colour_mode"] = self.mellow_colour_mode.value
         return d
 
     @classmethod
@@ -191,15 +197,17 @@ class Profile:
         d = dict(d)
 
         # Migrate removed color modes to a safe default.
-        if "color_mode" in d:
-            try:
-                d["color_mode"] = ColorMode(d["color_mode"])
-            except ValueError:
-                log.warning(
-                    "Unsupported color_mode %r in saved profile; falling back to spectrum_rgb",
-                    d["color_mode"],
-                )
-                d["color_mode"] = ColorMode.SPECTRUM_RGB
+        for field_name in ("color_mode", "mellow_colour_mode"):
+            if field_name in d:
+                try:
+                    d[field_name] = ColorMode(d[field_name])
+                except ValueError:
+                    log.warning(
+                        "Unsupported %s %r in saved profile; falling back to spectrum_rgb",
+                        field_name,
+                        d[field_name],
+                    )
+                    d[field_name] = ColorMode.SPECTRUM_RGB
 
         # Strip keys that are not current Profile fields so that loading a
         # config written by a newer version of HueSync never causes a
@@ -372,7 +380,17 @@ class RenderConfig:
 
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     name: str = "Default Render"
+    # Active layer: drives ColourModeEffect during loud/energetic passages.
     color_mode: ColorMode = ColorMode.SPECTRUM_RGB
+    # Mellow layer: drives ColourModeEffect during quiet passages.
+    # When equal to color_mode the LayerMixer is a no-op (pure blend of identical outputs).
+    mellow_colour_mode: ColorMode = ColorMode.SPECTRUM_RGB
+    # LayerMixer crossfade thresholds.  mix = smoothstep(energy, lo, hi).
+    mix_low_threshold: float = 0.3   # energy below this → pure mellow (mix=0)
+    mix_high_threshold: float = 0.7  # energy above this → pure active (mix=1)
+    # EMA smoothing on the mix value (α per frame at 30 Hz).
+    # 0.1 → ~10-frame lag ≈ 330 ms; keeps transitions smooth without lagging music.
+    mix_ema_alpha: float = 0.1
     sensitivity: float = 1.0
     brightness_floor: float = 0.15
     bass_hz: int = 250
@@ -385,6 +403,10 @@ class RenderConfig:
             "id": self.id,
             "name": self.name,
             "color_mode": self.color_mode.value,
+            "mellow_colour_mode": self.mellow_colour_mode.value,
+            "mix_low_threshold": self.mix_low_threshold,
+            "mix_high_threshold": self.mix_high_threshold,
+            "mix_ema_alpha": self.mix_ema_alpha,
             "sensitivity": self.sensitivity,
             "brightness_floor": self.brightness_floor,
             "bass_hz": self.bass_hz,
@@ -396,15 +418,17 @@ class RenderConfig:
     @classmethod
     def from_dict(cls, d: dict) -> RenderConfig:
         d = dict(d)
-        if "color_mode" in d:
-            try:
-                d["color_mode"] = ColorMode(d["color_mode"])
-            except ValueError:
-                log.warning(
-                    "Unsupported color_mode %r in saved RenderConfig; falling back to spectrum_rgb",
-                    d["color_mode"],
-                )
-                d["color_mode"] = ColorMode.SPECTRUM_RGB
+        for field_name in ("color_mode", "mellow_colour_mode"):
+            if field_name in d:
+                try:
+                    d[field_name] = ColorMode(d[field_name])
+                except ValueError:
+                    log.warning(
+                        "Unsupported %s %r in saved RenderConfig; falling back to spectrum_rgb",
+                        field_name,
+                        d[field_name],
+                    )
+                    d[field_name] = ColorMode.SPECTRUM_RGB
         return cls(**{k: v for k, v in d.items() if k in _RENDER_CONFIG_FIELDS})
 
 

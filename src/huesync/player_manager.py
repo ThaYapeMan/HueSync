@@ -70,6 +70,10 @@ def _build_engine_profile(coupling: Coupling, storage: Storage) -> Profile | Non
         entertainment_area_name=lp.entertainment_area_name,
         light_count=lp.light_count,
         color_mode=rc.color_mode,
+        mellow_colour_mode=rc.mellow_colour_mode,
+        mix_low_threshold=rc.mix_low_threshold,
+        mix_high_threshold=rc.mix_high_threshold,
+        mix_ema_alpha=rc.mix_ema_alpha,
         sensitivity=rc.sensitivity,
         brightness_floor=rc.brightness_floor,
         bass_hz=rc.bass_hz,
@@ -220,6 +224,13 @@ class PlayerManager:
         if self._active and self._active.sync_engine:
             return self._active.sync_engine.last_bars
         return []
+
+    @property
+    def last_mix(self) -> float:
+        """Current LayerMixer crossfade value (0.0 = mellow, 1.0 = active)."""
+        if self._active and self._active.sync_engine:
+            return self._active.sync_engine.last_mix
+        return 0.0
 
     @property
     def active_coupling_name(self) -> str | None:

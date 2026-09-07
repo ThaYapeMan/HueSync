@@ -227,9 +227,14 @@ function CouplingSelector({
   )
 }
 
-type Props = Pick<PreviewState, 'colour' | 'onset' | 'onset_bass' | 'onset_mid' | 'onset_treble' | 'bars' | 'status'>
+type Props = Pick<PreviewState, 'colour' | 'onset' | 'bars' | 'status'> & {
+  onset_bass?: boolean
+  onset_mid?: boolean
+  onset_treble?: boolean
+  mix?: number
+}
 
-export function NowPlaying({ colour, onset, onset_bass, onset_mid, onset_treble, bars, status }: Props) {
+export function NowPlaying({ colour, onset, onset_bass = false, onset_mid = false, onset_treble = false, mix = 0, bars, status }: Props) {
   const couplingId = status?.active_coupling_id ?? null
 
   const initializedForRef = useRef<string | null>(null)
@@ -379,6 +384,23 @@ export function NowPlaying({ colour, onset, onset_bass, onset_mid, onset_treble,
           <p className="text-xs text-muted-foreground mt-2">
             Colour of the first light channel. White outline&nbsp;= onset detected.
           </p>
+          <div className="mt-3">
+            <div className="flex items-center justify-between mb-1">
+              <span className="text-xs text-muted-foreground">Layer mix</span>
+              <span className="text-xs font-mono text-muted-foreground">{Math.round(mix * 100)}%</span>
+            </div>
+            <div className="relative h-2 w-full overflow-hidden rounded-full bg-secondary">
+              <div
+                className="h-full bg-primary transition-none"
+                style={{ width: `${mix * 100}%` }}
+                title={`Active layer: ${Math.round(mix * 100)}% (Mellow: ${Math.round((1 - mix) * 100)}%)`}
+              />
+            </div>
+            <div className="flex justify-between mt-0.5">
+              <span className="text-[10px] text-muted-foreground">Mellow</span>
+              <span className="text-[10px] text-muted-foreground">Active</span>
+            </div>
+          </div>
         </CardContent>
       </Card>
 

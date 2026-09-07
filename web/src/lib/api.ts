@@ -146,6 +146,10 @@ export interface RenderConfig {
   id: string
   name: string
   color_mode: string
+  mellow_colour_mode: string
+  mix_low_threshold: number
+  mix_high_threshold: number
+  mix_ema_alpha: number
   sensitivity: number
   brightness_floor: number
   bass_hz: number

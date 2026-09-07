@@ -351,6 +351,7 @@ interface NewRenderConfigDialogProps {
 function NewRenderConfigDialog({ open, onClose, onCreated }: NewRenderConfigDialogProps) {
   const [name, setName] = useState('')
   const [colorMode, setColorMode] = useState('spectrum_rgb')
+  const [mellowMode, setMellowMode] = useState('spectrum_rgb')
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -358,6 +359,7 @@ function NewRenderConfigDialog({ open, onClose, onCreated }: NewRenderConfigDial
     if (open) {
       setName('')
       setColorMode('spectrum_rgb')
+      setMellowMode('spectrum_rgb')
       setError(null)
     }
   }, [open])
@@ -369,6 +371,10 @@ function NewRenderConfigDialog({ open, onClose, onCreated }: NewRenderConfigDial
       const cfg = await createRenderConfig({
         name,
         color_mode: colorMode,
+        mellow_colour_mode: mellowMode,
+        mix_low_threshold: 0.3,
+        mix_high_threshold: 0.7,
+        mix_ema_alpha: 0.1,
         sensitivity: 1.0,
         brightness_floor: 0.15,
         bass_hz: 250,
@@ -397,8 +403,21 @@ function NewRenderConfigDialog({ open, onClose, onCreated }: NewRenderConfigDial
             <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="My render config" />
           </div>
           <div className="space-y-1">
-            <Label className="text-sm">Color mode</Label>
+            <Label className="text-sm">Active layer (loud passages)</Label>
             <Select value={colorMode} onValueChange={setColorMode}>
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {COLOUR_MODES.map((m) => (
+                  <SelectItem key={m.value} value={m.value}>{m.label}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="space-y-1">
+            <Label className="text-sm">Mellow layer (quiet passages)</Label>
+            <Select value={mellowMode} onValueChange={setMellowMode}>
               <SelectTrigger>
                 <SelectValue />
               </SelectTrigger>
