@@ -4,6 +4,7 @@ export interface SocketStatus {
   version: string | null
   active_coupling_id: string | null
   active_coupling_name: string | null
+  active_zone_id: string | null
   sync_master: string | null
   sync_master_name: string | null
   applied_delay_ms: number
@@ -21,6 +22,7 @@ export interface SocketStatus {
 
 export interface PreviewState {
   colour: { r: number; g: number; b: number }
+  channel_colours: Array<{ r: number; g: number; b: number }>
   onset: boolean
   onset_bass: boolean
   onset_mid: boolean
@@ -34,6 +36,7 @@ export interface PreviewState {
 
 const INITIAL_STATE: PreviewState = {
   colour: { r: 0, g: 0, b: 0 },
+  channel_colours: [],
   onset: false,
   onset_bass: false,
   onset_mid: false,
@@ -88,6 +91,12 @@ export function usePreviewSocket(): PreviewState {
           const c = msg.colour as { r: number; g: number; b: number }
           // Values arrive as 16-bit (0–65535); normalise to 0–1 for CSS.
           const colour = { r: c.r / 65535, g: c.g / 65535, b: c.b / 65535 }
+          const raw_channels = (msg.channel_colours as Array<{ r: number; g: number; b: number }>) ?? []
+          const channel_colours = raw_channels.map((ch) => ({
+            r: ch.r / 65535,
+            g: ch.g / 65535,
+            b: ch.b / 65535,
+          }))
           const onset = msg.onset as boolean
           const onset_bass = (msg.onset_bass as boolean) ?? false
           const onset_mid = (msg.onset_mid as boolean) ?? false
@@ -97,6 +106,7 @@ export function usePreviewSocket(): PreviewState {
           setState((s) => ({
             ...s,
             colour,
+            channel_colours,
             onset: onset || s.onset,
             onset_bass: onset_bass || s.onset_bass,
             onset_mid: onset_mid || s.onset_mid,

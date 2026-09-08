@@ -19,7 +19,7 @@ import time
 from pathlib import Path
 
 from .hue_bridge import list_entertainment_areas
-from .hue_output import HueDriver, HueOutputConfig, get_channel_infos
+from .hue_output import ChannelInfo, HueDriver, HueOutputConfig, get_channel_infos
 from .latency import FixedLatencyProbe, NoLatencyProbe
 from .lms_discovery import discover_lms
 from .lms_follower import LmsFollower
@@ -212,6 +212,18 @@ class PlayerManager:
         if self._active and self._active.coupling:
             return self._active.coupling.id
         return None
+
+    @property
+    def active_zone_id(self) -> str | None:
+        if self._active and self._active.coupling:
+            return self._active.coupling.zone_id
+        return None
+
+    @property
+    def last_channel_infos(self) -> list[ChannelInfo]:
+        if self._active and self._active.hue_driver:
+            return self._active.hue_driver.channels
+        return []
 
     @property
     def last_colours(self) -> list[Colour]:

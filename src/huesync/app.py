@@ -71,9 +71,15 @@ async def ws_preview(websocket: WebSocket):
             else:
                 r = g = b = 0
 
+            channel_colours = [
+                {"r": r16, "g": g16, "b": b16}
+                for c in player_manager.last_colours
+                for r16, g16, b16 in (c.to_16bit(),)
+            ]
             await websocket.send_json({
                 "type": "frame",
                 "colour": {"r": r, "g": g, "b": b},
+                "channel_colours": channel_colours,
                 "onset": onset,
                 "pcm_onset": player_manager.last_pcm_onset,
                 "onset_bass": player_manager.last_onset_bass,
@@ -93,6 +99,7 @@ async def ws_preview(websocket: WebSocket):
                 "version": f"{__version__}+{__git_hash__}",
                 "active_coupling_id": player_manager.active_coupling_id,
                 "active_coupling_name": player_manager.active_coupling_name,
+                "active_zone_id": player_manager.active_zone_id,
                 "sync_master": player_manager.detected_sync_master,
                 "sync_master_name": player_manager.detected_sync_master_name,
                 "applied_delay_ms": player_manager.applied_delay_ms,

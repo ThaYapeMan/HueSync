@@ -16,6 +16,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 
 from . import __git_hash__, __version__, hue_bridge
+from .hue_output import get_channel_infos
 from .lms_discovery import discover_lms
 from .lms_status import list_lms_players
 from .models import (
@@ -678,6 +679,34 @@ async def patch_zone(zone_id: str, request: Request, body: ZonePatchBody):
 @router.delete("/zones/{zone_id}", status_code=204)
 async def delete_zone(zone_id: str, request: Request):
     _storage(request).delete_zone(zone_id)
+
+
+@router.get("/zones/{zone_id}/channels")
+async def get_zone_channels(zone_id: str, request: Request):
+    """Return channel IDs and normalised (x, y, z) positions for a Zone.
+
+    Fetches live from the Hue Bridge; no active session required.
+    Positions are in the range -1.0…+1.0 per axis as reported by the bridge.
+    """
+    storage = _storage(request)
+    zone = storage.get_zone(zone_id)
+    if zone is None:
+        raise HTTPException(status_code=404, detail="Zone not found")
+    controller = storage.get_controller(zone.controller_id)
+    if controller is None:
+        raise HTTPException(status_code=404, detail="Controller not found")
+    bridge = BridgeConfig(
+        id=controller.id,
+        name=controller.name,
+        host=controller.host,
+        app_key=controller.app_key,
+        client_key=controller.client_key,
+    )
+    channels = await get_channel_infos(bridge, zone.entertainment_area_id)
+    return [
+        {"channel_id": ch.channel_id, "x": ch.position.x, "y": ch.position.y, "z": ch.position.z}
+        for ch in channels
+    ]
 
 
 # ---------------------------------------------------------------------------

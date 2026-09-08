@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { ColourSwatch } from '@/components/ColourSwatch'
+import { FloorplanPreview } from '@/components/FloorplanPreview'
 import { SpectrumBars } from '@/components/SpectrumBars'
 import { SliderField } from '@/components/SliderField'
 import { Badge } from '@/components/ui/badge'
@@ -8,10 +9,12 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Separator } from '@/components/ui/separator'
 import type { PreviewState, SocketStatus } from '@/hooks/usePreviewSocket'
 import {
+  type ChannelPosition,
   type Coupling,
   activateCoupling,
   deactivateCoupling,
   getCouplings,
+  getZoneChannels,
   restartCouplingCava,
 } from '@/lib/api'
 
@@ -233,17 +236,28 @@ function CouplingSelector({
   )
 }
 
-type Props = Pick<PreviewState, 'colour' | 'onset' | 'bars' | 'status'> & {
+type Props = Pick<PreviewState, 'colour' | 'channel_colours' | 'onset' | 'bars' | 'status'> & {
   onset_bass?: boolean
   onset_mid?: boolean
   onset_treble?: boolean
   mix?: number
 }
 
-export function NowPlaying({ colour, onset, onset_bass = false, onset_mid = false, onset_treble = false, mix = 0, bars, status }: Props) {
+export function NowPlaying({ colour, channel_colours, onset, onset_bass = false, onset_mid = false, onset_treble = false, mix = 0, bars, status }: Props) {
   const couplingId = status?.active_coupling_id ?? null
+  const zoneId = status?.active_zone_id ?? null
 
   const initializedForRef = useRef<string | null>(null)
+  const [channels, setChannels] = useState<ChannelPosition[]>([])
+
+  // Fetch channel positions whenever the active zone changes.
+  useEffect(() => {
+    if (!zoneId) {
+      setChannels([])
+      return
+    }
+    getZoneChannels(zoneId).then(setChannels).catch(() => setChannels([]))
+  }, [zoneId])
 
   const [lowSlider, setLowSlider] = useState<number>(hzToSlider(50))
   const [highSlider, setHighSlider] = useState<number>(hzToSlider(12000))
@@ -386,10 +400,16 @@ export function NowPlaying({ colour, onset, onset_bass = false, onset_mid = fals
           </CardTitle>
         </CardHeader>
         <CardContent>
-          <ColourSwatch r={colour.r} g={colour.g} b={colour.b} onset={onset} />
-          <p className="text-xs text-muted-foreground mt-2">
-            Colour of the first light channel. White outline&nbsp;= onset detected.
-          </p>
+          {channels.length > 0 ? (
+            <FloorplanPreview channels={channels} colours={channel_colours} onset={onset} />
+          ) : (
+            <>
+              <ColourSwatch r={colour.r} g={colour.g} b={colour.b} onset={onset} />
+              <p className="text-xs text-muted-foreground mt-2">
+                Colour of the first light channel. White outline&nbsp;= onset detected.
+              </p>
+            </>
+          )}
           <div className="mt-3">
             <div className="flex items-center justify-between mb-1">
               <span className="text-xs text-muted-foreground">Layer mix</span>

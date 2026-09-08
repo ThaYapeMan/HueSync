@@ -120,6 +120,10 @@ class HueDriver:
         self._session: EntertainmentSession | None = None
         self.last_colours: list[Colour] = []
 
+    @property
+    def channels(self) -> list[ChannelInfo]:
+        return self._channels
+
     async def start(self) -> None:
         """Open the DTLS Entertainment stream for this area."""
         b = self._config.bridge

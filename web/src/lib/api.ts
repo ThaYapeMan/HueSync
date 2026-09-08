@@ -157,6 +157,13 @@ export interface Zone {
   light_count: number
 }
 
+export interface ChannelPosition {
+  channel_id: number
+  x: number
+  y: number
+  z: number
+}
+
 export interface Analyser {
   id: string
   name: string
@@ -227,6 +234,8 @@ export const updateZone = (id: string, body: Partial<Omit<Zone, 'id'>>) =>
   request<Zone>(`/api/zones/${id}`, json('PATCH', body))
 export const deleteZone = (id: string) =>
   request<void>(`/api/zones/${id}`, { method: 'DELETE' })
+export const getZoneChannels = (id: string) =>
+  request<ChannelPosition[]>(`/api/zones/${id}/channels`)
 
 // Analysers
 export const getAnalysers = () => request<Analyser[]>('/api/analysers')
