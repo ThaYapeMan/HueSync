@@ -37,26 +37,31 @@ function hslToRgb(h: number, s: number, l: number): [number, number, number] {
   return [hue(p, q, h + 1 / 3), hue(p, q, h), hue(p, q, h - 1 / 3)]
 }
 
-// sRGB gamma (v^1/2.2) matches the perceptual brightness of Hue lights.
-function gamma255(v: number): number {
-  return Math.round(Math.pow(Math.max(v, 0), 1 / 2.2) * 255)
+// sRGB gamma: maps linear light (0–1) to perceptual (0–1).
+function gammaEncode(v: number): number {
+  return Math.pow(Math.max(v, 0), 1 / 2.2)
 }
 
 // Convert linear RGB (0–1) to display-ready [r8, g8, b8]:
-//  1. Boost saturation to MIN_SATURATION in HSL space (only for chromatic signal).
-//  2. Apply sRGB gamma.
+//  1. Gamma-encode to perceptual space first.
+//  2. Boost saturation to MIN_SATURATION in HSL space (only for chromatic signal).
+// Gamma before HSL: the saturation boost operates on display-space lightness
+// rather than being partially undone by the subsequent gamma step.
 export function toDisplayRgb(
   r: number,
   g: number,
   b: number,
 ): [number, number, number] {
-  const spread = Math.max(r, g, b) - Math.min(r, g, b)
-  let [h, s, l] = rgbToHsl(r, g, b)
+  const rp = gammaEncode(r)
+  const gp = gammaEncode(g)
+  const bp = gammaEncode(b)
+  const spread = Math.max(rp, gp, bp) - Math.min(rp, gp, bp)
+  let [h, s, l] = rgbToHsl(rp, gp, bp)
   if (spread > ACHROMATIC_THRESHOLD) {
     s = Math.max(s, MIN_SATURATION)
   }
   const [br, bg, bb] = hslToRgb(h, s, l)
-  return [gamma255(br), gamma255(bg), gamma255(bb)]
+  return [Math.round(br * 255), Math.round(bg * 255), Math.round(bb * 255)]
 }
 
 export function toCssRgb(r: number, g: number, b: number): string {

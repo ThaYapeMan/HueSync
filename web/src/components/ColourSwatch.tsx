@@ -13,7 +13,7 @@ export function ColourSwatch({ r, g, b, onset }: Props) {
   return (
     <div
       className={cn(
-        'w-full h-20 rounded-lg border border-border',
+        'w-full flex-1 min-h-[5rem] rounded-lg border border-border',
         'transition-[background-color] duration-75',
         onset && 'outline outline-2 outline-white'
       )}

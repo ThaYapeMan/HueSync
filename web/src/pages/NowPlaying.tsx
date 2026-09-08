@@ -411,8 +411,8 @@ export function NowPlaying({ colour, channel_colours, onset, onset_bass = false,
           </CardTitle>
         </CardHeader>
         <CardContent>
-          <div className="flex justify-center gap-6 items-start">
-            <div className="w-96 shrink-0">
+          <div className="flex justify-center gap-6 items-stretch">
+            <div className="w-96 shrink-0 flex flex-col">
               <ColourSwatch r={colour.r} g={colour.g} b={colour.b} onset={onset} />
               <p className="text-xs text-muted-foreground mt-2">
                 First channel colour. White outline&nbsp;= onset detected.
