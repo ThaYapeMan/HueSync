@@ -789,6 +789,12 @@ class PcmAudioPipeline:
         while not self._stop.is_set():
             samples = self._source.read_new()
             if len(samples) == 0:
+                # When the source goes inactive (AirPlay disconnected / LMS
+                # paused), clear stale features so the engine sees None and
+                # the lights go dark instead of showing the last music frame.
+                if not self._source.running:
+                    with self._lock:
+                        self._latest = None
                 self._stop.wait(self._POLL_S)
                 continue
 
@@ -829,6 +835,16 @@ class PcmAudioPipeline:
                     onset_strength = max(b_str, m_str, t_str)
                 else:
                     onset, onset_strength = onset_result
+
+                # Mirror CavaPipeline's gate behaviour: the onset detector
+                # runs on raw STFT magnitudes (bypassing the bar gate), so
+                # its flux variance can collapse to ~0 during silence and
+                # then amplify the next noise spike into a false onset.
+                # When the bar gate fired (total == 0), suppress onset so
+                # silence never produces a flash.
+                if total < 1e-9:
+                    onset = onset_bass = onset_mid = onset_treble = False
+                    onset_strength = onset_bass_str = onset_mid_str = onset_treble_str = 0.0
 
                 features = AudioFeatures(
                     bars=bars,
