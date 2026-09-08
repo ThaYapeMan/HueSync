@@ -21,6 +21,7 @@ from huesync.models import (
     Profile,
     Scene,
     VirtualPlayer,
+    VirtualPlayerType,
     Zone,
 )
 from huesync.player_manager import ActiveSession, PlayerManager, _build_engine_profile
@@ -553,3 +554,172 @@ def test_update_onset_pipeline_propagates_profile(tmp_path: Path) -> None:
         "active_bass_hz still reads the old value — profile assignment missing"
     )
     assert manager.active_mid_hz == 5000
+
+
+# ---------------------------------------------------------------------------
+# AirPlay activation branch
+# ---------------------------------------------------------------------------
+
+
+def _make_airplay_storage(tmp_path: Path) -> tuple[Storage, Coupling]:
+    """Storage with an AirPlay VirtualPlayer linked through a full coupling."""
+    storage = Storage(tmp_path / "config.json")
+
+    controller = Controller(
+        id="ctrl-ap", name="Hue Bridge", type=ControllerType.HUE,
+        host="192.168.1.50", app_key="app-key", client_key="client-key",
+    )
+    storage.save_controller(controller)
+
+    player = VirtualPlayer(
+        id="player-ap", type=VirtualPlayerType.AIRPLAY,
+        player_name="HueSync-AP", player_mac="aa:bb:cc:dd:ee:01",
+    )
+    storage.save_virtual_player(player)
+
+    zone = Zone(
+        id="zone-ap", name="Living AE", controller_id="ctrl-ap",
+        entertainment_area_id="ae-ap", entertainment_area_name="AP Room AE",
+        light_count=2,
+    )
+    storage.save_zone(zone)
+
+    ac = Analyser(
+        id="ac-ap", name="Default", onset_method="combined", onset_delta=0.1,
+        onset_alpha=0.9, superflux_mu=3, superflux_lag=2, bars=30,
+        lower_cutoff_freq=50, higher_cutoff_freq=12000,
+    )
+    storage.save_analyser(ac)
+
+    scene = Scene(id="scene-ap", name="Default", effect="spectrum_rgb")
+    storage.save_scene(scene)
+
+    crossfader = Crossfader(id="cf-ap", name="Default CF", active_scene_id="scene-ap")
+    storage.save_crossfader(crossfader)
+
+    coupling = Coupling(
+        id="coupling-ap", name="AirPlay Room",
+        player_id="player-ap", analyser_id="ac-ap",
+        zone_id="zone-ap", crossfader_id="cf-ap", enabled=True,
+    )
+    storage.save_coupling(coupling)
+
+    return storage, coupling
+
+
+def test_airplay_activation_skips_squeezelite(tmp_path: Path) -> None:
+    """_activate_airplay must not spawn squeezelite; session.squeezelite stays None."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    storage, coupling = _make_airplay_storage(tmp_path)
+    manager = PlayerManager(storage)
+
+    fake_area = MagicMock()
+    fake_area.id = "ae-ap"
+    fake_area.name = "AP Room AE"
+
+    _pm = "huesync.player_manager"
+    with (
+        patch(f"{_pm}.list_entertainment_areas", new=AsyncMock(return_value=[fake_area])),
+        patch(f"{_pm}.get_channel_infos", new=AsyncMock(return_value=[])),
+        patch(f"{_pm}.AirPlayPipeSource") as mock_src_cls,
+        patch(f"{_pm}.PcmAudioPipeline") as mock_analyser_cls,
+        patch(f"{_pm}.SyncEngine") as mock_engine_cls,
+        patch(f"{_pm}.HueDriver") as mock_driver_cls,
+    ):
+        mock_src = MagicMock()
+        mock_src_cls.return_value = mock_src
+
+        mock_analyser = MagicMock()
+        mock_analyser_cls.return_value = mock_analyser
+
+        mock_engine = MagicMock()
+        mock_engine.run = AsyncMock()
+        mock_engine_cls.return_value = mock_engine
+
+        mock_driver = MagicMock()
+        mock_driver.start = AsyncMock()
+        mock_driver_cls.return_value = mock_driver
+
+        asyncio.run(manager.activate_coupling(coupling))
+
+    assert manager._active is not None
+    assert manager._active.squeezelite is None, (
+        "_activate_airplay must not spawn squeezelite"
+    )
+    assert manager._active.shm_source is mock_src, (
+        "_activate_airplay must assign AirPlayPipeSource to session.shm_source"
+    )
+    mock_src.open.assert_called_once()
+
+
+def test_airplay_activation_player_type_recorded(tmp_path: Path) -> None:
+    """active_player_type must return 'AirPlay' after activating an AirPlay coupling."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    storage, coupling = _make_airplay_storage(tmp_path)
+    manager = PlayerManager(storage)
+
+    fake_area = MagicMock()
+    fake_area.id = "ae-ap"
+    fake_area.name = "AP Room AE"
+
+    _pm = "huesync.player_manager"
+    with (
+        patch(f"{_pm}.list_entertainment_areas", new=AsyncMock(return_value=[fake_area])),
+        patch(f"{_pm}.get_channel_infos", new=AsyncMock(return_value=[])),
+        patch(f"{_pm}.AirPlayPipeSource", return_value=MagicMock()),
+        patch(f"{_pm}.PcmAudioPipeline", return_value=MagicMock()),
+        patch(f"{_pm}.SyncEngine") as mock_engine_cls,
+        patch(f"{_pm}.HueDriver") as mock_driver_cls,
+    ):
+        mock_engine = MagicMock()
+        mock_engine.run = AsyncMock()
+        mock_engine_cls.return_value = mock_engine
+
+        mock_driver = MagicMock()
+        mock_driver.start = AsyncMock()
+        mock_driver_cls.return_value = mock_driver
+
+        asyncio.run(manager.activate_coupling(coupling))
+
+    assert manager.active_player_type == "AirPlay"
+
+
+def test_airplay_activation_airplay_receiving_property(tmp_path: Path) -> None:
+    """airplay_receiving reflects pipe_source.running when an AirPlay session is active."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    storage, coupling = _make_airplay_storage(tmp_path)
+    manager = PlayerManager(storage)
+
+    fake_area = MagicMock()
+    fake_area.id = "ae-ap"
+    fake_area.name = "AP Room AE"
+
+    mock_src = MagicMock()
+    mock_src.running = True
+
+    _pm = "huesync.player_manager"
+    with (
+        patch(f"{_pm}.list_entertainment_areas", new=AsyncMock(return_value=[fake_area])),
+        patch(f"{_pm}.get_channel_infos", new=AsyncMock(return_value=[])),
+        patch(f"{_pm}.AirPlayPipeSource", return_value=mock_src),
+        patch(f"{_pm}.PcmAudioPipeline", return_value=MagicMock()),
+        patch(f"{_pm}.SyncEngine") as mock_engine_cls,
+        patch(f"{_pm}.HueDriver") as mock_driver_cls,
+    ):
+        mock_engine = MagicMock()
+        mock_engine.run = AsyncMock()
+        mock_engine_cls.return_value = mock_engine
+
+        mock_driver = MagicMock()
+        mock_driver.start = AsyncMock()
+        mock_driver_cls.return_value = mock_driver
+
+        asyncio.run(manager.activate_coupling(coupling))
+
+    assert manager.airplay_receiving is True
+
+    mock_src.running = False
+    assert manager.airplay_receiving is False

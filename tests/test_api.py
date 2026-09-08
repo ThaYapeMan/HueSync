@@ -61,6 +61,8 @@ def _make_mock_manager() -> MagicMock:
     type(manager).active_onset_method = PropertyMock(return_value=None)
     type(manager).active_lower_cutoff_freq = PropertyMock(return_value=None)
     type(manager).active_higher_cutoff_freq = PropertyMock(return_value=None)
+    type(manager).active_player_type = PropertyMock(return_value=None)
+    type(manager).airplay_receiving = PropertyMock(return_value=None)
     # Async methods
     manager.activate_coupling = AsyncMock()
     manager.deactivate = AsyncMock()
@@ -196,6 +198,32 @@ def test_create_and_get_virtual_player(client: TestClient):
     resp2 = client.get(f"/api/virtual-players/{player_id}")
     assert resp2.status_code == 200
     assert resp2.json()["type"] == "LMS"
+
+
+def test_create_airplay_virtual_player(client: TestClient):
+    """Creating an AirPlay player must succeed with type='AirPlay' and no lms_host required."""
+    payload = {"type": "AirPlay"}
+    resp = client.post("/api/virtual-players", json=payload)
+    assert resp.status_code == 201, f"Expected 201, got {resp.status_code}: {resp.text}"
+    body = resp.json()
+    assert body["type"] == "AirPlay"
+
+    player_id = body["id"]
+    resp2 = client.get(f"/api/virtual-players/{player_id}")
+    assert resp2.status_code == 200
+    assert resp2.json()["type"] == "AirPlay"
+
+
+def test_airplay_virtual_player_in_list(client: TestClient):
+    """An AirPlay player appears in the virtual-players list with correct type."""
+    client.post("/api/virtual-players", json={"type": "AirPlay"})
+    client.post("/api/virtual-players", json={"lms_host": "10.0.0.1"})
+
+    resp = client.get("/api/virtual-players")
+    assert resp.status_code == 200
+    types = [p["type"] for p in resp.json()]
+    assert "AirPlay" in types
+    assert "LMS" in types
 
 
 def test_virtual_player_rejects_unknown_type(client: TestClient):

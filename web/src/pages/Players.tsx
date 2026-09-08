@@ -28,6 +28,7 @@ import { ConfirmDialog } from '@/components/ConfirmDialog'
 import {
   type VirtualPlayer,
   type LmsPlayer,
+  PLAYER_TYPES,
   getVirtualPlayers,
   createVirtualPlayer,
   updateVirtualPlayer,
@@ -36,6 +37,7 @@ import {
 } from '@/lib/api'
 
 interface FormState {
+  playerType: string
   lms_host: string
   lms_port: string
   player_name: string
@@ -45,6 +47,7 @@ interface FormState {
 
 function defaultForm(player?: VirtualPlayer): FormState {
   return {
+    playerType: player?.type ?? 'LMS',
     lms_host: player?.lms_host ?? '',
     lms_port: String(player?.lms_port ?? 9000),
     player_name: player?.player_name ?? 'HueSync',
@@ -131,6 +134,8 @@ export function Players() {
     }
   }
 
+  const isAirPlay = form.playerType === 'AirPlay'
+
   async function handleSave() {
     setSaving(true)
     setSaveError(null)
@@ -145,7 +150,7 @@ export function Players() {
         })
       } else {
         await createVirtualPlayer({
-          type: 'LMS',
+          type: form.playerType,
           lms_host: form.lms_host,
           lms_port: parseInt(form.lms_port, 10),
           player_name: form.player_name,
@@ -246,78 +251,109 @@ export function Players() {
 
           <div className="space-y-4">
             <FormRow label="Type">
-              <p className="text-sm font-mono py-1 text-muted-foreground">LMS (squeezelite)</p>
-            </FormRow>
-            <FormRow label="LMS host">
-              <Input
-                value={form.lms_host}
-                onChange={(e) => set('lms_host', e.target.value)}
-                placeholder="192.168.x.x"
-              />
-            </FormRow>
-            <FormRow label="LMS port">
-              <Input
-                type="number"
-                value={form.lms_port}
-                onChange={(e) => set('lms_port', e.target.value)}
-              />
-            </FormRow>
-            <FormRow label="Player name">
-              <Input
-                value={form.player_name}
-                onChange={(e) => set('player_name', e.target.value)}
-              />
-            </FormRow>
-            <FormRow label="ALSA device">
-              <Input
-                value={form.alsa_device}
-                onChange={(e) => set('alsa_device', e.target.value)}
-                placeholder="hw:CARD=Dummy,DEV=0"
-              />
-            </FormRow>
-
-            <div className="space-y-1">
-              <Label className="text-sm">Follow player</Label>
-              <p className="text-xs text-muted-foreground">
-                HueSync mirrors track changes from this LMS player without joining its sync group.
-              </p>
-              <div className="flex gap-2">
-                <Select
-                  value={form.follow_player_mac || '__none__'}
-                  onValueChange={(v) => set('follow_player_mac', v === '__none__' ? '' : v)}
-                >
-                  <SelectTrigger className="flex-1">
-                    <SelectValue placeholder="None — track mirroring disabled" />
+              {editingPlayer ? (
+                <p className="text-sm font-mono py-1 text-muted-foreground">
+                  {PLAYER_TYPES.find((t) => t.value === editingPlayer.type)?.label ?? editingPlayer.type}
+                </p>
+              ) : (
+                <Select value={form.playerType} onValueChange={(v) => set('playerType', v)}>
+                  <SelectTrigger>
+                    <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="__none__">None — track mirroring disabled</SelectItem>
-                    {followOptions.map((p) => (
-                      <SelectItem key={p.playerid} value={p.playerid}>
-                        {p.name !== p.playerid ? `${p.name} (${p.playerid})` : p.playerid}
-                      </SelectItem>
+                    {PLAYER_TYPES.map((t) => (
+                      <SelectItem key={t.value} value={t.value}>{t.label}</SelectItem>
                     ))}
                   </SelectContent>
                 </Select>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={discoverPlayers}
-                  disabled={discovering}
-                >
-                  {discovering ? '…' : 'Discover'}
-                </Button>
-              </div>
-              {discoverError && (
-                <p className="text-xs text-destructive">{discoverError}</p>
               )}
-            </div>
+            </FormRow>
 
-            {editingPlayer && (
-              <div className="space-y-1">
-                <Label className="text-sm">Player MAC</Label>
-                <p className="text-sm font-mono text-muted-foreground py-1">{editingPlayer.player_mac || '—'}</p>
-                <p className="text-xs text-muted-foreground">MAC is assigned by squeezelite and cannot be changed.</p>
+            {isAirPlay ? (
+              <div className="rounded-md border border-muted bg-muted/40 px-4 py-3 text-sm text-muted-foreground space-y-1">
+                <p>
+                  <strong className="text-foreground">Silent AirPlay destination for analysis.</strong>
+                </p>
+                <p>
+                  This player appears as "HueSync" in your AirPlay menu. Select it alongside
+                  your real speaker in Control Center to keep audio playing through your speaker
+                  while HueSync analyses the stream.
+                </p>
               </div>
+            ) : (
+              <>
+                <FormRow label="LMS host">
+                  <Input
+                    value={form.lms_host}
+                    onChange={(e) => set('lms_host', e.target.value)}
+                    placeholder="192.168.x.x"
+                  />
+                </FormRow>
+                <FormRow label="LMS port">
+                  <Input
+                    type="number"
+                    value={form.lms_port}
+                    onChange={(e) => set('lms_port', e.target.value)}
+                  />
+                </FormRow>
+                <FormRow label="Player name">
+                  <Input
+                    value={form.player_name}
+                    onChange={(e) => set('player_name', e.target.value)}
+                  />
+                </FormRow>
+                <FormRow label="ALSA device">
+                  <Input
+                    value={form.alsa_device}
+                    onChange={(e) => set('alsa_device', e.target.value)}
+                    placeholder="hw:CARD=Dummy,DEV=0"
+                  />
+                </FormRow>
+
+                <div className="space-y-1">
+                  <Label className="text-sm">Follow player</Label>
+                  <p className="text-xs text-muted-foreground">
+                    HueSync mirrors track changes from this LMS player without joining its sync group.
+                  </p>
+                  <div className="flex gap-2">
+                    <Select
+                      value={form.follow_player_mac || '__none__'}
+                      onValueChange={(v) => set('follow_player_mac', v === '__none__' ? '' : v)}
+                    >
+                      <SelectTrigger className="flex-1">
+                        <SelectValue placeholder="None — track mirroring disabled" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="__none__">None — track mirroring disabled</SelectItem>
+                        {followOptions.map((p) => (
+                          <SelectItem key={p.playerid} value={p.playerid}>
+                            {p.name !== p.playerid ? `${p.name} (${p.playerid})` : p.playerid}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={discoverPlayers}
+                      disabled={discovering}
+                    >
+                      {discovering ? '…' : 'Discover'}
+                    </Button>
+                  </div>
+                  {discoverError && (
+                    <p className="text-xs text-destructive">{discoverError}</p>
+                  )}
+                </div>
+
+                {editingPlayer && (
+                  <div className="space-y-1">
+                    <Label className="text-sm">Player MAC</Label>
+                    <p className="text-sm font-mono text-muted-foreground py-1">{editingPlayer.player_mac || '—'}</p>
+                    <p className="text-xs text-muted-foreground">MAC is assigned by squeezelite and cannot be changed.</p>
+                  </div>
+                )}
+              </>
             )}
           </div>
 

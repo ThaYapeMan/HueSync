@@ -19,11 +19,12 @@ log = logging.getLogger(__name__)
 # detection.  Keep in sync with ONSET_METHODS in web/src/lib/api.ts.
 ONSET_METHODS: frozenset[str] = frozenset({"combined", "multiband", "superflux"})
 
-# Virtual-player source type.  Only "LMS" exists now; "Sonos" will be added
-# when sonos-squeezebox with OPT_VIS becomes a supported PCM source.
-# Keep in sync with PLAYER_TYPES in web/src/lib/api.ts.
+# Virtual-player source type.  Keep in sync with PLAYER_TYPES in web/src/lib/api.ts.
+# Adding a new type: add the enum value here, implement PcmSource in pcm_source.py,
+# and add an activation branch in player_manager.activate_coupling().
 class VirtualPlayerType(StrEnum):
     LMS = "LMS"
+    AIRPLAY = "AirPlay"
 
 VIRTUAL_PLAYER_TYPES: frozenset[str] = frozenset(t.value for t in VirtualPlayerType)
 
@@ -298,7 +299,7 @@ _VIRTUAL_PLAYER_FIELDS: frozenset[str] = frozenset()  # filled after class
 
 @dataclass
 class VirtualPlayer:
-    """A squeezelite virtual player connected to LMS."""
+    """A virtual audio player.  type determines the audio source backend."""
 
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     type: VirtualPlayerType = VirtualPlayerType.LMS

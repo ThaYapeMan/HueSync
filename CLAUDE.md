@@ -244,6 +244,7 @@ AirPlay 2 input (shairport-sync + nqptp) is a one-time setup step:
 | File | Role |
 |---|---|
 | `src/huesync/types.py` | Protocol types: `Colour`, `Position`, `Scene`, `Effect`, `AudioPipeline`, `Output`, `AudioFeatures` |
+| `src/huesync/pcm_source.py` | `PcmSource` Protocol, `SqueezeliteShmSource`, `AirPlayPipeSource`, `PcmAudioPipeline`, `PcmStft`, `PcmHpss` |
 | `src/huesync/sync_engine.py` | `FifoReader`, `BandNormaliser`, `CavaPipeline`, `ColourModeEffect`, `SyncEngine` |
 | `src/huesync/hue_output.py` | **Only** file importing `hue_entertainment` for streaming: `HueDriver`, `ChannelInfo`, `get_channel_infos()` |
 | `src/huesync/hue_bridge.py` | Controller pairing and Entertainment Area discovery |
@@ -253,6 +254,48 @@ AirPlay 2 input (shairport-sync + nqptp) is a one-time setup step:
 | `src/huesync/app.py` | FastAPI web UI |
 | `src/huesync/storage.py` | JSON config persistence |
 | `tests/` | Unit tests — keep green |
+
+---
+
+## Future player/source types — the PcmSource extension point
+
+Adding a new audio source (e.g. Roon, JACK, PulseAudio) requires implementing
+exactly one interface: the `PcmSource` Protocol in `pcm_source.py`.
+
+```python
+class PcmSource(Protocol):
+    def open(self) -> None: ...
+    def close(self) -> None: ...
+    def read_new(self) -> np.ndarray: ...   # mono float32 in [−1.0, 1.0]
+    @property
+    def sample_rate(self) -> int: ...
+    @property
+    def running(self) -> bool: ...          # True = actively receiving audio
+```
+
+`PcmAudioPipeline` (`pcm_source.py`) is the corresponding source-agnostic
+`AudioPipeline` implementation. It accepts any `PcmSource`, runs STFT, derives
+spectrum bars, applies AGC (`BandNormaliser`), detects onsets, and returns
+`AudioFeatures` — **identical in structure to what `CavaPipeline` produces**,
+so all effects (including `spectrum_rgb` and `mono_pulse`) work without
+modification.
+
+**`PcmAudioPipeline` must never contain source-type-specific logic.** It
+operates exclusively on the `PcmSource` interface. An `AirPlayPipeSource`
+and a hypothetical `RoonPcmSource` are interchangeable from its perspective.
+
+This mirrors the canonical position principle for light output
+(`LightChannel.position`): one central, source-agnostic processing module;
+each new audio source contributes only its own adapter. `PcmAudioPipeline`
+itself never changes when a new source is added.
+
+**To add a new VirtualPlayer type:**
+
+1. Add a value to `VirtualPlayerType` in `models.py`.
+2. Implement `PcmSource` for the new source (e.g. `RoonPcmSource`).
+3. In `player_manager.activate_coupling()`, branch on `player.type` and
+   instantiate `PcmAudioPipeline(your_source, profile)` — pass it to
+   `SyncEngine` as the `analyser` argument. No other files change.
 
 ---
 

@@ -3,7 +3,8 @@
 // list silently falls through to cava-based onset (combined behaviour).
 // Virtual-player source types.  Keep in sync with VIRTUAL_PLAYER_TYPES in models.py.
 export const PLAYER_TYPES = [
-  { value: 'LMS', label: 'LMS (squeezelite)' },
+  { value: 'LMS',     label: 'LMS (squeezelite)' },
+  { value: 'AirPlay', label: 'AirPlay (shairport-sync)' },
 ] as const
 
 export type PlayerType = typeof PLAYER_TYPES[number]['value']
@@ -65,12 +66,14 @@ export interface ApiStatus {
   version: string
   active_coupling_id: string | null
   active_coupling_name: string | null
+  active_player_type: string | null
   sync_master: string | null
   sync_master_name: string | null
   applied_delay_ms: number
   latency_warning: string | null
   processes: { squeezelite: boolean; cava: boolean }
   bridge_connected: boolean
+  airplay_receiving: boolean | null
 }
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
