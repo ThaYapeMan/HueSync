@@ -51,6 +51,7 @@ def _make_mock_manager() -> MagicMock:
     # WebSocket status properties
     type(manager).active_coupling_id = PropertyMock(return_value=None)
     type(manager).active_coupling_name = PropertyMock(return_value=None)
+    type(manager).active_zone_id = PropertyMock(return_value=None)
     type(manager).detected_sync_master_name = PropertyMock(return_value=None)
     type(manager).active_color_mode = PropertyMock(return_value=None)
     type(manager).active_effect = PropertyMock(return_value=None)
@@ -60,6 +61,8 @@ def _make_mock_manager() -> MagicMock:
     type(manager).active_onset_method = PropertyMock(return_value=None)
     type(manager).active_lower_cutoff_freq = PropertyMock(return_value=None)
     type(manager).active_higher_cutoff_freq = PropertyMock(return_value=None)
+    type(manager).active_player_type = PropertyMock(return_value=None)
+    type(manager).airplay_receiving = PropertyMock(return_value=None)
     # Async methods
     manager.activate_coupling = AsyncMock()
     manager.deactivate = AsyncMock()
