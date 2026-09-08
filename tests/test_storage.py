@@ -64,7 +64,7 @@ def test_migrate_creates_mellow_scene_from_old_format(tmp_path: Path):
                 "id": coupling_id,
                 "name": "Test Coupling",
                 "player_id": "p-1",
-                "analysis_config_id": "ac-1",
+                "analyser_id": "ac-1",
                 "light_provider_id": "lp-1",
                 "render_config_id": rc_id,
                 "enabled": True,
@@ -191,7 +191,7 @@ def test_migrate_renames_color_mode_to_effect(tmp_path: Path):
                 "id": "c-1",
                 "name": "Test",
                 "player_id": "p-1",
-                "analysis_config_id": "ac-1",
+                "analyser_id": "ac-1",
                 "light_provider_id": "lp-1",
                 "render_config_id": rc_id,
                 "mellow_render_config_id": rc_id,
@@ -318,6 +318,78 @@ def test_render_configs_key_migrated_to_scenes(tmp_path: Path):
     assert scenes[0].effect == "spectrum_rgb"
 
 
+def test_analysis_configs_key_migrated_to_analysers(tmp_path: Path):
+    """Old config files with 'analysis_configs' key are migrated to 'analysers'."""
+    config = tmp_path / "config.json"
+    old_data = {
+        "player_latencies": [],
+        "virtual_players": [],
+        "controllers": [],
+        "zones": [],
+        "analysis_configs": [
+            {
+                "id": "ac-1",
+                "name": "My AC",
+                "onset_method": "combined",
+                "onset_delta": 0.1,
+                "onset_alpha": 0.9,
+                "superflux_mu": 3,
+                "superflux_lag": 2,
+                "bars": 30,
+                "lower_cutoff_freq": 50,
+                "higher_cutoff_freq": 12000,
+                "use_hpss_separation": False,
+            }
+        ],
+        "scenes": [],
+        "crossfaders": [],
+        "couplings": [],
+        "active_coupling_id": None,
+    }
+    config.write_text(json.dumps(old_data))
+
+    storage = Storage(config)
+    analysers = storage.list_analysers()
+    assert len(analysers) == 1
+    assert analysers[0].id == "ac-1"
+    assert analysers[0].name == "My AC"
+    assert analysers[0].bars == 30
+
+
+def test_migrate_analysis_config_id_to_analyser_id_on_coupling(tmp_path: Path):
+    """Couplings with analysis_config_id are migrated to analyser_id by migrate()."""
+    config = tmp_path / "config.json"
+    old_data = {
+        "player_latencies": [],
+        "virtual_players": [],
+        "controllers": [],
+        "zones": [],
+        "analysers": [],
+        "scenes": [],
+        "crossfaders": [],
+        "couplings": [
+            {
+                "id": "c-1",
+                "name": "Test",
+                "player_id": "p-1",
+                "analysis_config_id": "ac-1",
+                "zone_id": "z-1",
+                "crossfader_id": "cf-1",
+                "enabled": True,
+            }
+        ],
+        "active_coupling_id": None,
+    }
+    config.write_text(json.dumps(old_data))
+
+    storage = Storage(config)
+    storage.migrate()
+
+    c = storage.list_couplings()[0]
+    assert c.analyser_id == "ac-1"
+    assert not hasattr(c, "analysis_config_id")
+
+
 def test_migrate_light_provider_id_to_zone_id_on_coupling(tmp_path: Path):
     """Couplings with light_provider_id are migrated to zone_id."""
     config = tmp_path / "config.json"
@@ -345,7 +417,7 @@ def test_migrate_light_provider_id_to_zone_id_on_coupling(tmp_path: Path):
                 "id": "c-1",
                 "name": "Test",
                 "player_id": "p-1",
-                "analysis_config_id": "ac-1",
+                "analyser_id": "ac-1",
                 "light_provider_id": "lp-1",
                 "render_config_id": "sc-1",
                 "enabled": True,

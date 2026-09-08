@@ -54,7 +54,7 @@ def _build_engine_profile(coupling: Coupling, storage: Storage) -> Profile | Non
     """
     player = storage.get_virtual_player(coupling.player_id)
     zone   = storage.get_zone(coupling.zone_id)
-    ac     = storage.get_analysis_config(coupling.analysis_config_id)
+    ac     = storage.get_analyser(coupling.analyser_id)
     cf     = storage.get_crossfader(coupling.crossfader_id)
     scene  = storage.get_scene(cf.active_scene_id) if cf else None
     if not all([player, zone, ac, cf, scene]):
@@ -114,7 +114,7 @@ def _build_mellow_profile(coupling: Coupling, storage: Storage) -> Profile | Non
     # active profile; only the Scene-derived fields differ.
     player = storage.get_virtual_player(coupling.player_id)
     zone   = storage.get_zone(coupling.zone_id)
-    ac     = storage.get_analysis_config(coupling.analysis_config_id)
+    ac     = storage.get_analyser(coupling.analyser_id)
     if not all([player, zone, ac]):
         return None
     return Profile(
@@ -336,7 +336,7 @@ class PlayerManager:
 
         player = self.storage.get_virtual_player(coupling.player_id)
         zone = self.storage.get_zone(coupling.zone_id)
-        ac = self.storage.get_analysis_config(coupling.analysis_config_id)
+        ac = self.storage.get_analyser(coupling.analyser_id)
         cf = self.storage.get_crossfader(coupling.crossfader_id)
         scene = self.storage.get_scene(cf.active_scene_id) if cf else None
 
@@ -348,7 +348,7 @@ class PlayerManager:
             )
         if not ac:
             raise ValueError(
-                f"Coupling references missing AnalysisConfig {coupling.analysis_config_id!r}"
+                f"Coupling references missing Analyser {coupling.analyser_id!r}"
             )
         if not cf:
             raise ValueError(
@@ -569,7 +569,7 @@ class PlayerManager:
         session = self._active
 
         if session.coupling:
-            # Reload coupling from storage so any FK changes (e.g. analysis_config_id
+            # Reload coupling from storage so any FK changes (e.g. analyser_id
             # swapped via PATCH) are reflected when rebuilding the profile.
             fresh = self.storage.get_coupling(session.coupling.id)
             if fresh is None:

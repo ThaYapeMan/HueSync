@@ -16,7 +16,7 @@ import threading
 from pathlib import Path
 
 from .models import (
-    AnalysisConfig,
+    Analyser,
     Controller,
     Coupling,
     Crossfader,
@@ -41,7 +41,7 @@ class Storage:
                     "controllers": [],
                     "virtual_players": [],
                     "zones": [],
-                    "analysis_configs": [],
+                    "analysers": [],
                     "scenes": [],
                     "crossfaders": [],
                     "couplings": [],
@@ -55,7 +55,6 @@ class Storage:
         # Back-fill any top-level keys added after the initial file was written.
         data.setdefault("player_latencies", [])
         data.setdefault("controllers", [])
-        data.setdefault("analysis_configs", [])
         data.setdefault("couplings", [])
         data.setdefault("active_coupling_id", None)
         data.setdefault("crossfaders", [])
@@ -77,6 +76,12 @@ class Storage:
         elif "render_configs" in data:
             data.pop("render_configs")
         data.setdefault("scenes", [])
+        # Migrate old "analysis_configs" key to "analysers" if present.
+        if "analysis_configs" in data and "analysers" not in data:
+            data["analysers"] = data.pop("analysis_configs")
+        elif "analysis_configs" in data:
+            data.pop("analysis_configs")
+        data.setdefault("analysers", [])
         return data
 
     def _write(self, data: dict) -> None:
@@ -180,26 +185,26 @@ class Storage:
             data["zones"] = [x for x in data["zones"] if x["id"] != zone_id]
             self._write(data)
 
-    # -- AnalysisConfigs ----------------------------------------------------
+    # -- Analysers ----------------------------------------------------
 
-    def list_analysis_configs(self) -> list[AnalysisConfig]:
+    def list_analysers(self) -> list[Analyser]:
         with _lock:
-            return [AnalysisConfig.from_dict(a) for a in self._read()["analysis_configs"]]
+            return [Analyser.from_dict(a) for a in self._read()["analysers"]]
 
-    def get_analysis_config(self, ac_id: str) -> AnalysisConfig | None:
-        return next((a for a in self.list_analysis_configs() if a.id == ac_id), None)
+    def get_analyser(self, ac_id: str) -> Analyser | None:
+        return next((a for a in self.list_analysers() if a.id == ac_id), None)
 
-    def save_analysis_config(self, ac: AnalysisConfig) -> None:
+    def save_analyser(self, ac: Analyser) -> None:
         with _lock:
             data = self._read()
-            data["analysis_configs"] = [x for x in data["analysis_configs"] if x["id"] != ac.id]
-            data["analysis_configs"].append(ac.to_dict())
+            data["analysers"] = [x for x in data["analysers"] if x["id"] != ac.id]
+            data["analysers"].append(ac.to_dict())
             self._write(data)
 
-    def delete_analysis_config(self, ac_id: str) -> None:
+    def delete_analyser(self, ac_id: str) -> None:
         with _lock:
             data = self._read()
-            data["analysis_configs"] = [x for x in data["analysis_configs"] if x["id"] != ac_id]
+            data["analysers"] = [x for x in data["analysers"] if x["id"] != ac_id]
             self._write(data)
 
     # -- Scenes -------------------------------------------------------------
@@ -280,6 +285,7 @@ class Storage:
         4. light_providers key → zones key
         5. light_provider_id → zone_id on couplings
         6. render_config_id + mix fields → Crossfader entity per coupling
+        7. analysis_config_id → analyser_id on couplings
         """
         import uuid as _uuid
 
@@ -387,6 +393,15 @@ class Storage:
                 cf_by_id[cf_id] = cf
                 c["crossfader_id"] = cf_id
                 changed = True
+
+            # --- Step 7: analysis_config_id → analyser_id on couplings ---
+            for c in data.get("couplings", []):
+                if "analysis_config_id" in c and "analyser_id" not in c:
+                    c["analyser_id"] = c.pop("analysis_config_id")
+                    changed = True
+                elif "analysis_config_id" in c:
+                    c.pop("analysis_config_id")
+                    changed = True
 
             if changed:
                 self._write(data)

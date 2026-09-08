@@ -21,7 +21,7 @@ from .lms_status import list_lms_players
 from .models import (
     EFFECT_IDS,
     VIRTUAL_PLAYER_TYPES,
-    AnalysisConfig,
+    Analyser,
     BridgeConfig,
     Controller,
     ControllerType,
@@ -120,7 +120,7 @@ class ZonePatchBody(BaseModel):
     light_count: int | None = None
 
 
-class AnalysisConfigCreateBody(BaseModel):
+class AnalyserCreateBody(BaseModel):
     name: str = "Default Analysis"
     onset_method: str = "combined"
     onset_delta: float = 0.1
@@ -133,7 +133,7 @@ class AnalysisConfigCreateBody(BaseModel):
     use_hpss_separation: bool = False
 
 
-class AnalysisConfigPatchBody(BaseModel):
+class AnalyserPatchBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str | None = None
     onset_method: str | None = None
@@ -196,7 +196,7 @@ class CrossfaderPatchBody(BaseModel):
 class CouplingCreateBody(BaseModel):
     name: str
     player_id: str
-    analysis_config_id: str
+    analyser_id: str
     zone_id: str
     crossfader_id: str
     enabled: bool = True
@@ -220,18 +220,18 @@ class CouplingPatchBody(BaseModel):
     player_id: str | None = None
     zone_id: str | None = None
     # FK live update (no deactivate)
-    analysis_config_id: str | None = None
+    analyser_id: str | None = None
     crossfader_id: str | None = None
     # Player inline (deactivate if active)
     lms_host: str | None = None
     lms_port: int | None = None
     player_name: str | None = None
     alsa_device: str | None = None
-    # AnalysisConfig cava category (restart_cava)
+    # Analyser cava category (restart_cava)
     bars: int | None = None
     lower_cutoff_freq: int | None = None
     higher_cutoff_freq: int | None = None
-    # AnalysisConfig pcm category (update_onset_pipeline)
+    # Analyser pcm category (update_onset_pipeline)
     onset_method: str | None = None
     onset_delta: float | None = None
     onset_alpha: float | None = None
@@ -267,8 +267,8 @@ _C_DEACTIVATE_FIELDS: frozenset[str] = frozenset({
 # FK fields that do NOT require a full restart — handled via lighter live-update
 # paths in _apply_coupling_action().
 _C_LIVE_FK_FIELDS: frozenset[str] = frozenset({
-    "analysis_config_id",  # → cava restart + PCM pipeline rebuild
-    "crossfader_id",       # → update_render only
+    "analyser_id",   # → cava restart + PCM pipeline rebuild
+    "crossfader_id", # → update_render only
 })
 _C_CAVA_FIELDS: frozenset[str] = frozenset({
     "bars", "lower_cutoff_freq", "higher_cutoff_freq",
@@ -288,7 +288,7 @@ _C_RENDER_FIELDS: frozenset[str] = frozenset({
 _C_PLAYER_INLINE: frozenset[str] = frozenset({
     "lms_host", "lms_port", "player_name", "alsa_device",
 })
-_C_AC_INLINE: frozenset[str] = frozenset({
+_C_ANALYSER_INLINE: frozenset[str] = frozenset({
     "bars", "lower_cutoff_freq", "higher_cutoff_freq",
     "onset_method", "onset_delta", "onset_alpha", "superflux_mu", "superflux_lag",
     "use_hpss_separation",
@@ -298,7 +298,7 @@ _C_SCENE_INLINE: frozenset[str] = frozenset({
 })
 _C_ZONE_INLINE: frozenset[str] = frozenset({"entertainment_area_name", "light_count"})
 _C_FK_FIELDS: frozenset[str] = frozenset({
-    "player_id", "zone_id", "analysis_config_id", "crossfader_id",
+    "player_id", "zone_id", "analyser_id", "crossfader_id",
 })
 # Fields that live directly on Coupling (not on a sub-entity) and are set
 # via setattr(coupling, field, value) in the patch handler.
@@ -326,12 +326,12 @@ async def _apply_coupling_action(
     if changed & _C_DEACTIVATE_FIELDS:
         await manager.deactivate()
         return
-    # analysis_config_id swap: treat as cava + PCM change (new AC replaces all
+    # analyser_id swap: treat as cava + PCM change (new Analyser replaces all
     # its fields: bars, cutoffs, onset params).  crossfader_id alone falls
     # through to update_render() only.
-    if changed & (_C_CAVA_FIELDS | {"analysis_config_id"}):
+    if changed & (_C_CAVA_FIELDS | {"analyser_id"}):
         await manager.restart_cava()
-    if changed & (_C_PCM_FIELDS | {"analysis_config_id"}):
+    if changed & (_C_PCM_FIELDS | {"analyser_id"}):
         manager.update_onset_pipeline(profile)
     manager.update_render(profile, mellow_profile)
 
@@ -681,19 +681,19 @@ async def delete_zone(zone_id: str, request: Request):
 
 
 # ---------------------------------------------------------------------------
-# AnalysisConfigs
+# Analysers
 # ---------------------------------------------------------------------------
 
 
-@router.get("/analysis-configs")
-async def list_analysis_configs(request: Request):
-    return [ac.to_dict() for ac in _storage(request).list_analysis_configs()]
+@router.get("/analysers")
+async def list_analysers(request: Request):
+    return [ac.to_dict() for ac in _storage(request).list_analysers()]
 
 
-@router.post("/analysis-configs", status_code=201)
-async def create_analysis_config(request: Request, body: AnalysisConfigCreateBody):
+@router.post("/analysers", status_code=201)
+async def create_analyser(request: Request, body: AnalyserCreateBody):
     storage = _storage(request)
-    ac = AnalysisConfig(
+    ac = Analyser(
         name=body.name,
         onset_method=body.onset_method,
         onset_delta=body.onset_delta,
@@ -705,42 +705,42 @@ async def create_analysis_config(request: Request, body: AnalysisConfigCreateBod
         higher_cutoff_freq=body.higher_cutoff_freq,
         use_hpss_separation=body.use_hpss_separation,
     )
-    storage.save_analysis_config(ac)
+    storage.save_analyser(ac)
     return JSONResponse(content=ac.to_dict(), status_code=201)
 
 
-@router.get("/analysis-configs/{ac_id}")
-async def get_analysis_config(ac_id: str, request: Request):
-    ac = _storage(request).get_analysis_config(ac_id)
+@router.get("/analysers/{ac_id}")
+async def get_analyser(ac_id: str, request: Request):
+    ac = _storage(request).get_analyser(ac_id)
     if ac is None:
-        raise HTTPException(status_code=404, detail="AnalysisConfig not found")
+        raise HTTPException(status_code=404, detail="Analyser not found")
     return ac.to_dict()
 
 
-@router.patch("/analysis-configs/{ac_id}")
-async def patch_analysis_config(ac_id: str, request: Request, body: AnalysisConfigPatchBody):
+@router.patch("/analysers/{ac_id}")
+async def patch_analyser(ac_id: str, request: Request, body: AnalyserPatchBody):
     storage = _storage(request)
     manager = _manager(request)
-    ac = storage.get_analysis_config(ac_id)
+    ac = storage.get_analyser(ac_id)
     if ac is None:
-        raise HTTPException(status_code=404, detail="AnalysisConfig not found")
+        raise HTTPException(status_code=404, detail="Analyser not found")
     updates = body.model_dump(exclude_unset=True)
     for field, value in updates.items():
         setattr(ac, field, value)
-    storage.save_analysis_config(ac)
-    # Trigger cava/pcm restart if the active coupling uses this AnalysisConfig.
+    storage.save_analyser(ac)
+    # Trigger cava/pcm restart if the active coupling uses this Analyser.
     active_id = storage.get_active_coupling_id()
     active_fields = set(updates.keys()) - {"name"}
     if active_fields and active_id:
         coupling = storage.get_coupling(active_id)
-        if coupling and coupling.analysis_config_id == ac_id:
+        if coupling and coupling.analyser_id == ac_id:
             await _apply_coupling_action(coupling, storage, manager, active_fields)
     return ac.to_dict()
 
 
-@router.delete("/analysis-configs/{ac_id}", status_code=204)
-async def delete_analysis_config(ac_id: str, request: Request):
-    _storage(request).delete_analysis_config(ac_id)
+@router.delete("/analysers/{ac_id}", status_code=204)
+async def delete_analyser(ac_id: str, request: Request):
+    _storage(request).delete_analyser(ac_id)
 
 
 # ---------------------------------------------------------------------------
@@ -892,7 +892,7 @@ async def create_coupling(request: Request, body: CouplingCreateBody):
     coupling = Coupling(
         name=body.name,
         player_id=body.player_id,
-        analysis_config_id=body.analysis_config_id,
+        analyser_id=body.analyser_id,
         zone_id=body.zone_id,
         crossfader_id=body.crossfader_id,
         enabled=body.enabled,
@@ -947,14 +947,14 @@ async def restart_coupling_cava(
         coupling = storage.get_coupling(coupling_id)
         if coupling is None:
             raise HTTPException(status_code=404, detail="Coupling not found")
-        ac = storage.get_analysis_config(coupling.analysis_config_id)
+        ac = storage.get_analyser(coupling.analyser_id)
         if ac is None:
-            raise HTTPException(status_code=404, detail="AnalysisConfig not found")
+            raise HTTPException(status_code=404, detail="Analyser not found")
         if body.lower_cutoff_freq is not None:
             ac.lower_cutoff_freq = body.lower_cutoff_freq
         if body.higher_cutoff_freq is not None:
             ac.higher_cutoff_freq = body.higher_cutoff_freq
-        storage.save_analysis_config(ac)
+        storage.save_analyser(ac)
 
         crossfader = storage.get_crossfader(coupling.crossfader_id)
         if crossfader is not None:
@@ -1005,8 +1005,8 @@ async def patch_coupling(coupling_id: str, request: Request, body: CouplingPatch
     # Resolve sub-entities for inline field updates
     player = storage.get_virtual_player(coupling.player_id) if coupling.player_id else None
     ac = (
-        storage.get_analysis_config(coupling.analysis_config_id)
-        if coupling.analysis_config_id
+        storage.get_analyser(coupling.analyser_id)
+        if coupling.analyser_id
         else None
     )
     zone = (
@@ -1029,7 +1029,7 @@ async def patch_coupling(coupling_id: str, request: Request, body: CouplingPatch
         elif field in _C_PLAYER_INLINE and player:
             setattr(player, field, value)
             player_changed = True
-        elif field in _C_AC_INLINE and ac:
+        elif field in _C_ANALYSER_INLINE and ac:
             setattr(ac, field, value)
             ac_changed = True
         elif field in _C_ZONE_INLINE and zone:
@@ -1043,7 +1043,7 @@ async def patch_coupling(coupling_id: str, request: Request, body: CouplingPatch
     if player_changed and player:
         storage.save_virtual_player(player)
     if ac_changed and ac:
-        storage.save_analysis_config(ac)
+        storage.save_analyser(ac)
     if zone_changed and zone:
         storage.save_zone(zone)
     if scene_changed and scene_inline:
@@ -1072,7 +1072,7 @@ async def delete_coupling(coupling_id: str, request: Request):
 
 @router.post("/couplings/{coupling_id}/clone", status_code=201)
 async def clone_coupling(coupling_id: str, request: Request):
-    """Deep-clone a Coupling with fresh AnalysisConfig, Scene, and Crossfader copies.
+    """Deep-clone a Coupling with fresh Analyser, Scene, and Crossfader copies.
 
     The Player and Zone references are shared (not cloned).
     The new Coupling is named "<original name> (copy)".
@@ -1083,7 +1083,7 @@ async def clone_coupling(coupling_id: str, request: Request):
     if coupling is None:
         raise HTTPException(status_code=404, detail="Coupling not found")
 
-    ac = storage.get_analysis_config(coupling.analysis_config_id)
+    ac = storage.get_analyser(coupling.analyser_id)
     cf = storage.get_crossfader(coupling.crossfader_id)
     scene = storage.get_scene(cf.active_scene_id) if cf else None
     if ac is None or cf is None or scene is None:
@@ -1096,11 +1096,11 @@ async def clone_coupling(coupling_id: str, request: Request):
         coupling,
         id=str(uuid.uuid4()),
         name=f"{coupling.name} (copy)",
-        analysis_config_id=new_ac.id,
+        analyser_id=new_ac.id,
         crossfader_id=new_cf.id,
     )
 
-    storage.save_analysis_config(new_ac)
+    storage.save_analyser(new_ac)
     storage.save_scene(new_scene)
     storage.save_crossfader(new_cf)
     storage.save_coupling(new_coupling)

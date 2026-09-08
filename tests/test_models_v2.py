@@ -4,7 +4,7 @@ import tempfile
 from pathlib import Path
 
 from huesync.models import (
-    AnalysisConfig,
+    Analyser,
     Controller,
     ControllerType,
     Coupling,
@@ -96,25 +96,25 @@ def test_zone_roundtrip():
 
 
 # ---------------------------------------------------------------------------
-# AnalysisConfig round-trip
+# Analyser round-trip
 # ---------------------------------------------------------------------------
 
 
-def test_analysis_config_roundtrip():
-    ac = AnalysisConfig(name="SuperFlux", onset_method="superflux", onset_delta=0.2,
-                        onset_alpha=0.8, superflux_mu=5, superflux_lag=3,
-                        bars=48, lower_cutoff_freq=30, higher_cutoff_freq=14000)
-    ac2 = AnalysisConfig.from_dict(ac.to_dict())
+def test_analyser_roundtrip():
+    ac = Analyser(name="SuperFlux", onset_method="superflux", onset_delta=0.2,
+                  onset_alpha=0.8, superflux_mu=5, superflux_lag=3,
+                  bars=48, lower_cutoff_freq=30, higher_cutoff_freq=14000)
+    ac2 = Analyser.from_dict(ac.to_dict())
     assert ac2.id == ac.id
     assert ac2.onset_method == "superflux"
     assert ac2.superflux_mu == 5
     assert ac2.bars == 48
 
 
-def test_analysis_config_from_dict_strips_unknown_keys():
-    d = AnalysisConfig().to_dict()
+def test_analyser_from_dict_strips_unknown_keys():
+    d = Analyser().to_dict()
     d["future_param"] = 42
-    ac = AnalysisConfig.from_dict(d)
+    ac = Analyser.from_dict(d)
     assert not hasattr(ac, "future_param")
 
 
@@ -164,12 +164,12 @@ def test_crossfader_roundtrip():
 
 
 def test_coupling_roundtrip():
-    c = Coupling(name="Zone A → Hue", player_id="p1", analysis_config_id="ac1",
+    c = Coupling(name="Zone A → Hue", player_id="p1", analyser_id="ac1",
                  zone_id="z1", crossfader_id="cf1", enabled=False)
     c2 = Coupling.from_dict(c.to_dict())
     assert c2.id == c.id
     assert c2.player_id == "p1"
-    assert c2.analysis_config_id == "ac1"
+    assert c2.analyser_id == "ac1"
     assert c2.zone_id == "z1"
     assert c2.crossfader_id == "cf1"
     assert c2.enabled is False
@@ -179,12 +179,24 @@ def test_coupling_backward_compat_light_provider_id():
     """Old dicts with light_provider_id are automatically remapped to zone_id."""
     d = {
         "id": "c-1", "name": "Test", "player_id": "p1",
-        "analysis_config_id": "ac1", "light_provider_id": "lp1",
+        "analyser_id": "ac1", "light_provider_id": "lp1",
         "crossfader_id": "cf1", "enabled": True,
     }
     c = Coupling.from_dict(d)
     assert c.zone_id == "lp1"
     assert not hasattr(c, "light_provider_id")
+
+
+def test_coupling_backward_compat_analysis_config_id():
+    """Old dicts with analysis_config_id are automatically remapped to analyser_id."""
+    d = {
+        "id": "c-1", "name": "Test", "player_id": "p1",
+        "analysis_config_id": "ac1", "zone_id": "z1",
+        "crossfader_id": "cf1", "enabled": True,
+    }
+    c = Coupling.from_dict(d)
+    assert c.analyser_id == "ac1"
+    assert not hasattr(c, "analysis_config_id")
 
 
 # ---------------------------------------------------------------------------
@@ -271,26 +283,26 @@ def test_storage_delete_zone():
 
 
 # ---------------------------------------------------------------------------
-# Storage CRUD — AnalysisConfig
+# Storage CRUD — Analyser
 # ---------------------------------------------------------------------------
 
 
-def test_storage_save_and_get_analysis_config():
+def test_storage_save_and_get_analyser():
     s = make_storage()
-    ac = AnalysisConfig(name="Test", onset_method="multiband", bars=48)
-    s.save_analysis_config(ac)
-    fetched = s.get_analysis_config(ac.id)
+    ac = Analyser(name="Test", onset_method="multiband", bars=48)
+    s.save_analyser(ac)
+    fetched = s.get_analyser(ac.id)
     assert fetched is not None
     assert fetched.bars == 48
     assert fetched.onset_method == "multiband"
 
 
-def test_storage_delete_analysis_config():
+def test_storage_delete_analyser():
     s = make_storage()
-    ac = AnalysisConfig()
-    s.save_analysis_config(ac)
-    s.delete_analysis_config(ac.id)
-    assert s.get_analysis_config(ac.id) is None
+    ac = Analyser()
+    s.save_analyser(ac)
+    s.delete_analyser(ac.id)
+    assert s.get_analyser(ac.id) is None
 
 
 # ---------------------------------------------------------------------------
@@ -346,7 +358,7 @@ def test_storage_delete_crossfader():
 
 def test_storage_save_and_get_coupling():
     s = make_storage()
-    c = Coupling(name="Zone A → Hue", player_id="p1", analysis_config_id="ac1",
+    c = Coupling(name="Zone A → Hue", player_id="p1", analyser_id="ac1",
                  zone_id="z1", crossfader_id="cf1")
     s.save_coupling(c)
     fetched = s.get_coupling(c.id)

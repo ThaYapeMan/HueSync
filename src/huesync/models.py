@@ -249,7 +249,7 @@ _PROFILE_FIELDS = frozenset(f.name for f in fields(Profile))
 
 
 # ---------------------------------------------------------------------------
-# Phase-2 entities: Controller, Player, Zone, AnalysisConfig,
+# Phase-2 entities: Controller, Player, Zone, Analyser,
 # Scene, Crossfader, Coupling.
 # ---------------------------------------------------------------------------
 
@@ -373,11 +373,11 @@ class Zone:
 _ZONE_FIELDS = frozenset(f.name for f in fields(Zone))
 
 
-_ANALYSIS_CONFIG_FIELDS: frozenset[str] = frozenset()  # filled after class
+_ANALYSER_FIELDS: frozenset[str] = frozenset()  # filled after class
 
 
 @dataclass
-class AnalysisConfig:
+class Analyser:
     """cava spectrum + onset detection parameters, shared across Couplings."""
 
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
@@ -410,11 +410,11 @@ class AnalysisConfig:
         }
 
     @classmethod
-    def from_dict(cls, d: dict) -> AnalysisConfig:
-        return cls(**{k: v for k, v in d.items() if k in _ANALYSIS_CONFIG_FIELDS})
+    def from_dict(cls, d: dict) -> Analyser:
+        return cls(**{k: v for k, v in d.items() if k in _ANALYSER_FIELDS})
 
 
-_ANALYSIS_CONFIG_FIELDS = frozenset(f.name for f in fields(AnalysisConfig))
+_ANALYSER_FIELDS = frozenset(f.name for f in fields(Analyser))
 
 
 _SCENE_FIELDS: frozenset[str] = frozenset()  # filled after class
@@ -523,7 +523,7 @@ _COUPLING_FIELDS: frozenset[str] = frozenset()  # filled after class
 
 @dataclass
 class Coupling:
-    """Links a Player + AnalysisConfig + Zone + Crossfader.
+    """Links a Player + Analyser + Zone + Crossfader.
 
     Activation happens on a Coupling. The linked entities can be shared
     across multiple Couplings, but each Coupling runs its own cava process.
@@ -536,7 +536,7 @@ class Coupling:
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     name: str = "New Coupling"
     player_id: str = ""
-    analysis_config_id: str = ""
+    analyser_id: str = ""
     zone_id: str = ""
     crossfader_id: str = ""
     enabled: bool = True
@@ -546,7 +546,7 @@ class Coupling:
             "id": self.id,
             "name": self.name,
             "player_id": self.player_id,
-            "analysis_config_id": self.analysis_config_id,
+            "analyser_id": self.analyser_id,
             "zone_id": self.zone_id,
             "crossfader_id": self.crossfader_id,
             "enabled": self.enabled,
@@ -560,6 +560,11 @@ class Coupling:
             d["zone_id"] = d.pop("light_provider_id")
         elif "light_provider_id" in d:
             d.pop("light_provider_id")
+        # Backward compat: analysis_config_id → analyser_id
+        if "analysis_config_id" in d and "analyser_id" not in d:
+            d["analyser_id"] = d.pop("analysis_config_id")
+        elif "analysis_config_id" in d:
+            d.pop("analysis_config_id")
         # Old render_config_id and mix fields are dropped here; Storage.migrate()
         # creates a Crossfader from them before Coupling.from_dict() is called.
         return cls(**{k: v for k, v in d.items() if k in _COUPLING_FIELDS})

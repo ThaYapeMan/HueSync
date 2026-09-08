@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 
 from huesync.app import app
 from huesync.models import (
-    AnalysisConfig,
+    Analyser,
     Coupling,
     Crossfader,
     Scene,
@@ -300,20 +300,20 @@ def test_create_and_get_zone(client: TestClient):
 
 
 # ---------------------------------------------------------------------------
-# AnalysisConfigs
+# Analysers
 # ---------------------------------------------------------------------------
 
 
-def test_create_and_get_analysis_config(client: TestClient):
+def test_create_and_get_analyser(client: TestClient):
     payload = {"name": "Fast Onset", "onset_method": "superflux", "bars": 20}
-    resp = client.post("/api/analysis-configs", json=payload)
+    resp = client.post("/api/analysers", json=payload)
     assert resp.status_code == 201
     body = resp.json()
     ac_id = body["id"]
     assert body["onset_method"] == "superflux"
     assert body["bars"] == 20
 
-    resp2 = client.get(f"/api/analysis-configs/{ac_id}")
+    resp2 = client.get(f"/api/analysers/{ac_id}")
     assert resp2.status_code == 200
     assert resp2.json()["name"] == "Fast Onset"
 
@@ -345,19 +345,19 @@ def _make_full_coupling(storage: Storage) -> Coupling:
     """Create and persist all entities required for a Coupling, return the Coupling."""
     player = VirtualPlayer(lms_host="10.0.0.1", player_mac="aa:bb:cc:dd:ee:ff")
     zone = Zone(name="Z", controller_id="ctrl-1", entertainment_area_id="ea-1")
-    ac = AnalysisConfig(name="AC")
+    ac = Analyser(name="AC")
     scene = Scene(name="SC")
     crossfader = Crossfader(name="CF", active_scene_id=scene.id)
     storage.save_virtual_player(player)
     storage.save_zone(zone)
-    storage.save_analysis_config(ac)
+    storage.save_analyser(ac)
     storage.save_scene(scene)
     storage.save_crossfader(crossfader)
     coupling = Coupling(
         name="Test Coupling",
         player_id=player.id,
         zone_id=zone.id,
-        analysis_config_id=ac.id,
+        analyser_id=ac.id,
         crossfader_id=crossfader.id,
     )
     storage.save_coupling(coupling)
@@ -367,19 +367,19 @@ def _make_full_coupling(storage: Storage) -> Coupling:
 def test_create_coupling(client: TestClient):
     player = VirtualPlayer(lms_host="10.0.0.1")
     zone = Zone(name="Z", controller_id="c1", entertainment_area_id="ea-1")
-    ac = AnalysisConfig(name="AC")
+    ac = Analyser(name="AC")
     scene = Scene(name="SC")
     crossfader = Crossfader(name="CF", active_scene_id=scene.id)
     client._storage.save_virtual_player(player)
     client._storage.save_zone(zone)
-    client._storage.save_analysis_config(ac)
+    client._storage.save_analyser(ac)
     client._storage.save_scene(scene)
     client._storage.save_crossfader(crossfader)
 
     payload = {
         "name": "My Coupling",
         "player_id": player.id,
-        "analysis_config_id": ac.id,
+        "analyser_id": ac.id,
         "zone_id": zone.id,
         "crossfader_id": crossfader.id,
     }
@@ -401,7 +401,7 @@ def test_activate_coupling_missing_entities(client: TestClient):
         name="Broken",
         player_id="missing",
         zone_id="missing",
-        analysis_config_id="missing",
+        analyser_id="missing",
         crossfader_id="missing",
     )
     client._storage.save_coupling(coupling)
@@ -461,18 +461,18 @@ def test_patch_coupling_deactivate_field_deactivates(client: TestClient):
     client._manager.deactivate.assert_awaited_once()
 
 
-def test_patch_coupling_analysis_config_id_restarts_cava_not_deactivate(client: TestClient):
-    """Swapping analysis_config_id on an active coupling must restart cava and
+def test_patch_coupling_analyser_id_restarts_cava_not_deactivate(client: TestClient):
+    """Swapping analyser_id on an active coupling must restart cava and
     rebuild the onset pipeline, but must NOT call deactivate()."""
     coupling = _make_full_coupling(client._storage)
     client._storage.set_active_coupling_id(coupling.id)
 
-    new_ac = AnalysisConfig(name="AC2")
-    client._storage.save_analysis_config(new_ac)
+    new_ac = Analyser(name="AC2")
+    client._storage.save_analyser(new_ac)
 
     resp = client.patch(
         f"/api/couplings/{coupling.id}",
-        json={"analysis_config_id": new_ac.id},
+        json={"analyser_id": new_ac.id},
     )
     assert resp.status_code == 200
     client._manager.deactivate.assert_not_awaited()
@@ -481,7 +481,7 @@ def test_patch_coupling_analysis_config_id_restarts_cava_not_deactivate(client: 
     client._manager.update_render.assert_called_once()
 
     saved = client._storage.get_coupling(coupling.id)
-    assert saved is not None and saved.analysis_config_id == new_ac.id
+    assert saved is not None and saved.analyser_id == new_ac.id
 
 
 def test_patch_coupling_crossfader_id_update_render_only(client: TestClient):
@@ -509,13 +509,13 @@ def test_patch_coupling_crossfader_id_update_render_only(client: TestClient):
 
 
 def test_ac_swap_session_remains_active(client: TestClient):
-    """After swapping analysis_config_id on an active coupling the session is
+    """After swapping analyser_id on an active coupling the session is
     not deactivated, restart_cava + update_onset_pipeline are called once
     (the live-update path), and the profile saved to storage is rebuilt from
-    the NEW AC's settings.
+    the NEW Analyser's settings.
 
     This is the canonical regression guard for the 'frozen lights' bug fixed
-    in the 2026-09-06 routing refactor: analysis_config_id was in
+    in the 2026-09-06 routing refactor: analyser_id was in
     _C_DEACTIVATE_FIELDS (wrong) instead of _C_LIVE_FK_FIELDS, and
     restart_cava() used stale session.coupling (wrong).
     """
@@ -525,12 +525,12 @@ def test_ac_swap_session_remains_active(client: TestClient):
 
     # AC2: deliberately different settings so we can distinguish old from new
     # in the saved profile.
-    ac2 = AnalysisConfig(name="AC2", bars=50, onset_delta=0.5)
-    client._storage.save_analysis_config(ac2)
+    ac2 = Analyser(name="AC2", bars=50, onset_delta=0.5)
+    client._storage.save_analyser(ac2)
 
     resp = client.patch(
         f"/api/couplings/{coupling.id}",
-        json={"analysis_config_id": ac2.id},
+        json={"analyser_id": ac2.id},
     )
     assert resp.status_code == 200
 
@@ -546,11 +546,11 @@ def test_ac_swap_session_remains_active(client: TestClient):
     # Coupling in storage now points to AC2.
     saved_coupling = client._storage.get_coupling(coupling.id)
     assert saved_coupling is not None
-    assert saved_coupling.analysis_config_id == ac2.id
+    assert saved_coupling.analyser_id == ac2.id
 
     # AC2's settings are now in storage — verifies _apply_coupling_action()
-    # used the UPDATED coupling (new AC ID), not the stale in-memory one.
-    saved_ac2 = client._storage.get_analysis_config(ac2.id)
+    # used the UPDATED coupling (new Analyser ID), not the stale in-memory one.
+    saved_ac2 = client._storage.get_analyser(ac2.id)
     assert saved_ac2 is not None
     assert saved_ac2.bars == 50          # AC2, not AC1's default 30
     assert saved_ac2.onset_delta == 0.5  # AC2, not AC1's default 0.1
@@ -573,11 +573,11 @@ def test_clone_coupling_returns_new_id(client: TestClient):
 
 
 def test_clone_coupling_analysis_and_scene_configs_are_independent(client: TestClient):
-    """Cloned AnalysisConfig and Scene have new IDs but identical field values.
+    """Cloned Analyser and Scene have new IDs but identical field values.
     Cloned Crossfader has a new ID and points to the new Scene.
     """
     coupling = _make_full_coupling(client._storage)
-    orig_ac = client._storage.get_analysis_config(coupling.analysis_config_id)
+    orig_ac = client._storage.get_analyser(coupling.analyser_id)
     orig_cf = client._storage.get_crossfader(coupling.crossfader_id)
     orig_scene = client._storage.get_scene(orig_cf.active_scene_id) if orig_cf else None
 
@@ -585,7 +585,7 @@ def test_clone_coupling_analysis_and_scene_configs_are_independent(client: TestC
     assert resp.status_code == 201
     body = resp.json()
 
-    new_ac = client._storage.get_analysis_config(body["analysis_config_id"])
+    new_ac = client._storage.get_analyser(body["analyser_id"])
     new_cf = client._storage.get_crossfader(body["crossfader_id"])
     new_scene = client._storage.get_scene(new_cf.active_scene_id) if new_cf else None
 
@@ -619,7 +619,7 @@ def test_clone_coupling_analysis_and_scene_configs_are_independent(client: TestC
 
 
 def test_clone_coupling_modifying_clone_does_not_affect_original(client: TestClient):
-    """Mutating the clone's AnalysisConfig must not change the original's."""
+    """Mutating the clone's Analyser must not change the original's."""
     coupling = _make_full_coupling(client._storage)
 
     resp = client.post(f"/api/couplings/{coupling.id}/clone")
@@ -633,12 +633,12 @@ def test_clone_coupling_modifying_clone_does_not_affect_original(client: TestCli
     )
     assert patch_resp.status_code == 200
 
-    # Clone's AnalysisConfig now has multiband.
-    clone_ac = client._storage.get_analysis_config(clone_body["analysis_config_id"])
+    # Clone's Analyser now has multiband.
+    clone_ac = client._storage.get_analyser(clone_body["analyser_id"])
     assert clone_ac.onset_method == "multiband"
 
-    # Original's AnalysisConfig still has combined (unchanged).
-    orig_ac = client._storage.get_analysis_config(coupling.analysis_config_id)
+    # Original's Analyser still has combined (unchanged).
+    orig_ac = client._storage.get_analyser(coupling.analyser_id)
     assert orig_ac.onset_method == "combined"
 
 

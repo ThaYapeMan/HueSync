@@ -13,7 +13,7 @@ import pytest
 
 from huesync.lms_status import LmsPlayerStatus
 from huesync.models import (
-    AnalysisConfig,
+    Analyser,
     Controller,
     ControllerType,
     Coupling,
@@ -217,12 +217,12 @@ def _make_full_storage(tmp_path: Path) -> tuple[Storage, Coupling]:
     )
     storage.save_zone(zone)
 
-    ac = AnalysisConfig(
+    ac = Analyser(
         id="ac-1", name="Default", onset_method="combined", onset_delta=0.1,
         onset_alpha=0.9, superflux_mu=3, superflux_lag=2, bars=30,
         lower_cutoff_freq=50, higher_cutoff_freq=12000,
     )
-    storage.save_analysis_config(ac)
+    storage.save_analyser(ac)
 
     scene = Scene(
         id="scene-1", name="Default", effect="spectrum_rgb",
@@ -240,7 +240,7 @@ def _make_full_storage(tmp_path: Path) -> tuple[Storage, Coupling]:
 
     coupling = Coupling(
         id="coupling-1", name="Living Room",
-        player_id="player-1", analysis_config_id="ac-1",
+        player_id="player-1", analyser_id="ac-1",
         zone_id="zone-1", crossfader_id="cf-1", enabled=True,
     )
     storage.save_coupling(coupling)
@@ -289,7 +289,7 @@ def test_build_profile_from_coupling_returns_none_on_missing_zone(tmp_path: Path
 
 def test_build_profile_from_coupling_returns_none_on_missing_ac(tmp_path: Path) -> None:
     storage, coupling = _make_full_storage(tmp_path)
-    storage.delete_analysis_config("ac-1")
+    storage.delete_analyser("ac-1")
     assert _build_engine_profile(coupling, storage) is None
 
 
@@ -328,12 +328,12 @@ def test_activate_coupling_raises_on_missing_zone(tmp_path: Path) -> None:
         asyncio.run(manager.activate_coupling(coupling))
 
 
-def test_activate_coupling_raises_on_missing_analysis_config(tmp_path: Path) -> None:
+def test_activate_coupling_raises_on_missing_analyser(tmp_path: Path) -> None:
     storage, coupling = _make_full_storage(tmp_path)
-    storage.delete_analysis_config("ac-1")
+    storage.delete_analyser("ac-1")
     manager = PlayerManager(storage)
 
-    with pytest.raises(ValueError, match="missing AnalysisConfig"):
+    with pytest.raises(ValueError, match="missing Analyser"):
         asyncio.run(manager.activate_coupling(coupling))
 
 
