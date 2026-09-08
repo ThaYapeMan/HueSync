@@ -51,6 +51,7 @@ def _make_mock_manager() -> MagicMock:
     # WebSocket status properties
     type(manager).active_coupling_id = PropertyMock(return_value=None)
     type(manager).active_coupling_name = PropertyMock(return_value=None)
+    type(manager).active_zone_id = PropertyMock(return_value=None)
     type(manager).detected_sync_master_name = PropertyMock(return_value=None)
     type(manager).active_color_mode = PropertyMock(return_value=None)
     type(manager).active_effect = PropertyMock(return_value=None)

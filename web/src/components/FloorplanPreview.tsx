@@ -11,7 +11,12 @@ const H = 200
 const PAD = 14
 const INNER_W = W - 2 * PAD
 const INNER_H = H - 2 * PAD
-const RADIUS = 9
+
+// Scale dot radius with light count: large for few lights, shrinks for many.
+// Formula keeps dots from overlapping regardless of count.
+function dotRadius(n: number): number {
+  return Math.max(6, Math.min(20, Math.round(40 / Math.sqrt(Math.max(n, 1)))))
+}
 
 function rgb(r: number, g: number, b: number): string {
   return `rgb(${Math.round(r * 255)},${Math.round(g * 255)},${Math.round(b * 255)})`
@@ -31,6 +36,7 @@ export function FloorplanPreview({ channels, colours, onset }: Props) {
   if (channels.length === 0) return null
 
   const allAtOrigin = channels.every((ch) => ch.x === 0 && ch.z === 0)
+  const r = dotRadius(channels.length)
 
   return (
     <div>
@@ -79,7 +85,7 @@ export function FloorplanPreview({ channels, colours, onset }: Props) {
                   key={ch.channel_id}
                   cx={cx}
                   cy={cy}
-                  r={RADIUS}
+                  r={r}
                   fill={rgb(col.r, col.g, col.b)}
                   stroke={onset ? 'white' : 'transparent'}
                   strokeWidth={onset ? 1.5 : 0}
@@ -93,7 +99,7 @@ export function FloorplanPreview({ channels, colours, onset }: Props) {
                   key={ch.channel_id}
                   cx={svgX(ch.x)}
                   cy={svgY(ch.z)}
-                  r={RADIUS}
+                  r={r}
                   fill={rgb(col.r, col.g, col.b)}
                   stroke={onset ? 'white' : 'transparent'}
                   strokeWidth={onset ? 1.5 : 0}
