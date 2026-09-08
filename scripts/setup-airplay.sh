@@ -23,8 +23,10 @@ apt-get install -y \
     build-essential git autoconf automake libtool pkg-config \
     libpopt-dev libconfig-dev libssl-dev libsystemd-dev \
     libavahi-client-dev libavahi-common-dev avahi-daemon \
-    libsoxr-dev libsodium-dev libplist-dev \
-    uuid-dev
+    libsoxr-dev libsodium-dev libgcrypt20-dev \
+    libplist-dev libplist-utils \
+    uuid-dev xxd \
+    libavutil-dev libavcodec-dev libavformat-dev libswresample-dev
 
 systemctl enable avahi-daemon
 systemctl start avahi-daemon
@@ -55,8 +57,9 @@ systemctl restart nqptp
 
 # ---------------------------------------------------------------------------
 # Phase 3: shairport-sync with AirPlay 2 + pipe output
-# --with-apple-alac uses Apple's bundled ALAC reference code (fetched as a
-# git submodule) — no extra packages required for ALAC decoding.
+# --with-apple-alac: Apple's bundled ALAC submodule for lossless streams.
+# --with-avcodec: FFmpeg for AAC-ELD decoding — AirPlay 2 sends AAC-ELD on
+#   low-latency streams; apple-alac alone does not cover this codec.
 # ---------------------------------------------------------------------------
 echo "==> [3/6] Building shairport-sync (AirPlay 2)..."
 if [[ -d "$SRC/shairport-sync/.git" ]]; then
@@ -77,6 +80,7 @@ autoreconf -fi
     --with-soxr \
     --with-pipe \
     --with-apple-alac \
+    --with-avcodec \
     --with-systemd
 
 # Verify AirPlay 2 and pipe are enabled before the lengthy compile step.
