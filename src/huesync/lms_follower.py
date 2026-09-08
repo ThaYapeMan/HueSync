@@ -203,7 +203,6 @@ class LmsFollower:
         url = self._get_current_url()
         if url:
             self._send_play(url)
-            self._diag_sync_after_play()
 
     def _get_current_url(self) -> str | None:
         """Return the URL of the track currently loaded on *follow_mac*."""
@@ -233,11 +232,35 @@ class LmsFollower:
         )
         return None
 
-    def _diag_sync_after_play(self) -> None:
-        """Query sync ? on both players directly after a play command.
+    def _post_play_unsync(self) -> None:
+        """Break the sync group that 'playlist play' automatically re-forms.
 
-        Runs in the same worker thread as _mirror_track.  Uses the lightweight
-        'sync ?' CLI command (not 'status') to avoid triggering side effects in
+        When HueSync plays the same URL as the followed player, the
+        sonos-squeezebox plugin detects identical content and re-creates the
+        sync group (HueSync=master, Sonos=slave) within milliseconds.
+        Sending 'sync -' on both MACs immediately after the play command
+        prevents LMS from correcting Sonos as a slave, which caused audible
+        stuttering on the physical Sonos stream.
+        """
+        import time as _time
+        ts = _time.strftime("%H:%M:%S")
+        for label, mac in (("HueSync", self._huesync_mac), ("follow ", self._follow_mac)):
+            try:
+                _cli_exchange(self._host, self._port, f"{mac} sync -\n")
+                log.info(
+                    "DIAG UNSYNC [%s] play#%d %s (%s) sync - sent OK",
+                    ts, self._play_count, label, mac,
+                )
+            except Exception as exc:
+                log.warning(
+                    "DIAG UNSYNC [%s] play#%d %s (%s) sync - FAILED: %s",
+                    ts, self._play_count, label, mac, exc,
+                )
+
+    def _diag_sync_after_unsync(self) -> None:
+        """Verify sync ? on both players after the post-play unsync.
+
+        Uses 'sync ?' (not 'status') to avoid triggering side effects in
         third-party LMS plugins (e.g. sonos-squeezebox).
         """
         import time as _time
@@ -247,12 +270,12 @@ class LmsFollower:
                 raw = _cli_exchange(self._host, self._port, f"{mac} sync ?\n")
                 peers_raw = raw.split()[2] if len(raw.split()) >= 3 else "-"
                 log.info(
-                    "DIAG SYNC [%s] play#%d %s (%s) sync? -> %r",
+                    "DIAG VERIFY [%s] play#%d %s (%s) sync? -> %r",
                     ts, self._play_count, label, mac, peers_raw,
                 )
             except Exception as exc:
                 log.warning(
-                    "DIAG SYNC [%s] play#%d %s (%s) query failed: %s",
+                    "DIAG VERIFY [%s] play#%d %s (%s) query failed: %s",
                     ts, self._play_count, label, mac, exc,
                 )
 
@@ -273,5 +296,7 @@ class LmsFollower:
                 "DIAG PLAY #%d sent OK (play_count=%d since follower start)",
                 self._play_count, self._play_count,
             )
+            self._post_play_unsync()
+            self._diag_sync_after_unsync()
         except Exception as exc:
             log.warning("LMS follower: failed to send play command: %s", exc)

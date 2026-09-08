@@ -19,6 +19,7 @@ from huesync.lms_follower import LmsFollower
 
 FOLLOW_MAC = "aa:bb:cc:dd:ee:ff"
 HUESYNC_MAC = "11:22:33:44:55:66"
+THIRD_MAC = "cc:dd:ee:ff:00:11"   # unrelated player; must never receive any command
 MOCK_URL = "http://lms.local/music/track.flac"
 
 
@@ -233,6 +234,57 @@ def test_follower_reconnects_after_disconnect() -> None:
 
         await _stop_follower(follower, task)
         server.close()
+
+    asyncio.run(_test())
+
+
+# ---------------------------------------------------------------------------
+# Post-play unsync: sync - sent to BOTH MACs, no other player touched
+# ---------------------------------------------------------------------------
+
+
+def test_post_play_unsync_targets_only_huesync_and_follow_macs() -> None:
+    """After a newsong event, 'sync -' is sent to HueSync's own MAC and the
+    followed player's MAC only.  No other player in the LMS environment
+    (e.g. THIRD_MAC) receives any command.
+
+    This is a per-Coupling mechanism: LmsFollower knows only the two MACs
+    passed to its constructor.  It makes no LMS-global changes.
+    """
+    async def _test() -> None:
+        server = MockLmsServer()
+        port = await server.start()
+
+        follower = LmsFollower("127.0.0.1", FOLLOW_MAC, HUESYNC_MAC, cli_port=port)
+        task = follower.start()
+
+        await asyncio.wait_for(server._listen_connected.wait(), timeout=2.0)
+        await server.send_newsong(FOLLOW_MAC)
+
+        def _both_unsynced() -> bool:
+            return sum(1 for c in server.received if "sync -" in c) >= 2
+
+        assert await _wait_for(_both_unsynced, timeout=3.0), (
+            "expected two 'sync -' commands (one per MAC) after play"
+        )
+
+        unsync_cmds = [c for c in server.received if "sync -" in c]
+
+        assert any(HUESYNC_MAC in c for c in unsync_cmds), (
+            f"'sync -' not sent for HueSync MAC {HUESYNC_MAC!r}; got: {unsync_cmds}"
+        )
+        assert any(FOLLOW_MAC in c for c in unsync_cmds), (
+            f"'sync -' not sent for follow MAC {FOLLOW_MAC!r}; got: {unsync_cmds}"
+        )
+
+        # No command of any kind must target the unrelated third player.
+        third_mac_cmds = [c for c in server.received if THIRD_MAC in c]
+        assert not third_mac_cmds, (
+            f"unrelated player {THIRD_MAC!r} was incorrectly targeted: {third_mac_cmds}"
+        )
+
+        await _stop_follower(follower, task)
+        await server.stop()
 
     asyncio.run(_test())
 
