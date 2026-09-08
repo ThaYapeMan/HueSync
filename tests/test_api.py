@@ -54,6 +54,7 @@ def _make_mock_manager() -> MagicMock:
     type(manager).detected_sync_master_name = PropertyMock(return_value=None)
     type(manager).active_color_mode = PropertyMock(return_value=None)
     type(manager).active_effect = PropertyMock(return_value=None)
+    type(manager).follower_warning = PropertyMock(return_value=None)
     type(manager).active_bass_hz = PropertyMock(return_value=None)
     type(manager).active_mid_hz = PropertyMock(return_value=None)
     type(manager).active_onset_method = PropertyMock(return_value=None)

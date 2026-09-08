@@ -85,8 +85,26 @@ class MockLmsServer:
         self._event_writer.write(f"{encoded} playlist newsong {index}\n".encode())
         await self._event_writer.drain()
 
+    async def send_stop(self, player_mac: str) -> None:
+        assert self._event_writer is not None, "no active listen 1 connection"
+        encoded = player_mac.replace(":", "%3A")
+        self._event_writer.write(f"{encoded} playlist stop\n".encode())
+        await self._event_writer.drain()
+
+    async def send_pause(self, player_mac: str, state: int = 1) -> None:
+        assert self._event_writer is not None, "no active listen 1 connection"
+        encoded = player_mac.replace(":", "%3A")
+        self._event_writer.write(f"{encoded} playlist pause {state}\n".encode())
+        await self._event_writer.drain()
+
     def play_commands(self) -> list[str]:
         return [c for c in self.received if "playlist play" in c]
+
+    def stop_commands(self) -> list[str]:
+        return [c for c in self.received if c.strip().endswith(" stop")]
+
+    def pause_commands(self) -> list[str]:
+        return [c for c in self.received if " pause " in c]
 
 
 async def _wait_for(condition, timeout: float = 2.0, interval: float = 0.05) -> bool:
@@ -307,6 +325,103 @@ def test_stop_terminates_follower() -> None:
         await _stop_follower(follower, task)
         assert task.done()
 
+        await server.stop()
+
+    asyncio.run(_test())
+
+
+# ---------------------------------------------------------------------------
+# Stop propagation: master stop → HueSync stop
+# Root cause: _handle_line only handled newsong; stop events were silently
+# dropped, leaving HueSync playing after the master stopped.
+# ---------------------------------------------------------------------------
+
+
+def test_master_stop_sends_stop_to_huesync() -> None:
+    """'playlist stop' from the master must propagate as a stop command to HueSync.
+
+    Regression guard: before the fix, _handle_line only handled 'newsong'.
+    A 'playlist stop' event from the master was silently ignored, leaving
+    HueSync's player running indefinitely after the master stopped.
+    """
+    async def _test() -> None:
+        server = MockLmsServer()
+        port = await server.start()
+
+        follower = LmsFollower("127.0.0.1", FOLLOW_MAC, HUESYNC_MAC, cli_port=port)
+        task = follower.start()
+
+        await asyncio.wait_for(server._listen_connected.wait(), timeout=2.0)
+        await server.send_stop(FOLLOW_MAC)
+
+        assert await _wait_for(lambda: len(server.stop_commands()) >= 1), (
+            "no stop command sent to HueSync after master 'playlist stop' event"
+        )
+        cmd = server.stop_commands()[0]
+        assert HUESYNC_MAC in cmd, (
+            f"stop command targeted wrong player; expected {HUESYNC_MAC!r}, got: {cmd!r}"
+        )
+
+        await _stop_follower(follower, task)
+        await server.stop()
+
+    asyncio.run(_test())
+
+
+def test_stop_from_other_player_not_forwarded() -> None:
+    """'playlist stop' from a player other than the master must be ignored."""
+    async def _test() -> None:
+        server = MockLmsServer()
+        port = await server.start()
+
+        follower = LmsFollower("127.0.0.1", FOLLOW_MAC, HUESYNC_MAC, cli_port=port)
+        task = follower.start()
+
+        await asyncio.wait_for(server._listen_connected.wait(), timeout=2.0)
+        await server.send_stop(THIRD_MAC)
+
+        await asyncio.sleep(0.3)
+        assert len(server.stop_commands()) == 0, (
+            "stop command sent to HueSync after a stop from an unrelated player"
+        )
+
+        await _stop_follower(follower, task)
+        await server.stop()
+
+    asyncio.run(_test())
+
+
+def test_master_pause_sends_pause_to_huesync() -> None:
+    """'playlist pause 1' from the master propagates as 'pause 1' to HueSync.
+
+    Also verifies that 'playlist pause 0' (resume) is forwarded correctly.
+    """
+    async def _test() -> None:
+        server = MockLmsServer()
+        port = await server.start()
+
+        follower = LmsFollower("127.0.0.1", FOLLOW_MAC, HUESYNC_MAC, cli_port=port)
+        task = follower.start()
+
+        await asyncio.wait_for(server._listen_connected.wait(), timeout=2.0)
+
+        # Pause
+        await server.send_pause(FOLLOW_MAC, state=1)
+        assert await _wait_for(lambda: any("pause 1" in c for c in server.pause_commands())), (
+            "no 'pause 1' sent to HueSync after master pause event"
+        )
+        pause_cmds = [c for c in server.pause_commands() if "pause 1" in c]
+        assert any(HUESYNC_MAC in c for c in pause_cmds), (
+            f"pause targeted wrong player; got: {pause_cmds}"
+        )
+
+        # Resume
+        await server.send_pause(FOLLOW_MAC, state=0)
+        assert await _wait_for(lambda: any("pause 0" in c for c in server.pause_commands())), (
+            "no 'pause 0' sent to HueSync after master resume event"
+        )
+
+        await _stop_follower(follower, task)
         await server.stop()
 
     asyncio.run(_test())

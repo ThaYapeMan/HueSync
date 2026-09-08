@@ -62,6 +62,12 @@ function StatusGrid({ status }: { status: SocketStatus | null }) {
         )}
       </StatusRow>
 
+      {status.follower_warning && (
+        <StatusRow label="Follower">
+          <span className="text-destructive text-xs">{status.follower_warning}</span>
+        </StatusRow>
+      )}
+
       {status.color_mode && (
         <StatusRow label="Effect">
           <code className="text-xs font-mono">{status.color_mode}</code>

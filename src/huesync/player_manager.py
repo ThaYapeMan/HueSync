@@ -201,6 +201,13 @@ class PlayerManager:
         return self._detected_sync_master_name
 
     @property
+    def follower_warning(self) -> str | None:
+        """Human-readable warning when the LMS follower is disconnected, else None."""
+        if self._active and self._active.follower:
+            return self._active.follower.warning
+        return None
+
+    @property
     def active_coupling_id(self) -> str | None:
         if self._active and self._active.coupling:
             return self._active.coupling.id

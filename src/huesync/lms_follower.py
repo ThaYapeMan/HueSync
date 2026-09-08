@@ -5,8 +5,9 @@ correction from disturbing Sonos playback), this module replaces the
 implicit track-following that sync-group membership provided.
 
 It connects to the LMS CLI's push-notification feed (listen 1) and reacts
-to 'playlist newsong' events from the configured follow_player_mac by
-issuing a 'playlist play' command to HueSync's own player.
+to 'playlist newsong', 'playlist stop', and 'playlist pause' events from
+the configured follow_player_mac by mirroring those commands to HueSync's
+own player.
 
 Reconnects automatically with exponential backoff on any disconnection.
 """
@@ -69,12 +70,16 @@ def _apply_tcp_keepalive(sock: socket.socket) -> None:
 class LmsFollower:
     """Follows a target LMS player via the listen 1 CLI push-notification feed.
 
-    On a 'playlist newsong' event from *follow_mac*, queries that player's
-    current track URL and sends a 'playlist play' command to *huesync_mac*,
-    mirroring the audio stream without joining an LMS sync group.
+    Mirrors newsong, stop, and pause/unpause events from *follow_mac* to
+    *huesync_mac*, keeping HueSync's own player in sync with the master
+    without joining an LMS sync group.
 
     Start with :meth:`start` (returns an asyncio.Task).  Stop by calling
     :meth:`stop`; the task will exit cleanly on the next event-loop tick.
+
+    :attr:`connected` is True while the listen-1 TCP connection is
+    established.  :attr:`warning` is a human-readable string when the
+    follower is disconnected (reconnecting), or None when healthy.
     """
 
     def __init__(
@@ -90,6 +95,19 @@ class LmsFollower:
         self._huesync_mac = huesync_mac
         self._stop_event = asyncio.Event()
         self._play_count: int = 0  # diagnostic: total play commands sent this session
+        self._connected: bool = False
+
+    @property
+    def connected(self) -> bool:
+        """True while the listen-1 TCP connection is established."""
+        return self._connected
+
+    @property
+    def warning(self) -> str | None:
+        """Human-readable warning when the follower is not healthy, else None."""
+        if not self._connected:
+            return "LMS follower not connected — reconnecting"
+        return None
 
     def start(self) -> asyncio.Task:
         """Start the follower loop and return the background task."""
@@ -113,6 +131,7 @@ class LmsFollower:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                self._connected = False
                 log.warning(
                     "LMS follower disconnected (%s); reconnecting in %.0f s",
                     exc,
@@ -136,6 +155,7 @@ class LmsFollower:
         try:
             writer.write(b"listen 1\n")
             await writer.drain()
+            self._connected = True
             log.info(
                 "LMS follower: connected to %s:%d, watching %s",
                 self._host,
@@ -151,6 +171,7 @@ class LmsFollower:
                     line_bytes.decode("utf-8", errors="replace").rstrip("\n")
                 )
         finally:
+            self._connected = False
             writer.close()
             try:
                 await writer.wait_closed()
@@ -191,8 +212,30 @@ class LmsFollower:
             sub[:80],
         )
 
-        if command == "playlist" and sub.startswith("newsong"):
-            await asyncio.to_thread(self._mirror_track)
+        if command == "playlist":
+            if sub.startswith("newsong"):
+                await asyncio.to_thread(self._mirror_track)
+            elif sub == "stop":
+                log.info(
+                    "DIAG master STOPPED (%s) -> sending stop to HueSync (%s)",
+                    self._follow_mac, self._huesync_mac,
+                )
+                await asyncio.to_thread(self._send_stop)
+            elif sub.startswith("pause"):
+                # "pause 1" = paused, "pause 0" = resumed/unpaused.
+                pause_state = sub.split()[-1] if " " in sub else "1"
+                if pause_state == "1":
+                    log.info(
+                        "DIAG master PAUSED (%s) -> sending pause to HueSync (%s)",
+                        self._follow_mac, self._huesync_mac,
+                    )
+                    await asyncio.to_thread(self._send_pause, 1)
+                else:
+                    log.info(
+                        "DIAG master RESUMED (%s) -> sending resume to HueSync (%s)",
+                        self._follow_mac, self._huesync_mac,
+                    )
+                    await asyncio.to_thread(self._send_pause, 0)
 
     # ------------------------------------------------------------------
     # Blocking helpers (run in a thread via asyncio.to_thread)
@@ -300,3 +343,21 @@ class LmsFollower:
             self._diag_sync_after_unsync()
         except Exception as exc:
             log.warning("LMS follower: failed to send play command: %s", exc)
+
+    def _send_stop(self) -> None:
+        """Tell HueSync's player to stop."""
+        try:
+            _cli_exchange(self._host, self._port, f"{self._huesync_mac} stop\n")
+            log.info("LMS follower: stop sent to HueSync (%s)", self._huesync_mac)
+        except Exception as exc:
+            log.warning("LMS follower: failed to send stop command: %s", exc)
+
+    def _send_pause(self, state: int) -> None:
+        """Pause (state=1) or unpause (state=0) HueSync's player."""
+        try:
+            _cli_exchange(self._host, self._port, f"{self._huesync_mac} pause {state}\n")
+            label = "pause" if state else "unpause"
+            log.info("LMS follower: %s sent to HueSync (%s)", label, self._huesync_mac)
+        except Exception as exc:
+            log.warning("LMS follower: failed to send %s command: %s",
+                        "pause" if state else "unpause", exc)
