@@ -203,6 +203,7 @@ class LmsFollower:
         url = self._get_current_url()
         if url:
             self._send_play(url)
+            self._diag_sync_after_play()
 
     def _get_current_url(self) -> str | None:
         """Return the URL of the track currently loaded on *follow_mac*."""
@@ -231,6 +232,29 @@ class LmsFollower:
             "LMS follower: no url tag in status response for %s", self._follow_mac
         )
         return None
+
+    def _diag_sync_after_play(self) -> None:
+        """Query sync ? on both players directly after a play command.
+
+        Runs in the same worker thread as _mirror_track.  Uses the lightweight
+        'sync ?' CLI command (not 'status') to avoid triggering side effects in
+        third-party LMS plugins (e.g. sonos-squeezebox).
+        """
+        import time as _time
+        ts = _time.strftime("%H:%M:%S")
+        for label, mac in (("HueSync", self._huesync_mac), ("follow ", self._follow_mac)):
+            try:
+                raw = _cli_exchange(self._host, self._port, f"{mac} sync ?\n")
+                peers_raw = raw.split()[2] if len(raw.split()) >= 3 else "-"
+                log.info(
+                    "DIAG SYNC [%s] play#%d %s (%s) sync? -> %r",
+                    ts, self._play_count, label, mac, peers_raw,
+                )
+            except Exception as exc:
+                log.warning(
+                    "DIAG SYNC [%s] play#%d %s (%s) query failed: %s",
+                    ts, self._play_count, label, mac, exc,
+                )
 
     def _send_play(self, url: str) -> None:
         """Tell HueSync's player to start playing *url*."""

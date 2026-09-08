@@ -717,6 +717,21 @@ class PlayerManager:
             self._detected_sync_master_name = None
         await self._apply_probe_for_master(session, follow_mac)
 
+    async def _diag_sync_both(
+        self, label: str, lms_host: str, huesync_mac: str, follow_mac: str | None
+    ) -> None:
+        """Log sync ? state for both players at a named checkpoint."""
+        for name, mac in (("HueSync", huesync_mac), ("follow ", follow_mac)):
+            if not mac:
+                continue
+            try:
+                peers = await asyncio.to_thread(query_lms_sync_peers, lms_host, mac)
+                log.info("DIAG [%s] %s (%s) sync? -> peers=%r", label, name, mac, peers)
+            except Exception as exc:
+                log.warning(
+                    "DIAG [%s] %s (%s) sync? query failed: %s", label, name, mac, exc
+                )
+
     async def _delayed_unsync_and_follow(
         self, session: ActiveSession, lms_host: str, player_mac: str
     ) -> None:
@@ -732,50 +747,32 @@ class PlayerManager:
                 "Set lms_host in the Virtual Player editor."
             )
             return
+
+        follow_mac: str | None = None
+        if session.coupling:
+            vp = self.storage.get_virtual_player(session.coupling.player_id)
+            if vp:
+                follow_mac = vp.follow_player_mac or None
+
         await asyncio.sleep(5)
 
-        # --- Diagnostic: check sync state BEFORE unsync ---
-        try:
-            peers_before = await asyncio.to_thread(
-                query_lms_sync_peers, lms_host, player_mac
-            )
-            log.info(
-                "DIAG pre-unsync:  %s sync peers = %r", player_mac, peers_before
-            )
-        except Exception as exc:
-            log.warning("DIAG pre-unsync query failed for %s: %s", player_mac, exc)
+        # --- Diagnostic: check sync state BEFORE unsync on BOTH players ---
+        await self._diag_sync_both("pre-unsync ", lms_host, player_mac, follow_mac)
 
-        # --- Send the unsync command ---
-        log.info(
-            "DIAG sending unsync: %s sync - (host=%s)", player_mac, lms_host
-        )
+        # --- Send the unsync command to HueSync ---
+        log.info("DIAG sending: %s sync -  (host=%s)", player_mac, lms_host)
         try:
             await asyncio.to_thread(unsync_player, lms_host, player_mac)
-            log.info("DIAG unsync command sent OK for %s", player_mac)
+            log.info("DIAG unsync sent OK for %s", player_mac)
         except Exception as exc:
             log.warning("DIAG unsync failed for %s: %s", player_mac, exc)
 
-        # --- Wait 3 s, then verify the player is actually standalone ---
+        # --- Wait 3 s, then verify BOTH players are standalone ---
         await asyncio.sleep(3)
-        try:
-            peers_after = await asyncio.to_thread(
-                query_lms_sync_peers, lms_host, player_mac
-            )
-            if peers_after:
-                log.warning(
-                    "DIAG post-unsync: %s is STILL in sync group with peers %r "
-                    "— LMS did not honour the unsync command",
-                    player_mac, peers_after,
-                )
-            else:
-                log.info(
-                    "DIAG post-unsync: %s is now STANDALONE (no sync peers)",
-                    player_mac,
-                )
-        except Exception as exc:
-            log.warning(
-                "DIAG post-unsync verification failed for %s: %s", player_mac, exc
-            )
+        await self._diag_sync_both("post-unsync", lms_host, player_mac, follow_mac)
+
+        # --- Follower about to start — snapshot state right before ---
+        await self._diag_sync_both("pre-follow ", lms_host, player_mac, follow_mac)
 
         if session.follower is not None:
             follower_task = session.follower.start()
