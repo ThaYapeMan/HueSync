@@ -111,7 +111,7 @@ autoreconf -fi
     --with-ssl=openssl \
     --with-soxr \
     --with-pipe \
-    --with-systemd
+    --with-systemd-startup
 
 # Verify AirPlay 2 and pipe are enabled before the lengthy compile step.
 if ! grep -q "AirPlay 2.*yes" config.log 2>/dev/null; then
