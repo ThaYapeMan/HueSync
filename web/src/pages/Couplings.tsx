@@ -721,7 +721,7 @@ function CouplingEditor({
                   </SelectTrigger>
                   <SelectContent>
                     {players.map((p) => (
-                      <SelectItem key={p.id} value={p.id}>{p.player_name} ({p.lms_host})</SelectItem>
+                      <SelectItem key={p.id} value={p.id}>{p.type}</SelectItem>
                     ))}
                   </SelectContent>
                 </Select>
@@ -951,7 +951,7 @@ export function Couplings({ activeCouplingId: activeCouplingIdProp, onActivation
   // Lookup helpers
   function playerName(id: string) {
     const p = players.find((p) => p.id === id)
-    return p ? p.player_name : id
+    return p ? p.type : id
   }
   function areaName(zoneId: string) {
     const zone = zones.find((z) => z.id === zoneId)
