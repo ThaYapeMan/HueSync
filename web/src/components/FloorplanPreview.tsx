@@ -1,3 +1,4 @@
+import { toCssRgb } from '@/lib/colorUtils'
 import type { ChannelPosition } from '@/lib/api'
 
 interface Props {
@@ -12,31 +13,21 @@ const PAD = 14
 const INNER_W = W - 2 * PAD
 const INNER_H = H - 2 * PAD
 
+// Dot radius scales with light count; halved twice from the original formula.
+// max(2, min(5, round(10 / √n)))  →  ~5 px for 2 lights, ~2 px for 20+.
 function dotRadius(n: number): number {
-  return Math.max(6, Math.min(20, Math.round(40 / Math.sqrt(Math.max(n, 1)))))
+  return Math.max(2, Math.min(5, Math.round(10 / Math.sqrt(Math.max(n, 1)))))
 }
 
-// sRGB gamma approximation: makes mid-range values (0.3–0.5) appear as
-// vivid as the physical Hue lights do (the bridge applies the same curve).
-function gamma(v: number): number {
-  return Math.round(Math.pow(Math.max(v, 0), 1 / 2.2) * 255)
-}
-
-function rgb(r: number, g: number, b: number): string {
-  return `rgb(${gamma(r)},${gamma(g)},${gamma(b)})`
-}
-
-// Map Hue position to SVG coordinate, keeping the circle centre at least
-// `radius` pixels inside the rect boundary so the full dot is always visible.
+// Map Hue position to SVG coordinate; shrinks usable area by the dot
+// radius on each side so circles never clip the room outline.
 function svgX(hx: number, radius: number): number {
-  const usable = INNER_W - 2 * radius
-  return PAD + radius + ((hx + 1) / 2) * usable
+  return PAD + radius + ((hx + 1) / 2) * (INNER_W - 2 * radius)
 }
 
 function svgY(hz: number, radius: number): number {
-  const usable = INNER_H - 2 * radius
   // z=-1 (front of room) → bottom of SVG; z=1 (back) → top.
-  return PAD + radius + ((1 - hz) / 2) * usable
+  return PAD + radius + ((1 - hz) / 2) * (INNER_H - 2 * radius)
 }
 
 export function FloorplanPreview({ channels, colours, onset }: Props) {
@@ -91,9 +82,9 @@ export function FloorplanPreview({ channels, colours, onset }: Props) {
                   cx={cx}
                   cy={cy}
                   r={r}
-                  fill={rgb(col.r, col.g, col.b)}
+                  fill={toCssRgb(col.r, col.g, col.b)}
                   stroke={onset ? 'white' : 'transparent'}
-                  strokeWidth={onset ? 1.5 : 0}
+                  strokeWidth={onset ? 1 : 0}
                 />
               )
             })
@@ -105,9 +96,9 @@ export function FloorplanPreview({ channels, colours, onset }: Props) {
                   cx={svgX(ch.x, r)}
                   cy={svgY(ch.z, r)}
                   r={r}
-                  fill={rgb(col.r, col.g, col.b)}
+                  fill={toCssRgb(col.r, col.g, col.b)}
                   stroke={onset ? 'white' : 'transparent'}
-                  strokeWidth={onset ? 1.5 : 0}
+                  strokeWidth={onset ? 1 : 0}
                 />
               )
             })}
