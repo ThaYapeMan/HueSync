@@ -57,9 +57,10 @@ systemctl restart nqptp
 
 # ---------------------------------------------------------------------------
 # Phase 3: shairport-sync with AirPlay 2 + pipe output
-# --with-apple-alac: Apple's bundled ALAC submodule for lossless streams.
-# --with-avcodec: FFmpeg for AAC-ELD decoding — AirPlay 2 sends AAC-ELD on
-#   low-latency streams; apple-alac alone does not cover this codec.
+# --with-airplay-2 automatically enables FFmpeg (configure.ac line 479:
+#   "if ... -o with_airplay_2 = yes; using_ffmpeg=true"). No --with-avcodec
+# or --with-apple-alac flags: both are either invalid or explicitly forbidden
+# (apple-alac is deprecated and configure errors when combined with AP2).
 # ---------------------------------------------------------------------------
 echo "==> [3/6] Building shairport-sync (AirPlay 2)..."
 if [[ -d "$SRC/shairport-sync/.git" ]]; then
@@ -79,8 +80,6 @@ autoreconf -fi
     --with-ssl=openssl \
     --with-soxr \
     --with-pipe \
-    --with-apple-alac \
-    --with-avcodec \
     --with-systemd
 
 # Verify AirPlay 2 and pipe are enabled before the lengthy compile step.
