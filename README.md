@@ -257,6 +257,25 @@ systemctl daemon-reload
 systemctl enable --now huesync
 ```
 
+### AirPlay 2 support (optional)
+
+To accept AirPlay 2 audio as an input source, build shairport-sync and nqptp
+from source on the LXC. Run once after the initial setup:
+
+```bash
+sudo bash scripts/setup-airplay.sh
+```
+
+This compiles shairport-sync with `--with-airplay-2`, installs nqptp (precision
+timing daemon), configures a pipe output at `/run/huesync/airplay.pcm`, and
+registers both as systemd services running as the `huesync` user. Re-running is
+safe — existing source trees are updated via `git pull`, not re-cloned.
+
+After the script completes, verify in iOS Control Center that "HueSync" appears
+alongside your Sonos speakers and can be selected simultaneously (AirPlay 2
+multi-room co-existence). HueSync reads the raw PCM stream silently — no audio
+plays from the LXC.
+
 ### Deployment updates
 
 ```bash

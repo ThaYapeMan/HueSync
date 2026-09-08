@@ -234,6 +234,9 @@ Runs as user `huesync` under systemd (`systemd/huesync.service`). Config at
 Note: `git config --global --add safe.directory /opt/huesync` was needed once,
 because the directory is owned by `huesync` while git runs as root.
 
+AirPlay 2 input (shairport-sync + nqptp) is a one-time setup step:
+`sudo bash scripts/setup-airplay.sh` — idempotent, safe to re-run.
+
 ---
 
 ## Key files
