@@ -8,7 +8,8 @@ interface Props {
 }
 
 export function ColourSwatch({ r, g, b, onset }: Props) {
-  const to255 = (v: number) => Math.round(v * 255)
+  // sRGB gamma: matches the perceptual brightness of the physical Hue lights.
+  const to255 = (v: number) => Math.round(Math.pow(Math.max(v, 0), 1 / 2.2) * 255)
   return (
     <div
       className={cn(

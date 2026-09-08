@@ -12,24 +12,31 @@ const PAD = 14
 const INNER_W = W - 2 * PAD
 const INNER_H = H - 2 * PAD
 
-// Scale dot radius with light count: large for few lights, shrinks for many.
-// Formula keeps dots from overlapping regardless of count.
 function dotRadius(n: number): number {
   return Math.max(6, Math.min(20, Math.round(40 / Math.sqrt(Math.max(n, 1)))))
 }
 
+// sRGB gamma approximation: makes mid-range values (0.3–0.5) appear as
+// vivid as the physical Hue lights do (the bridge applies the same curve).
+function gamma(v: number): number {
+  return Math.round(Math.pow(Math.max(v, 0), 1 / 2.2) * 255)
+}
+
 function rgb(r: number, g: number, b: number): string {
-  return `rgb(${Math.round(r * 255)},${Math.round(g * 255)},${Math.round(b * 255)})`
+  return `rgb(${gamma(r)},${gamma(g)},${gamma(b)})`
 }
 
-// Hue: x ∈ [-1,1] left→right, z ∈ [-1,1] front→back
-// SVG: x grows right, y grows down; front of room (z=-1) at bottom.
-function svgX(hx: number): number {
-  return PAD + ((hx + 1) / 2) * INNER_W
+// Map Hue position to SVG coordinate, keeping the circle centre at least
+// `radius` pixels inside the rect boundary so the full dot is always visible.
+function svgX(hx: number, radius: number): number {
+  const usable = INNER_W - 2 * radius
+  return PAD + radius + ((hx + 1) / 2) * usable
 }
 
-function svgY(hz: number): number {
-  return PAD + ((1 - hz) / 2) * INNER_H
+function svgY(hz: number, radius: number): number {
+  const usable = INNER_H - 2 * radius
+  // z=-1 (front of room) → bottom of SVG; z=1 (back) → top.
+  return PAD + radius + ((1 - hz) / 2) * usable
 }
 
 export function FloorplanPreview({ channels, colours, onset }: Props) {
@@ -40,9 +47,8 @@ export function FloorplanPreview({ channels, colours, onset }: Props) {
 
   return (
     <div>
+      {/* No width/height attributes: SVG is fully responsive via viewBox + CSS. */}
       <svg
-        width={W}
-        height={H}
         viewBox={`0 0 ${W} ${H}`}
         className="w-full block"
         aria-label="Light floorplan"
@@ -73,8 +79,7 @@ export function FloorplanPreview({ channels, colours, onset }: Props) {
         </text>
 
         {allAtOrigin
-          ? /* Circular fallback when bridge positions are all at origin */
-            channels.map((ch, i) => {
+          ? channels.map((ch, i) => {
               const angle = (i / channels.length) * 2 * Math.PI - Math.PI / 2
               const rr = Math.min(INNER_W, INNER_H) * 0.32
               const cx = W / 2 + rr * Math.cos(angle)
@@ -97,8 +102,8 @@ export function FloorplanPreview({ channels, colours, onset }: Props) {
               return (
                 <circle
                   key={ch.channel_id}
-                  cx={svgX(ch.x)}
-                  cy={svgY(ch.z)}
+                  cx={svgX(ch.x, r)}
+                  cy={svgY(ch.z, r)}
                   r={r}
                   fill={rgb(col.r, col.g, col.b)}
                   stroke={onset ? 'white' : 'transparent'}
