@@ -20,10 +20,12 @@ squeezelite -v  →  /dev/shm/squeezelite-<mac>   ← virtual player; snd-dummy 
    │  BandNormaliser (per-band AGC)
    │      │  normalised bars → AudioFeatures
    │
-   └─ PcmStft (100 Hz STFT tap)         ←  onset detection only (multiband / superflux)
+   └─ PcmStft (100 Hz STFT tap)         ←  onset detection + optional HPSS
           │  magnitude frames per 10 ms hop
-   MultibandStftPipeline / SuperfluxStftPipeline / StftOnsetPipeline
-          │  onset flags (bass / mid / treble)
+          ├─ MultibandStftPipeline / SuperfluxStftPipeline / StftOnsetPipeline
+          │        │  onset flags (bass / mid / treble)
+          └─ PcmHpss (when use_hpss_separation = true)
+                   │  percussive_energy, harmonic_energy per frame
 
 SyncEngine  →  ColourModeEffect  →  Scene
    │  30 Hz send loop (DTLS/UDP)
@@ -44,18 +46,20 @@ Three components worth understanding:
 ### LMS integration: follow, not sync
 
 HueSync does **not** join an LMS sync group. When a Coupling is activated,
-HueSync's virtual player joins the group briefly to pick up the current stream,
-then unsyncs itself after a few seconds. From that point on, `LmsFollower`
-listens to LMS's `listen 1` CLI push-notification feed and mirrors every
-`playlist newsong` event from the configured **Follow player** — issuing a
-`playlist play` command to HueSync's own player.
+HueSync's virtual player registers with LMS as a **standalone** player. After a
+5-second startup delay `LmsFollower` connects to LMS's `listen 1` CLI
+push-notification feed and mirrors every `playlist newsong` event from the
+configured **Follow player** — issuing a `playlist play` command to HueSync's
+own player. After each play command, HueSync immediately sends `sync -` to
+both itself and the follow player to prevent any LMS plugin from automatically
+re-creating a sync group.
 
-**Why not stay in the sync group?** LMS drift correction keeps sync-group
-members aligned by pausing or skipping frames. HueSync's virtual player has
-a much shorter buffer than Sonos or AirPlay players, so LMS's correction
-frequently hits HueSync — causing audible stutters on the real speakers in the
-room, not just HueSync's silent virtual player. Running standalone eliminates
-this interference entirely.
+**Why not join the sync group?** LMS drift correction keeps sync-group members
+aligned by pausing or skipping frames. HueSync's virtual player has a much
+shorter buffer than Sonos or AirPlay players, so LMS's correction frequently
+hits HueSync — causing audible stutters on the real speakers in the room, not
+just HueSync's silent virtual player. Running standalone eliminates this
+interference entirely.
 
 ---
 
@@ -77,7 +81,7 @@ VirtualPlayer ──── Coupling ──── Crossfader ──── Scene (
 | **Controller** | A Hue Bridge: IP, app key, client key. Used for pairing and Entertainment Area discovery. |
 | **Virtual Player** | A virtual squeezelite instance: LMS host, player name, MAC address, ALSA device, follow player MAC. |
 | **Zone** | Links a Controller to one of its Entertainment Areas. Shared across Couplings. |
-| **Analysis Config** | cava parameters (bars, cutoff freqs) and onset detection settings (method, delta, alpha). |
+| **Analysis Config** | cava parameters (bars, cutoff freqs), onset detection settings (method, delta, alpha), and optional harmonic/percussive separation (`use_hpss_separation`). |
 | **Scene** | Visual output parameters: effect, sensitivity, brightness floor, band boundaries. |
 | **Crossfader** | Links an Active Scene (loud passages) + Mellow Scene (quiet passages) with crossfade thresholds. |
 | **Coupling** | Binds exactly one Virtual Player + Zone + Analysis Config + Crossfader. Activate a Coupling to start the light show. |
@@ -143,6 +147,38 @@ The **`onset_method`** field in Analysis Config selects the PCM-tap algorithm:
 
 Switching `onset_method` live rebuilds the PCM pipeline in place — no process restart,
 BandNormaliser EMA preserved.
+
+---
+
+## Harmonic/percussive separation (HPSS)
+
+Setting `use_hpss_separation: true` on an Analysis Config activates `PcmHpss`
+as an additional layer on top of the STFT. It applies a 2D median filter
+(Fitzgerald 2010) to the rolling magnitude spectrogram and produces two
+per-frame energy values:
+
+- **`percussive_energy`** (0.0–1.0): proportion of the frame dominated by
+  transients — kick drums, snares, rhythmic hits.
+- **`harmonic_energy`** (0.0–1.0): proportion dominated by tonal content —
+  vocals, chords, sustained notes.
+
+Both sum to 1.0 via Wiener soft masks.
+
+**Effect routing when HPSS is active:**
+
+| Effect type | HPSS source |
+|---|---|
+| Active effects: Pulses, Flashes, Fireworks | Scale with `percussive_energy` |
+| Mellow effects: Swirl, Wave, Solid | Scale with `harmonic_energy` |
+| Spectral / intensity effects: Spectrum RGB, Mono Pulse | Unaffected (no HPSS coupling) |
+
+**Implementation:** pure numpy — no librosa or scipy dependency. Time-axis
+median window: 17 frames (~170 ms at 100 Hz). Frequency-axis median window:
+31 bins. Each window is the minimum that cleanly separates kick drums from
+bass guitar in practice.
+
+**CPU cost (measured on the production LXC):** ~405 µs per frame — 25× headroom
+against the 10 ms per-frame budget. Suitable for always-on use in production.
 
 ---
 
@@ -248,13 +284,21 @@ serves the old bundle.
 4. **Create a Coupling**: go to *Couplings* → *New coupling*. Link the Virtual
    Player, Zone, and a Crossfader (which references your Scenes). Defaults work
    out of the box.
-5. Press **Go** (▶) on the Coupling. HueSync registers the virtual player in LMS,
-   briefly syncs to pick up the current track, then unsyncs and starts following
-   automatically.
+5. Press **Go** (▶) on the Coupling. HueSync registers the virtual player with
+   LMS as a standalone player and starts following your real player via LMS's
+   push-notification feed — no sync group, no drift correction interference.
 6. Play music. The lights react to the live spectrum.
 
 The **Now Playing** tab shows the live preview and lets you activate/stop
 Couplings directly without switching tabs.
+
+### Configuration UI
+
+All Analysis Config and Scene fields have plain-language descriptions and
+context-sensitive hints directly in the editor dialogs — no prior knowledge of
+DSP terminology required. The onset method selector uses the same card-picker
+pattern as the effect selector, with one-line descriptions per option. SuperFlux
+parameters are hidden unless SuperFlux is the selected method.
 
 ### Live vs. Blind edits
 
@@ -267,7 +311,7 @@ HueSync applies the minimum necessary action depending on which fields changed:
 | `analysis_config_id` | cava restart + PCM pipeline rebuild — new Analysis Config applied live, Hue session stays up. |
 | `crossfader_id` | Render update only — new Crossfader applied immediately, nothing restarts. |
 | `bars`, `lower_cutoff_freq`, `higher_cutoff_freq` | cava-only restart — squeezelite and the Hue session stay up. |
-| `onset_method`, `onset_delta`, `onset_alpha`, `superflux_mu`, `superflux_lag`, `bass_hz`, `mid_hz` | PCM pipeline rebuilt live — no process restart, BandNormaliser EMA preserved. |
+| `onset_method`, `onset_delta`, `onset_alpha`, `superflux_mu`, `superflux_lag`, `bass_hz`, `mid_hz`, `use_hpss_separation` | PCM pipeline rebuilt live — no process restart, BandNormaliser EMA preserved. |
 | `sensitivity`, `brightness_floor`, `exertion_clip`, `onset_flash_intensity` | Render update only — applied immediately, nothing restarts. |
 | `name`, `enabled` | Metadata only — no session action. |
 
@@ -288,6 +332,7 @@ active Coupling also applies live — no Coupling restart needed.
 | `onset_alpha` | 0.9 | Per-frame decay of the suppression threshold. Higher = longer suppression window. |
 | `superflux_mu` | 3 | SuperFlux only: max-filter half-width in FFT bins. |
 | `superflux_lag` | 2 | SuperFlux only: compare with frame `lag` steps ago. |
+| `use_hpss_separation` | `false` | Enable harmonic/percussive separation. See HPSS section. Rebuilds PCM pipeline live. |
 
 ### Key Scene fields
 
