@@ -450,3 +450,106 @@ def test_deactivate_clears_active_coupling_id(tmp_path: Path) -> None:
 
     assert storage.get_active_coupling_id() is None
     assert manager.active_coupling_id is None
+
+
+# ---------------------------------------------------------------------------
+# active_color_mode / active_bass_hz / active_mid_hz property chain
+#
+# Regression guard: these properties read self._active.profile.{effect,bass_hz,
+# mid_hz}.  Any future rename that breaks the chain (e.g. "effect" field moved,
+# update_render not setting self._active.profile) will fail these tests.
+# Uses real code paths — no mocking of the properties themselves.
+# ---------------------------------------------------------------------------
+
+
+def _make_session_from_storage(tmp_path: Path) -> tuple[PlayerManager, ActiveSession]:
+    """Create a PlayerManager with a live ActiveSession built from real entities.
+
+    The Scene has effect='spectrum_rgb', bass_hz=300, mid_hz=3000 so
+    assertions can distinguish correct values from dataclass defaults.
+    """
+    storage, coupling = _make_full_storage(tmp_path)
+
+    # Override Scene values to be distinct from defaults (250 / 2000).
+    scene = storage.get_scene("scene-1")
+    assert scene is not None
+    scene.effect = "spectrum_rgb"
+    scene.bass_hz = 300
+    scene.mid_hz = 3000
+    storage.save_scene(scene)
+
+    profile = _build_engine_profile(coupling, storage)
+    assert profile is not None, "_build_engine_profile must succeed with a full storage"
+    session = ActiveSession(profile, coupling=coupling)
+    manager = PlayerManager(storage)
+    manager._active = session
+    return manager, session
+
+
+def test_active_color_mode_reads_scene_effect(tmp_path: Path) -> None:
+    """active_color_mode must reflect the Scene effect stored in the active profile.
+
+    Regression: any rename that breaks self._active.profile.effect causes all
+    spectrum bars to render in accent colour (purple) instead of R/G/B.
+    """
+    manager, _ = _make_session_from_storage(tmp_path)
+    assert manager.active_color_mode == "spectrum_rgb", (
+        f"active_color_mode must return the Scene effect ('spectrum_rgb'); "
+        f"got {manager.active_color_mode!r} — check the self._active.profile.effect property chain"
+    )
+
+
+def test_active_band_hz_reads_scene_values(tmp_path: Path) -> None:
+    """active_bass_hz / active_mid_hz must return Scene values, not dataclass defaults."""
+    manager, _ = _make_session_from_storage(tmp_path)
+    assert manager.active_bass_hz == 300, (
+        f"active_bass_hz must return Scene.bass_hz (300); got {manager.active_bass_hz}"
+    )
+    assert manager.active_mid_hz == 3000, (
+        f"active_mid_hz must return Scene.mid_hz (3000); got {manager.active_mid_hz}"
+    )
+
+
+def test_update_render_propagates_effect_to_active_profile(tmp_path: Path) -> None:
+    """update_render must set self._active.profile so active_color_mode reflects the change.
+
+    Regression: ba643f3 fixed a missing 'self._active.profile = profile' in
+    update_render.  This test ensures that assignment is never removed.
+    """
+    manager, session = _make_session_from_storage(tmp_path)
+    session.sync_engine = MagicMock()
+
+    new_profile = Profile(
+        id="coupling-1", player_mac="aa:bb:cc:dd:ee:ff",
+        effect="mono_pulse", bass_hz=400, mid_hz=4000,
+    )
+    manager.update_render(new_profile)
+
+    assert manager.active_color_mode == "mono_pulse", (
+        "update_render must assign self._active.profile; "
+        "active_color_mode still reads the old value — profile assignment missing"
+    )
+    assert manager.active_bass_hz == 400
+    assert manager.active_mid_hz == 4000
+
+
+def test_update_onset_pipeline_propagates_profile(tmp_path: Path) -> None:
+    """update_onset_pipeline must set self._active.profile so band-hz properties update.
+
+    Regression: same fix as update_render (ba643f3); both methods needed the
+    assignment.  Verifying both prevents one from regressing independently.
+    """
+    manager, session = _make_session_from_storage(tmp_path)
+    session.sync_engine = MagicMock()
+
+    new_profile = Profile(
+        id="coupling-1", player_mac="aa:bb:cc:dd:ee:ff",
+        effect="spectrum_rgb", bass_hz=500, mid_hz=5000,
+    )
+    manager.update_onset_pipeline(new_profile)
+
+    assert manager.active_bass_hz == 500, (
+        "update_onset_pipeline must assign self._active.profile; "
+        "active_bass_hz still reads the old value — profile assignment missing"
+    )
+    assert manager.active_mid_hz == 5000
