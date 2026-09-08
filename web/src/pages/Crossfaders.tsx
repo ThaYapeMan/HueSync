@@ -242,7 +242,12 @@ export function Crossfaders() {
             </FormRow>
 
             <div className="border-t pt-3 space-y-3">
-              <p className="text-xs text-muted-foreground font-medium uppercase tracking-wide">Crossfade thresholds</p>
+              <div>
+                <p className="text-xs text-muted-foreground font-medium uppercase tracking-wide">Crossfade thresholds</p>
+                <p className="text-xs text-muted-foreground mt-1">
+                  e.g. 0.3 / 0.7 → soft passages use Mellow, loud refrains use Active, with a gradual blend in between.
+                </p>
+              </div>
               <FormRow label="Low threshold — energy below this → pure mellow">
                 <Input
                   type="number"

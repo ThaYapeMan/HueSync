@@ -9,9 +9,9 @@ export const PLAYER_TYPES = [
 export type PlayerType = typeof PLAYER_TYPES[number]['value']
 
 export const ONSET_METHODS = [
-  { value: 'combined',  label: 'Combined (cava, 30 Hz)' },
-  { value: 'multiband', label: 'Multiband (PCM tap, 100 Hz)' },
-  { value: 'superflux', label: 'SuperFlux (PCM tap, 100 Hz)' },
+  { value: 'combined',  label: 'Combined',  description: 'Default — beat detection across the full spectrum. Good for most music.' },
+  { value: 'multiband', label: 'Multiband', description: 'Detects beats separately in bass, mid, and treble. More sensitive; can feel busier.' },
+  { value: 'superflux', label: 'SuperFlux', description: 'Suppresses vibrato and false triggers. More precise on vocals and sustained notes.' },
 ] as const
 
 export type OnsetMethod = typeof ONSET_METHODS[number]['value']
@@ -27,16 +27,16 @@ export type ColourMode = typeof COLOUR_MODES[number]['value']
 
 // Canonical list of effects.  Keep in sync with EFFECT_IDS in models.py.
 export const EFFECTS = [
-  { id: 'spectrum_rgb', label: 'Spectrum RGB',  description: 'Bass→R, mid→G, treble→B',         hasSpeed: false, hasDecay: false },
-  { id: 'mono_pulse',  label: 'Mono Pulse',   description: 'Brightness follows overall energy',  hasSpeed: false, hasDecay: false },
-  { id: 'pulses',      label: 'Pulses',        description: 'Sharp onset attack, decays away',   hasSpeed: false, hasDecay: true  },
-  { id: 'flashes',     label: 'Flashes',       description: 'Hard flash on onset, dark between', hasSpeed: false, hasDecay: true  },
-  { id: 'splotches',   label: 'Splotches',     description: 'Random lights flare on onset',      hasSpeed: false, hasDecay: true  },
-  { id: 'fireworks',   label: 'Fireworks',     description: 'Expanding burst from a point',      hasSpeed: true,  hasDecay: true  },
-  { id: 'swirl',       label: 'Swirl',         description: 'Rotating colour gradient',          hasSpeed: true,  hasDecay: false },
-  { id: 'wave',        label: 'Wave',          description: 'Colour wave across positions',      hasSpeed: true,  hasDecay: false },
-  { id: 'solid',       label: 'Solid',         description: 'Steady colour, drifts with music',  hasSpeed: false, hasDecay: false },
-  { id: 'none',        label: 'None',          description: 'No output',                         hasSpeed: false, hasDecay: false },
+  { id: 'spectrum_rgb', label: 'Spectrum RGB', description: 'Bass drives red, mid drives green, treble drives blue',       hasSpeed: false, hasDecay: false },
+  { id: 'mono_pulse',   label: 'Mono Pulse',   description: 'All lights dim and brighten with the overall energy',         hasSpeed: false, hasDecay: false },
+  { id: 'pulses',       label: 'Pulses',       description: 'Lights flash on each beat and fade out smoothly',             hasSpeed: false, hasDecay: true  },
+  { id: 'flashes',      label: 'Flashes',      description: 'Hard white flash on each beat, dark between beats',           hasSpeed: false, hasDecay: true  },
+  { id: 'splotches',    label: 'Splotches',    description: 'Random individual lights flare up on each beat',              hasSpeed: false, hasDecay: true  },
+  { id: 'fireworks',    label: 'Fireworks',    description: 'Colour burst expands outward from a point on each beat',      hasSpeed: true,  hasDecay: true  },
+  { id: 'swirl',        label: 'Swirl',        description: 'Colour gradient rotates continuously across the lights',      hasSpeed: true,  hasDecay: false },
+  { id: 'wave',         label: 'Wave',         description: 'Colour wave sweeps across the room in time with the beat',    hasSpeed: true,  hasDecay: false },
+  { id: 'solid',        label: 'Solid',        description: 'Single steady colour that shifts slowly with the music',      hasSpeed: false, hasDecay: false },
+  { id: 'none',         label: 'None',         description: 'Lights off — no output sent to this zone',                   hasSpeed: false, hasDecay: false },
 ] as const
 
 export type EffectId = typeof EFFECTS[number]['id']
@@ -168,6 +168,7 @@ export interface AnalysisConfig {
   bars: number
   lower_cutoff_freq: number
   higher_cutoff_freq: number
+  use_hpss_separation: boolean
 }
 
 export interface Scene {

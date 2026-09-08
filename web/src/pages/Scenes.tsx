@@ -56,10 +56,11 @@ function defaultForm(cfg?: Scene): FormState {
   }
 }
 
-function FormRow({ label, children }: { label: string; children: React.ReactNode }) {
+function FormRow({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
   return (
     <div className="space-y-1">
       <Label className="text-sm">{label}</Label>
+      {hint && <p className="text-xs text-muted-foreground">{hint}</p>}
       {children}
     </div>
   )
@@ -154,6 +155,18 @@ export function Scenes() {
 
   const selectedEffect = EFFECTS.find((e) => e.id === form.effect)
 
+  const speedLabel: Record<string, string> = {
+    fireworks: 'Burst expansion speed (0.1 = slow, 5 = fast)',
+    swirl:     'Rotation speed (0.1 = slow, 5 = fast)',
+    wave:      'Wave sweep speed (0.1 = slow, 5 = fast)',
+  }
+  const decayLabel: Record<string, string> = {
+    fireworks: 'Burst fade speed (0.1 = lingers, 0.9 = snappy)',
+    pulses:    'Pulse fade speed (0.1 = slow fade, 0.9 = snappy)',
+    flashes:   'Flash fade speed (0.1 = lingers, 0.9 = snappy)',
+    splotches: 'Flare fade speed (0.1 = slow fade, 0.9 = snappy)',
+  }
+
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
@@ -241,7 +254,7 @@ export function Scenes() {
               </div>
             </FormRow>
             {selectedEffect?.hasSpeed && (
-              <FormRow label="Effect speed (0.1 = slow, 5 = fast)">
+              <FormRow label={speedLabel[form.effect] ?? 'Effect speed (0.1 = slow, 5 = fast)'}>
                 <Input
                   type="number"
                   step={0.1}
@@ -253,7 +266,7 @@ export function Scenes() {
               </FormRow>
             )}
             {selectedEffect?.hasDecay && (
-              <FormRow label="Effect decay (0.1 = slow, 0.9 = fast)">
+              <FormRow label={decayLabel[form.effect] ?? 'Effect decay (0.1 = slow, 0.9 = fast)'}>
                 <Input
                   type="number"
                   step={0.05}
@@ -264,7 +277,10 @@ export function Scenes() {
                 />
               </FormRow>
             )}
-            <FormRow label="Sensitivity">
+            <FormRow
+              label="Sensitivity"
+              hint="Brightness multiplier for music energy. At 1.0, steady music sits at ~⅓ brightness with brief peaks at full. Above 3 the lights saturate."
+            >
               <Input
                 type="number"
                 step={0.1}
@@ -274,7 +290,10 @@ export function Scenes() {
                 onChange={(e) => set('sensitivity', e.target.value)}
               />
             </FormRow>
-            <FormRow label="Brightness floor">
+            <FormRow
+              label="Brightness floor"
+              hint="Minimum brightness during silences or very quiet passages. 0 = lights can go fully dark."
+            >
               <Input
                 type="number"
                 step={0.01}
@@ -284,7 +303,10 @@ export function Scenes() {
                 onChange={(e) => set('brightness_floor', e.target.value)}
               />
             </FormRow>
-            <FormRow label="Bass / mid boundary (Hz)">
+            <FormRow
+              label="Bass / mid boundary (Hz)"
+              hint="Frequencies below this count as bass (red in Spectrum RGB, low-end energy for other effects)."
+            >
               <Input
                 type="number"
                 min={50}
@@ -293,7 +315,10 @@ export function Scenes() {
                 onChange={(e) => set('bass_hz', e.target.value)}
               />
             </FormRow>
-            <FormRow label="Mid / treble boundary (Hz)">
+            <FormRow
+              label="Mid / treble boundary (Hz)"
+              hint="Frequencies above this count as treble (blue in Spectrum RGB). 2000 Hz is a neutral starting point."
+            >
               <Input
                 type="number"
                 min={200}
@@ -302,7 +327,10 @@ export function Scenes() {
                 onChange={(e) => set('mid_hz', e.target.value)}
               />
             </FormRow>
-            <FormRow label="Exertion clip">
+            <FormRow
+              label="Exertion clip"
+              hint="Sets when lights hit full brightness. At 3.0 (default), average energy maps to ~⅓ brightness; loud peaks reach full. Lower = more dramatic, higher = more subtle."
+            >
               <Input
                 type="number"
                 step={0.1}
@@ -312,7 +340,10 @@ export function Scenes() {
                 onChange={(e) => set('exertion_clip', e.target.value)}
               />
             </FormRow>
-            <FormRow label="Onset flash intensity (0 = off, 1 = full white)">
+            <FormRow
+              label="Beat flash intensity"
+              hint="Extra brightness burst on each detected beat, on top of the normal colour. 0 = off, 1 = full white flash."
+            >
               <Input
                 type="number"
                 step={0.05}

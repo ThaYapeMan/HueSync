@@ -308,6 +308,7 @@ function NewAnalysisConfigDialog({ open, onClose, onCreated }: NewAnalysisConfig
         onset_alpha: 0.9,
         superflux_mu: 3,
         superflux_lag: 2,
+        use_hpss_separation: false,
       })
       onCreated(cfg)
     } catch (e) {

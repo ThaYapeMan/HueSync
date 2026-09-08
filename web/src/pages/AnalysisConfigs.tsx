@@ -17,14 +17,8 @@ import {
   DialogTitle,
   DialogFooter,
 } from '@/components/ui/dialog'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
+import { cn } from '@/lib/utils'
 import {
   ONSET_METHODS,
   type AnalysisConfig,
@@ -44,6 +38,7 @@ interface FormState {
   onset_alpha: string
   superflux_mu: string
   superflux_lag: string
+  use_hpss_separation: boolean
 }
 
 function defaultForm(cfg?: AnalysisConfig): FormState {
@@ -57,13 +52,15 @@ function defaultForm(cfg?: AnalysisConfig): FormState {
     onset_alpha: String(cfg?.onset_alpha ?? 0.9),
     superflux_mu: String(cfg?.superflux_mu ?? 3),
     superflux_lag: String(cfg?.superflux_lag ?? 2),
+    use_hpss_separation: cfg?.use_hpss_separation ?? false,
   }
 }
 
-function FormRow({ label, children }: { label: string; children: React.ReactNode }) {
+function FormRow({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
   return (
     <div className="space-y-1">
       <Label className="text-sm">{label}</Label>
+      {hint && <p className="text-xs text-muted-foreground">{hint}</p>}
       {children}
     </div>
   )
@@ -109,7 +106,7 @@ export function AnalysisConfigs() {
     setEditorOpen(true)
   }
 
-  function set(key: keyof FormState, value: string) {
+  function set(key: keyof Omit<FormState, 'use_hpss_separation'>, value: string) {
     setForm((f) => ({ ...f, [key]: value }))
   }
 
@@ -127,6 +124,7 @@ export function AnalysisConfigs() {
         onset_alpha: parseFloat(form.onset_alpha),
         superflux_mu: parseInt(form.superflux_mu, 10),
         superflux_lag: parseInt(form.superflux_lag, 10),
+        use_hpss_separation: form.use_hpss_separation,
       }
       if (editingConfig) {
         await updateAnalysisConfig(editingConfig.id, body)
@@ -223,19 +221,53 @@ export function AnalysisConfigs() {
                 placeholder="My analysis config"
               />
             </FormRow>
+
             <FormRow label="Onset method">
-              <Select value={form.onset_method} onValueChange={(v) => set('onset_method', v)}>
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {ONSET_METHODS.map((m) => (
-                    <SelectItem key={m.value} value={m.value}>{m.label}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <div className="grid grid-cols-1 gap-1.5">
+                {ONSET_METHODS.map((m) => (
+                  <button
+                    key={m.value}
+                    type="button"
+                    onClick={() => set('onset_method', m.value)}
+                    className={cn(
+                      'text-left rounded border p-2 text-sm transition-colors',
+                      form.onset_method === m.value
+                        ? 'border-primary bg-primary/10'
+                        : 'border-border hover:border-muted-foreground/60'
+                    )}
+                  >
+                    <div className="font-medium leading-tight">{m.label}</div>
+                    <div className="text-xs text-muted-foreground leading-tight mt-0.5">{m.description}</div>
+                  </button>
+                ))}
+              </div>
             </FormRow>
-            <FormRow label="Bars">
+
+            <div className="flex items-start gap-2.5 rounded border p-2.5">
+              <input
+                id="hpss-sep"
+                type="checkbox"
+                className="mt-0.5 h-4 w-4 shrink-0 cursor-pointer"
+                checked={form.use_hpss_separation}
+                onChange={(e) => setForm((f) => ({ ...f, use_hpss_separation: e.target.checked }))}
+              />
+              <div>
+                <Label htmlFor="hpss-sep" className="text-sm font-medium cursor-pointer leading-tight">
+                  Harmonic / percussive separation
+                </Label>
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  Splits the music into a percussive layer (drums, rhythm) and a harmonic
+                  layer (vocals, chords) for more targeted effects. Active effects react to
+                  rhythm; Mellow effects react to melody. Costs ~0.4 ms per frame — well
+                  within the 10 ms budget.
+                </p>
+              </div>
+            </div>
+
+            <FormRow
+              label="Bars"
+              hint="Number of frequency bands. 20–30 works well for most rooms."
+            >
               <Input
                 type="number"
                 min={10}
@@ -244,7 +276,11 @@ export function AnalysisConfigs() {
                 onChange={(e) => set('bars', e.target.value)}
               />
             </FormRow>
-            <FormRow label="Low cut (Hz)">
+
+            <FormRow
+              label="Low cut (Hz)"
+              hint="Lowest frequency analysed. 50 Hz filters out sub-bass rumble."
+            >
               <Input
                 type="number"
                 min={20}
@@ -253,7 +289,11 @@ export function AnalysisConfigs() {
                 onChange={(e) => set('lower_cutoff_freq', e.target.value)}
               />
             </FormRow>
-            <FormRow label="High cut (Hz)">
+
+            <FormRow
+              label="High cut (Hz)"
+              hint="Highest frequency analysed. 12 000 Hz covers most music; lower values exclude high treble."
+            >
               <Input
                 type="number"
                 min={1000}
@@ -262,7 +302,11 @@ export function AnalysisConfigs() {
                 onChange={(e) => set('higher_cutoff_freq', e.target.value)}
               />
             </FormRow>
-            <FormRow label="Onset delta">
+
+            <FormRow
+              label="Onset delta"
+              hint="Beat sensitivity — lower catches softer beats, higher requires stronger hits to trigger."
+            >
               <Input
                 type="number"
                 step={0.01}
@@ -272,7 +316,11 @@ export function AnalysisConfigs() {
                 onChange={(e) => set('onset_delta', e.target.value)}
               />
             </FormRow>
-            <FormRow label="Onset alpha">
+
+            <FormRow
+              label="Onset alpha"
+              hint="How quickly the beat threshold adapts to changes in volume. 0.9 is a good default for dynamic music."
+            >
               <Input
                 type="number"
                 step={0.01}
@@ -282,24 +330,36 @@ export function AnalysisConfigs() {
                 onChange={(e) => set('onset_alpha', e.target.value)}
               />
             </FormRow>
-            <FormRow label="SuperFlux mu">
-              <Input
-                type="number"
-                min={1}
-                max={20}
-                value={form.superflux_mu}
-                onChange={(e) => set('superflux_mu', e.target.value)}
-              />
-            </FormRow>
-            <FormRow label="SuperFlux lag">
-              <Input
-                type="number"
-                min={1}
-                max={10}
-                value={form.superflux_lag}
-                onChange={(e) => set('superflux_lag', e.target.value)}
-              />
-            </FormRow>
+
+            {form.onset_method === 'superflux' && (
+              <>
+                <FormRow
+                  label="SuperFlux mu"
+                  hint="Vibrato suppression strength — higher values prevent false beats on sustained notes and vocal runs."
+                >
+                  <Input
+                    type="number"
+                    min={1}
+                    max={20}
+                    value={form.superflux_mu}
+                    onChange={(e) => set('superflux_mu', e.target.value)}
+                  />
+                </FormRow>
+
+                <FormRow
+                  label="SuperFlux lag"
+                  hint="Look-back window for vibrato detection. Higher = more context but slightly slower reaction."
+                >
+                  <Input
+                    type="number"
+                    min={1}
+                    max={10}
+                    value={form.superflux_lag}
+                    onChange={(e) => set('superflux_lag', e.target.value)}
+                  />
+                </FormRow>
+              </>
+            )}
           </div>
 
           {saveError && <p className="text-destructive text-sm mt-2">{saveError}</p>}
