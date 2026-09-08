@@ -7,10 +7,11 @@ uses, so there is no seam between test and production behaviour.
 
 import asyncio
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from huesync.lms_status import LmsPlayerStatus
 from huesync.models import (
     AnalysisConfig,
     Controller,
@@ -391,6 +392,49 @@ def test_active_coupling_id_set_for_coupling_mode(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 # deactivate clears both active IDs in storage
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# _poll_sync_master — regression: no periodic status query to follow player
+# ---------------------------------------------------------------------------
+
+
+def test_poll_sync_master_queries_follow_player_exactly_once(tmp_path: Path) -> None:
+    """_poll_sync_master must query the follow player exactly once, then return.
+
+    Regression: a while-True loop previously re-queried every 60 s, which
+    triggered false newsong events via the sonos-squeezebox LMS plugin and
+    restarted the Sonos audio stream on every cycle.
+    """
+    async def _run() -> None:
+        storage, coupling = _make_full_storage(tmp_path)
+
+        player = storage.get_virtual_player("player-1")
+        assert player is not None
+        player.follow_player_mac = "48:a6:b8:20:39:64"
+        storage.save_virtual_player(player)
+        coupling = storage.get_coupling("coupling-1")
+
+        manager = PlayerManager(storage)
+        profile = Profile(
+            id="coupling-1",
+            player_mac="aa:bb:cc:dd:ee:ff",
+            lms_host="192.168.1.10",
+        )
+        session = ActiveSession(profile, coupling=coupling)
+
+        mock_query = MagicMock(return_value=LmsPlayerStatus(player_name="Sonos Port"))
+
+        with patch("huesync.player_manager.query_lms_status", new=mock_query), \
+             patch.object(manager, "_apply_probe_for_master", new=AsyncMock()):
+            await asyncio.wait_for(manager._poll_sync_master(session), timeout=2.0)
+
+        assert mock_query.call_count == 1, (
+            f"query_lms_status must be called exactly once (no periodic loop); "
+            f"got {mock_query.call_count} calls"
+        )
+
+    asyncio.run(_run())
 
 
 def test_deactivate_clears_active_coupling_id(tmp_path: Path) -> None:

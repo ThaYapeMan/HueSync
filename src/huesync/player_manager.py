@@ -657,12 +657,12 @@ class PlayerManager:
         )
 
     async def _poll_sync_master(self, session: ActiveSession) -> None:
-        """Apply the latency probe for the followed player and refresh its display name.
+        """Apply the latency probe for the followed player and fetch its display name.
 
-        With LMS sync-group membership removed (Option B), the reference player
-        is follow_player_mac on the VirtualPlayer — no sync-group discovery is
-        needed.  The probe is applied immediately; the display name is refreshed
-        every 60 s.  Use refresh_probe() to force an immediate re-evaluation.
+        Runs once at Coupling activation — no periodic repeat.  Sending repeated
+        status queries to the followed player (e.g. the Sonos Port via the
+        sonos-squeezebox plugin) caused false newsong events every ~60 s, which
+        restarted the Sonos audio stream.
         """
         profile = session.profile
 
@@ -716,18 +716,6 @@ class PlayerManager:
             log.debug("Could not fetch name for follow player %s: %s", follow_mac, exc)
             self._detected_sync_master_name = None
         await self._apply_probe_for_master(session, follow_mac)
-
-        while True:
-            await asyncio.sleep(60)
-            try:
-                master_status = await asyncio.to_thread(
-                    query_lms_status, lms_host, follow_mac
-                )
-                self._detected_sync_master_name = master_status.player_name
-            except Exception as exc:
-                log.debug(
-                    "Could not refresh name for follow player %s: %s", follow_mac, exc
-                )
 
     async def _delayed_unsync_and_follow(
         self, session: ActiveSession, lms_host: str, player_mac: str

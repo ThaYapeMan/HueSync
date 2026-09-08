@@ -207,6 +207,13 @@ class LmsFollower:
     def _get_current_url(self) -> str | None:
         """Return the URL of the track currently loaded on *follow_mac*."""
         command = f"{self._follow_mac} status - 1 tags:u\n"
+        log.info(
+            "DIAG FOLLOW -> %s  cmd='%s status - 1 tags:u'  "
+            "(triggered by newsong event, play_count=%d)",
+            self._follow_mac,
+            self._follow_mac,
+            self._play_count,
+        )
         try:
             raw = _cli_exchange(self._host, self._port, command)
         except Exception as exc:
