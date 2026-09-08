@@ -205,7 +205,7 @@ class AudioPipeline(Protocol):
 
     Planned implementations (in order of implementation priority):
 
-        CavaAnalyser    — cava bars via FIFO + BandNormaliser (stage 1, no deps)
+        CavaPipeline    — cava bars via FIFO + BandNormaliser (stage 1, no deps)
         LibrosaAnalyser — adds tempo/beat from a rolling PCM buffer (ISC, stage 2)
         AubioAnalyser   — subprocess-based onset/beat (GPL-3, stage 3 if needed)
         NullAnalyser    — scripted features for unit tests

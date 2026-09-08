@@ -21,7 +21,7 @@ def _make_features(bars: list[float] | None = None) -> AudioFeatures:
     """Build an AudioFeatures object from a list of bar values (0.0-1.0).
 
     Computes cumulative band slices and spectral centroid from the bars,
-    matching what CavaAnalyser produces, so ColourModeEffect tests have
+    matching what CavaPipeline produces, so ColourModeEffect tests have
     realistic inputs without needing a real FIFO or cava process.
     """
     if bars is None:
@@ -593,7 +593,7 @@ def test_update_onset_pipeline_without_shm_nulls_pipelines():
 
 def test_update_render_updates_exertion_clip():
     """update_render() must propagate the new exertion_clip to BandNormaliser."""
-    from huesync.sync_engine import CavaAnalyser, SyncEngine
+    from huesync.sync_engine import CavaPipeline, SyncEngine
 
     fifo = "/tmp/_nonexistent_fifo_for_test_render"
     profile = Profile(exertion_clip=3.0)
@@ -602,7 +602,7 @@ def test_update_render_updates_exertion_clip():
     new_profile = Profile(exertion_clip=2.0)
     engine.update_render(new_profile)
 
-    assert isinstance(engine._analyser, CavaAnalyser)
+    assert isinstance(engine._analyser, CavaPipeline)
     assert engine._analyser.normaliser.exertion_clip == pytest.approx(2.0)
 
 

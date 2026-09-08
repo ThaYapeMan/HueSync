@@ -168,7 +168,7 @@ class Analyser(Protocol):
 
 Three backends, in order of increasing cost:
 
-**CavaAnalyser** (implement first)
+**CavaPipeline** (implement first)
 Reads cava bars from the FIFO. Adds spectral flux onset detection, spectral
 centroid, and peak isolation in pure Python. Fills all `AudioFeatures` fields
 except `beat` and `tempo`. Zero new dependencies, negligible CPU.
@@ -301,7 +301,7 @@ step is independently deployable and testable by ear.
 |---|------|---------|
 | 1 | ✅ **cava frequency cutoffs** (done) | Blue channel active, fixes yellow |
 | 2 | **`LightChannel.position` capture** — store at session start | All spatial effects |
-| 3 | **`AudioFeatures` dataclass + `CavaAnalyser`** — spectral flux onset, centroid, cumulative bands, peak isolation; replaces bare frame passing | Layer-independent testing |
+| 3 | **`AudioFeatures` dataclass + `CavaPipeline`** — spectral flux onset, centroid, cumulative bands, peak isolation; replaces bare frame passing | Layer-independent testing |
 | 4 | **`Scene` model + `HueDriver`** — effects return `Scene`, driver samples at positions | Effect/transport separation |
 | 5 | **Palettes** — named colour sets, profile field | Effects that look intentional |
 | 6 | **Mellow layer** (drift gradient) + **Active layer** (Pulses) + **LayerMixer** | End-to-end two-layer engine |

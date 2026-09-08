@@ -5,7 +5,7 @@ Signal path (one layer at a time):
     FifoReader      — reads cava's raw FIFO output in a background thread
     BandNormaliser  — AGC: normalises each bar against its own rolling average
     OnsetDetector   — spectral flux onset detection with EMA-based threshold
-    CavaAnalyser    — wraps the three above; produces AudioFeatures each frame
+    CavaPipeline    — wraps the three above; produces AudioFeatures each frame
     ColourModeEffect— implements Effect; maps AudioFeatures to a Scene using
                       one of the two active ColorMode strategies
     SyncEngine      — orchestrates AudioPipeline + Effect + Output at 30 Hz,
@@ -559,7 +559,7 @@ class MultibandStftPipeline:
 
 
 # ---------------------------------------------------------------------------
-# Helpers shared by CavaAnalyser and ColourModeEffect
+# Helpers shared by CavaPipeline and ColourModeEffect
 # ---------------------------------------------------------------------------
 
 
@@ -568,7 +568,7 @@ def _band_average(frame: bytes, start: float, end: float) -> float:
 
     Kept for internal use and for the unit tests that exercise it directly.
     New code should prefer _slice_avg() which works on the float bar lists
-    produced by CavaAnalyser.
+    produced by CavaPipeline.
     """
     n = len(frame)
     lo, hi = int(start * n), max(int(end * n), int(start * n) + 1)
@@ -604,11 +604,11 @@ def _band_avg(bars: list[float], lo: int, hi: int) -> float:
 
 
 # ---------------------------------------------------------------------------
-# CavaAnalyser — implements the AudioPipeline protocol
+# CavaPipeline — implements the AudioPipeline protocol
 # ---------------------------------------------------------------------------
 
 
-class CavaAnalyser:
+class CavaPipeline:
     """Reads cava bar frames from a FIFO, normalises them, and produces
     AudioFeatures including onset detection.
 
@@ -1192,7 +1192,7 @@ class LayerMixer:
 
 
 class SyncEngine:
-    """Owns a CavaAnalyser and a ColourModeEffect; drives them at a fixed rate
+    """Owns a CavaPipeline and a ColourModeEffect; drives them at a fixed rate
     into whatever Output is passed to run().
 
     Delay buffer
@@ -1224,7 +1224,7 @@ class SyncEngine:
         mellow_profile: Profile | None = None,
     ) -> None:
         self.profile = profile
-        self._analyser: AudioPipeline = CavaAnalyser(
+        self._analyser: AudioPipeline = CavaPipeline(
             fifo_path,
             bars=profile.bars,
             onset_delta=profile.onset_delta,
@@ -1370,7 +1370,7 @@ class SyncEngine:
         self.profile = profile
         effective_mellow = mellow_profile if mellow_profile is not None else profile
         self._effect = LayerMixer(profile, effective_mellow)
-        if isinstance(self._analyser, CavaAnalyser):
+        if isinstance(self._analyser, CavaPipeline):
             self._analyser.normaliser.update_exertion_clip(profile.exertion_clip)
 
     @property

@@ -244,7 +244,7 @@ AirPlay 2 input (shairport-sync + nqptp) is a one-time setup step:
 | File | Role |
 |---|---|
 | `src/huesync/types.py` | Protocol types: `Colour`, `Position`, `Scene`, `Effect`, `AudioPipeline`, `Output`, `AudioFeatures` |
-| `src/huesync/sync_engine.py` | `FifoReader`, `BandNormaliser`, `CavaAnalyser`, `ColourModeEffect`, `SyncEngine` |
+| `src/huesync/sync_engine.py` | `FifoReader`, `BandNormaliser`, `CavaPipeline`, `ColourModeEffect`, `SyncEngine` |
 | `src/huesync/hue_output.py` | **Only** file importing `hue_entertainment` for streaming: `HueDriver`, `ChannelInfo`, `get_channel_infos()` |
 | `src/huesync/hue_bridge.py` | Controller pairing and Entertainment Area discovery |
 | `src/huesync/player_manager.py` | Process lifecycle: squeezelite + cava + output driver; `activate_coupling()`, `update_onset_pipeline()`, `update_render()` |

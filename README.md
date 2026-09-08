@@ -134,7 +134,7 @@ HueSync runs up to two parallel onset-detection paths:
 
 | Path | Rate | Source |
 |---|---|---|
-| cava-based (`OnsetDetector` in `CavaAnalyser`) | ~30 Hz | Normalised bar spectrum |
+| cava-based (`OnsetDetector` in `CavaPipeline`) | ~30 Hz | Normalised bar spectrum |
 | PCM tap (`StftOnsetPipeline` / `MultibandStftPipeline` / `SuperfluxStftPipeline`) | 100 Hz | 2048-sample Hamming-windowed STFT on raw PCM from shared memory |
 
 The **`onset_method`** field in Analysis Config selects the PCM-tap algorithm:
@@ -473,7 +473,7 @@ The WebSocket at `/ws/preview` sends typed JSON messages at up to 20 Hz:
 Analyser  →  AudioFeatures  →  Effect  →  Scene  →  Output
 ```
 
-- **Analyser** (`CavaAnalyser`): reads cava bars, applies per-band EMA AGC
+- **AudioPipeline** (`CavaPipeline`): reads cava bars, applies per-band EMA AGC
   (`BandNormaliser`), runs Dixon onset detection.
 - **Effect** (`ColourModeEffect`): maps `AudioFeatures` to a `Scene`.
 - **Scene**: `color_at(position, t) → Colour` — effects never touch Hue
