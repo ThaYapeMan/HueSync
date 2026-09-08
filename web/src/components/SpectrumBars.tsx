@@ -111,6 +111,12 @@ export function SpectrumBars({
         ))}
       </div>
 
+      {!isRgb && colorMode !== null && (
+        <p className="mt-1 text-xs text-muted-foreground italic">
+          Bass/mid/treble colour-coding only applies when the active scene&apos;s effect is Spectrum RGB.
+        </p>
+      )}
+
       {isRgb && (
         <>
           <div className="relative h-4 mt-0.5 text-xs font-mono text-muted-foreground">
