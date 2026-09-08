@@ -88,7 +88,7 @@ class ControllerPatchBody(BaseModel):
 
 class VirtualPlayerCreateBody(BaseModel):
     type: str = "LMS"
-    lms_host: str
+    lms_host: str = ""
     lms_port: int = 9000
     player_name: str = "HueSync"
     player_mac: str = ""
@@ -446,6 +446,7 @@ async def get_status(request: Request):
         "version": _VERSION_STRING,
         "active_coupling_id": manager.active_coupling_id,
         "active_coupling_name": manager.active_coupling_name,
+        "active_player_type": manager.active_player_type,
         "sync_master": manager.detected_sync_master,
         "sync_master_name": manager.detected_sync_master_name,
         "applied_delay_ms": manager.applied_delay_ms,
@@ -454,6 +455,7 @@ async def get_status(request: Request):
         "bridge_connected": manager.bridge_connected,
         "active_effect": manager.active_effect,
         "onset_method": manager.active_onset_method,
+        "airplay_receiving": manager.airplay_receiving,
         "bars_stats": bars_stats,
     }
 

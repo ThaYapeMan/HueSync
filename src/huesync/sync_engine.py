@@ -29,7 +29,7 @@ import numpy as np
 
 from .latency import NoLatencyProbe
 from .models import Profile
-from .pcm_source import WINDOW_SIZE, PcmHpss, PcmStft, SqueezeliteShmSource
+from .pcm_source import WINDOW_SIZE, PcmHpss, PcmSource, PcmStft
 from .types import (
     AudioFeatures,
     AudioPipeline,
@@ -673,6 +673,197 @@ class CavaPipeline:
 
 
 # ---------------------------------------------------------------------------
+# PcmAudioPipeline — source-agnostic AudioPipeline from a PcmSource
+# ---------------------------------------------------------------------------
+
+
+class PcmAudioPipeline:
+    """AudioPipeline that derives AudioFeatures from any PcmSource.
+
+    Produces AudioFeatures structurally identical to CavaPipeline so all
+    effects (including spectrum_rgb and mono_pulse) work without modification.
+
+    Source-agnostic: operates exclusively on the PcmSource Protocol.
+    AirPlayPipeSource, SqueezeliteShmSource, and any future RoonPcmSource
+    are interchangeable from this pipeline's perspective.  This class itself
+    never changes when a new audio source is added — only the PcmSource
+    adapter does.  See CLAUDE.md "Future player/source types" for the full
+    extension pattern.
+
+    Bar computation:
+        STFT magnitude bins (0–Nyquist) are averaged into N log-spaced bars
+        covering [lower_cutoff_freq, higher_cutoff_freq] Hz, matching the
+        frequency layout that cava uses.  BandNormaliser then applies the same
+        EMA-based AGC as CavaPipeline.
+
+    Onset detection:
+        All three methods are supported (combined / multiband / superflux),
+        each running its own internal STFT pipeline (same hop as the bar
+        STFT so frame counts stay aligned).
+    """
+
+    _POLL_S: float = 0.005  # seconds to wait between polls when pipe is empty
+
+    def __init__(
+        self,
+        source: PcmSource,
+        bars: int,
+        lower_cutoff_freq: int,
+        higher_cutoff_freq: int,
+        onset_method: str,
+        onset_delta: float,
+        onset_alpha: float,
+        superflux_mu: int,
+        superflux_lag: int,
+        bass_hz: int,
+        mid_hz: int,
+        exertion_clip: float = BandNormaliser.DEFAULT_EXERTION_CLIP,
+    ) -> None:
+        self._source = source
+        self._n_bars = bars
+        self._lower_hz = float(lower_cutoff_freq)
+        self._upper_hz = float(higher_cutoff_freq)
+        self._onset_method = onset_method
+        self._onset_delta = onset_delta
+        self._onset_alpha = onset_alpha
+        self._superflux_mu = superflux_mu
+        self._superflux_lag = superflux_lag
+        self._bass_hz = bass_hz
+        self._mid_hz = mid_hz
+        self._normaliser = BandNormaliser(exertion_clip=exertion_clip)
+        # Pipelines are initialised lazily on first sample (sample_rate needed).
+        self._bar_stft: PcmStft | None = None
+        self._onset_pipeline: (
+            StftOnsetPipeline | MultibandStftPipeline | SuperfluxStftPipeline | None
+        ) = None
+        self._sample_rate: int | None = None
+        self._latest: AudioFeatures | None = None
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def _init_pipelines(self, sample_rate: int) -> None:
+        self._sample_rate = sample_rate
+        self._bar_stft = PcmStft(sample_rate)
+        if self._onset_method == "multiband":
+            self._onset_pipeline = MultibandStftPipeline(
+                sample_rate,
+                bass_hz=self._bass_hz,
+                mid_hz=self._mid_hz,
+                delta=self._onset_delta,
+                alpha=self._onset_alpha,
+            )
+        elif self._onset_method == "superflux":
+            self._onset_pipeline = SuperfluxStftPipeline(
+                sample_rate,
+                mu=self._superflux_mu,
+                lag=self._superflux_lag,
+                delta=self._onset_delta,
+                alpha=self._onset_alpha,
+            )
+        else:
+            self._onset_pipeline = StftOnsetPipeline(
+                sample_rate,
+                delta=self._onset_delta,
+                alpha=self._onset_alpha,
+            )
+
+    def _mag_to_bar_bytes(self, mag: np.ndarray) -> bytes:
+        """Average STFT magnitude bins into N log-spaced bars → bytes 0-255."""
+        assert self._sample_rate is not None
+        sr = self._sample_rate
+        n_bins = len(mag)
+        log_lo = math.log10(max(self._lower_hz, 1.0))
+        log_hi = math.log10(max(self._upper_hz, self._lower_hz + 1.0))
+        result = bytearray(self._n_bars)
+        for i in range(self._n_bars):
+            f_lo = 10.0 ** (log_lo + i / self._n_bars * (log_hi - log_lo))
+            f_hi = 10.0 ** (log_lo + (i + 1) / self._n_bars * (log_hi - log_lo))
+            bin_lo = max(0, round(f_lo * WINDOW_SIZE / sr))
+            bin_hi = min(n_bins, max(bin_lo + 1, round(f_hi * WINDOW_SIZE / sr)))
+            val = float(np.mean(mag[bin_lo:bin_hi])) if bin_hi > bin_lo else 0.0
+            result[i] = min(255, int(val))
+        return bytes(result)
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            samples = self._source.read_new()
+            if len(samples) == 0:
+                self._stop.wait(self._POLL_S)
+                continue
+
+            if self._bar_stft is None:
+                self._init_pipelines(self._source.sample_rate)
+
+            assert self._bar_stft is not None
+            assert self._onset_pipeline is not None
+
+            bar_frames = self._bar_stft.push(samples)
+            onset_frames = self._onset_pipeline.push(samples)
+
+            # Both STFTs share the same hop, so frame counts are always equal.
+            for bar_frame, onset_result in zip(bar_frames, onset_frames, strict=False):
+                bar_bytes = self._mag_to_bar_bytes(bar_frame)
+                normed = self._normaliser.normalise(bar_bytes)
+                bars = [v / 255.0 for v in normed]
+
+                total = sum(bars)
+                n = len(bars)
+                centroid = (
+                    sum(idx * v for idx, v in enumerate(bars)) / total / n
+                    if total > 1e-9
+                    else 0.0
+                )
+
+                onset = False
+                onset_strength = 0.0
+                onset_bass = onset_mid = onset_treble = False
+                onset_bass_str = onset_mid_str = onset_treble_str = 0.0
+
+                if self._onset_method == "multiband":
+                    (b_on, b_str), (m_on, m_str), (t_on, t_str) = onset_result
+                    onset_bass, onset_bass_str = b_on, b_str
+                    onset_mid, onset_mid_str = m_on, m_str
+                    onset_treble, onset_treble_str = t_on, t_str
+                    onset = b_on or m_on or t_on
+                    onset_strength = max(b_str, m_str, t_str)
+                else:
+                    onset, onset_strength = onset_result
+
+                features = AudioFeatures(
+                    bars=bars,
+                    bass=_slice_avg(bars, 0.0, 0.20),
+                    mid=_slice_avg(bars, 0.0, 0.55),
+                    full=_slice_avg(bars, 0.0, 1.0),
+                    centroid=centroid,
+                    onset=onset,
+                    onset_strength=onset_strength,
+                    onset_bass=onset_bass,
+                    onset_mid=onset_mid,
+                    onset_treble=onset_treble,
+                    onset_bass_strength=onset_bass_str,
+                    onset_mid_strength=onset_mid_str,
+                    onset_treble_strength=onset_treble_str,
+                )
+                with self._lock:
+                    self._latest = features
+
+    def start(self) -> None:
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=2)
+
+    def latest(self) -> AudioFeatures | None:
+        with self._lock:
+            return self._latest
+
+
+# ---------------------------------------------------------------------------
 # HSV helper
 # ---------------------------------------------------------------------------
 
@@ -1218,19 +1409,25 @@ class SyncEngine:
 
     def __init__(
         self,
-        fifo_path: str,
+        fifo_path: str | None,
         profile: Profile,
         probe: LatencyProbe | None = None,
         mellow_profile: Profile | None = None,
+        analyser: AudioPipeline | None = None,
     ) -> None:
         self.profile = profile
-        self._analyser: AudioPipeline = CavaPipeline(
-            fifo_path,
-            bars=profile.bars,
-            onset_delta=profile.onset_delta,
-            onset_alpha=profile.onset_alpha,
-            exertion_clip=profile.exertion_clip,
-        )
+        if analyser is not None:
+            self._analyser: AudioPipeline = analyser
+        elif fifo_path is not None:
+            self._analyser = CavaPipeline(
+                fifo_path,
+                bars=profile.bars,
+                onset_delta=profile.onset_delta,
+                onset_alpha=profile.onset_alpha,
+                exertion_clip=profile.exertion_clip,
+            )
+        else:
+            raise ValueError("Either fifo_path or analyser must be provided")
         effective_mellow = mellow_profile if mellow_profile is not None else profile
         self._effect: LayerMixer = LayerMixer(profile, effective_mellow)
         self._probe: LatencyProbe = probe if probe is not None else NoLatencyProbe()
@@ -1238,7 +1435,7 @@ class SyncEngine:
         self._last_onset: bool = False
         self._last_mix: float = 0.0
         self._last_bars: list[float] = []
-        self._shm_source: SqueezeliteShmSource | None = None
+        self._shm_source: PcmSource | None = None
         self._pcm_onset: StftOnsetPipeline | None = None
         self._pcm_multiband: MultibandStftPipeline | None = None
         self._pcm_superflux: SuperfluxStftPipeline | None = None
@@ -1249,8 +1446,8 @@ class SyncEngine:
         self._last_onset_treble: bool = False
         self._diag_frame: int = 0
 
-    def attach_shm_source(self, source: SqueezeliteShmSource) -> None:
-        """Connect a SHM source for the PCM-tap onset pipeline.
+    def attach_shm_source(self, source: PcmSource) -> None:
+        """Connect a PCM source for the PCM-tap onset pipeline.
 
         Selects the appropriate pipeline based on profile.onset_method:
         - "combined"  → StftOnsetPipeline (comparison only, no colour effect)

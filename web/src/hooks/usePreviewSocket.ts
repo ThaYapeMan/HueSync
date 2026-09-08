@@ -4,6 +4,7 @@ export interface SocketStatus {
   version: string | null
   active_coupling_id: string | null
   active_coupling_name: string | null
+  active_player_type: string | null
   active_zone_id: string | null
   sync_master: string | null
   sync_master_name: string | null
@@ -18,6 +19,7 @@ export interface SocketStatus {
   higher_cutoff_freq: number | null
   bass_hz: number | null
   mid_hz: number | null
+  airplay_receiving: boolean | null
 }
 
 export interface PreviewState {

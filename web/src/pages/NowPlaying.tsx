@@ -108,13 +108,24 @@ function StatusGrid({ status }: { status: SocketStatus | null }) {
         </Badge>
       </StatusRow>
 
-      <StatusRow label="squeezelite">
-        <ProcessBadge running={status.processes.squeezelite} />
-      </StatusRow>
-
-      <StatusRow label="cava">
-        <ProcessBadge running={status.processes.cava} />
-      </StatusRow>
+      {status.active_player_type === 'AirPlay' ? (
+        <StatusRow label="AirPlay">
+          {status.airplay_receiving === true ? (
+            <Badge variant="default" className="text-xs">Receiving audio</Badge>
+          ) : (
+            <Badge variant="secondary" className="text-xs">Waiting for AirPlay connection…</Badge>
+          )}
+        </StatusRow>
+      ) : (
+        <>
+          <StatusRow label="squeezelite">
+            <ProcessBadge running={status.processes.squeezelite} />
+          </StatusRow>
+          <StatusRow label="cava">
+            <ProcessBadge running={status.processes.cava} />
+          </StatusRow>
+        </>
+      )}
 
       {status.latency_warning && (
         <StatusRow label="Warning">

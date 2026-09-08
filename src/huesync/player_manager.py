@@ -24,10 +24,10 @@ from .latency import FixedLatencyProbe, NoLatencyProbe
 from .lms_discovery import discover_lms
 from .lms_follower import LmsFollower
 from .lms_status import query_lms_status, query_lms_sync_peers, unsync_player
-from .models import BridgeConfig, Controller, Coupling, Profile
-from .pcm_source import SqueezeliteShmSource
+from .models import BridgeConfig, Controller, Coupling, Profile, VirtualPlayerType
+from .pcm_source import AirPlayPipeSource, PcmSource, SqueezeliteShmSource
 from .storage import Storage
-from .sync_engine import SyncEngine
+from .sync_engine import PcmAudioPipeline, SyncEngine
 from .types import Colour, LatencyProbe
 from .util import generate_locally_administered_mac
 
@@ -164,9 +164,15 @@ _RUN_DIR = Path(tempfile.gettempdir()) / "huesync"
 
 
 class ActiveSession:
-    def __init__(self, profile: Profile, coupling: Coupling | None = None):
+    def __init__(
+        self,
+        profile: Profile,
+        coupling: Coupling | None = None,
+        player_type: VirtualPlayerType = VirtualPlayerType.LMS,
+    ):
         self.profile = profile
         self.coupling = coupling
+        self.player_type = player_type
         self.squeezelite: subprocess.Popen | None = None
         self.cava: subprocess.Popen | None = None
         self.fifo_path: Path = _RUN_DIR / f"{profile.id}.fifo"
@@ -177,7 +183,7 @@ class ActiveSession:
         self.task: asyncio.Task | None = None
         self.probe: LatencyProbe = NoLatencyProbe()
         self.poller_task: asyncio.Task | None = None
-        self.shm_source: SqueezeliteShmSource | None = None
+        self.shm_source: PcmSource | None = None
         self.follower: LmsFollower | None = None
         self.follower_task: asyncio.Task | None = None
         self.unsync_task: asyncio.Task | None = None
@@ -272,12 +278,29 @@ class PlayerManager:
     def process_status(self) -> dict[str, bool]:
         if not self._active:
             return {"squeezelite": False, "cava": False}
+        if self._active.player_type == VirtualPlayerType.AIRPLAY:
+            return {"squeezelite": False, "cava": False}
         sl = self._active.squeezelite
         cava = self._active.cava
         return {
             "squeezelite": bool(sl and sl.poll() is None),
             "cava": bool(cava and cava.poll() is None),
         }
+
+    @property
+    def active_player_type(self) -> str | None:
+        """The type string of the active player, or None if no session is active."""
+        if self._active:
+            return self._active.player_type.value
+        return None
+
+    @property
+    def airplay_receiving(self) -> bool | None:
+        """True/False when an AirPlay player is active; None otherwise."""
+        if not self._active or self._active.player_type != VirtualPlayerType.AIRPLAY:
+            return None
+        src = self._active.shm_source
+        return src.running if src is not None else False
 
     @property
     def applied_delay_ms(self) -> int:
@@ -438,60 +461,16 @@ class PlayerManager:
         self.latency_warning = None
         self._detected_sync_master = None
 
-        session = ActiveSession(profile, coupling=coupling)
+        session = ActiveSession(profile, coupling=coupling, player_type=player.type)
         try:
-            self._start_squeezelite(session, profile)
-
-            engine = SyncEngine(
-                str(session.fifo_path), profile, probe=session.probe,
-                mellow_profile=mellow_profile,
-            )
-            session.sync_engine = engine
-
-            self._create_fifo(session)
-            engine.start()
-            self._start_cava(session, profile)
-
-            shm_source = SqueezeliteShmSource()
-            try:
-                shm_source.open(profile.player_mac)
-                session.shm_source = shm_source
-                engine.attach_shm_source(shm_source)
-                log.debug("PCM tap SHM source opened for coupling %s", coupling.name)
-            except Exception as exc:
-                log.warning(
-                    "Could not open squeezelite SHM for PCM onset tap "
-                    "(cava-based onset still active): %s",
-                    exc,
-                )
-
-            hue_driver = HueDriver(output_config, channels)
-            await hue_driver.start()
-            session.hue_driver = hue_driver
-
-            session.task = asyncio.create_task(engine.run(hue_driver))
-            session.task.add_done_callback(_log_task_failure)
-            session.poller_task = asyncio.create_task(self._poll_sync_master(session))
-            session.poller_task.add_done_callback(_log_task_failure)
-
-            follow_mac = player.follow_player_mac
-            if follow_mac:
-                session.follower = LmsFollower(
-                    lms_host=player.lms_host,
-                    follow_mac=follow_mac,
-                    huesync_mac=profile.player_mac,
+            if player.type == VirtualPlayerType.AIRPLAY:
+                await self._activate_airplay(
+                    session, profile, mellow_profile, output_config, channels
                 )
             else:
-                log.warning(
-                    "Coupling %r: follow_player_mac not configured — "
-                    "track mirroring disabled. Set it in the Virtual Player editor.",
-                    coupling.name,
+                await self._activate_lms(
+                    session, profile, player, mellow_profile, output_config, channels
                 )
-            session.unsync_task = asyncio.create_task(
-                self._delayed_unsync_and_follow(session, player.lms_host, profile.player_mac),
-                name="lms-unsync",
-            )
-            session.unsync_task.add_done_callback(_log_task_failure)
         except Exception:
             await self._teardown_session(session)
             raise
@@ -499,6 +478,124 @@ class PlayerManager:
         self._active = session
         self.storage.set_active_coupling_id(coupling.id)
         log.info("Activated coupling %s (%s)", coupling.name, coupling.id)
+
+    async def _activate_lms(
+        self,
+        session: ActiveSession,
+        profile: Profile,
+        player,
+        mellow_profile: Profile | None,
+        output_config: HueOutputConfig,
+        channels: list[ChannelInfo],
+    ) -> None:
+        """LMS path: squeezelite + cava + SHM tap + Hue."""
+        self._start_squeezelite(session, profile)
+
+        engine = SyncEngine(
+            str(session.fifo_path), profile, probe=session.probe,
+            mellow_profile=mellow_profile,
+        )
+        session.sync_engine = engine
+
+        self._create_fifo(session)
+        engine.start()
+        self._start_cava(session, profile)
+
+        shm_source = SqueezeliteShmSource()
+        try:
+            shm_source.open(profile.player_mac)
+            session.shm_source = shm_source
+            engine.attach_shm_source(shm_source)
+            log.debug(
+                "PCM tap SHM source opened for coupling %s",
+                session.coupling and session.coupling.name,
+            )
+        except Exception as exc:
+            log.warning(
+                "Could not open squeezelite SHM for PCM onset tap "
+                "(cava-based onset still active): %s",
+                exc,
+            )
+
+        hue_driver = HueDriver(output_config, channels)
+        await hue_driver.start()
+        session.hue_driver = hue_driver
+
+        session.task = asyncio.create_task(engine.run(hue_driver))
+        session.task.add_done_callback(_log_task_failure)
+        session.poller_task = asyncio.create_task(self._poll_sync_master(session))
+        session.poller_task.add_done_callback(_log_task_failure)
+
+        follow_mac = player.follow_player_mac
+        if follow_mac:
+            session.follower = LmsFollower(
+                lms_host=player.lms_host,
+                follow_mac=follow_mac,
+                huesync_mac=profile.player_mac,
+            )
+        else:
+            log.warning(
+                "Coupling %r: follow_player_mac not configured — "
+                "track mirroring disabled. Set it in the Virtual Player editor.",
+                session.coupling and session.coupling.name,
+            )
+        session.unsync_task = asyncio.create_task(
+            self._delayed_unsync_and_follow(session, player.lms_host, profile.player_mac),
+            name="lms-unsync",
+        )
+        session.unsync_task.add_done_callback(_log_task_failure)
+
+    async def _activate_airplay(
+        self,
+        session: ActiveSession,
+        profile: Profile,
+        mellow_profile: Profile | None,
+        output_config: HueOutputConfig,
+        channels: list[ChannelInfo],
+    ) -> None:
+        """AirPlay path: pipe source + PcmAudioPipeline + Hue.
+
+        No squeezelite, no cava, no FIFO, no LMS follower.  PcmAudioPipeline
+        reads shairport-sync's named pipe and produces full AudioFeatures
+        (bars + onset) so all effects including spectrum_rgb and mono_pulse
+        work without modification.
+        """
+        pipe_source = AirPlayPipeSource()
+        pipe_source.open()
+        session.shm_source = pipe_source
+
+        pcm_analyser = PcmAudioPipeline(
+            source=pipe_source,
+            bars=profile.bars,
+            lower_cutoff_freq=profile.lower_cutoff_freq,
+            higher_cutoff_freq=profile.higher_cutoff_freq,
+            onset_method=profile.onset_method,
+            onset_delta=profile.onset_delta,
+            onset_alpha=profile.onset_alpha,
+            superflux_mu=profile.superflux_mu,
+            superflux_lag=profile.superflux_lag,
+            bass_hz=profile.bass_hz,
+            mid_hz=profile.mid_hz,
+            exertion_clip=profile.exertion_clip,
+        )
+
+        engine = SyncEngine(
+            None, profile, probe=session.probe,
+            mellow_profile=mellow_profile, analyser=pcm_analyser,
+        )
+        session.sync_engine = engine
+        engine.start()
+
+        hue_driver = HueDriver(output_config, channels)
+        await hue_driver.start()
+        session.hue_driver = hue_driver
+
+        session.task = asyncio.create_task(engine.run(hue_driver))
+        session.task.add_done_callback(_log_task_failure)
+        log.info(
+            "AirPlay coupling %s active — pipe: /run/huesync/airplay.pcm",
+            session.coupling and session.coupling.name,
+        )
 
     async def deactivate(self) -> None:
         if not self._active:

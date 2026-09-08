@@ -12,15 +12,57 @@ FFT window: inaudible, and rare.
 
 from __future__ import annotations
 
+import errno
 import logging
 import mmap
+import os
 import struct
+import time
 from pathlib import Path
+from typing import Protocol, runtime_checkable
 
 import numpy as np
 import numpy.lib.stride_tricks
 
 _log = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# PcmSource — source-agnostic PCM interface
+# ---------------------------------------------------------------------------
+
+
+@runtime_checkable
+class PcmSource(Protocol):
+    """Source-agnostic interface for raw PCM audio streams.
+
+    Any audio source (squeezelite SHM, AirPlay named pipe, Roon, etc.)
+    implements this interface. PcmAudioPipeline (sync_engine.py) operates
+    exclusively on PcmSource and never on source-type-specific details.
+
+    Adding a new VirtualPlayer type requires only a new PcmSource adapter;
+    PcmAudioPipeline itself never changes. See CLAUDE.md for the full
+    extension pattern.
+    """
+
+    def open(self) -> None: ...
+
+    def close(self) -> None: ...
+
+    def read_new(self) -> np.ndarray:
+        """Return newly available mono float32 samples in [−1.0, 1.0].
+
+        Returns an empty array when no new samples are available.
+        """
+        ...
+
+    @property
+    def sample_rate(self) -> int: ...
+
+    @property
+    def running(self) -> bool:
+        """True when the source is actively delivering audio data."""
+        ...
 
 VIS_BUF_SIZE = 16384  # s16 samples in the circular buffer (8192 stereo frames)
 WINDOW_SIZE = 2048  # FFT window length in samples
@@ -302,6 +344,85 @@ class PcmHpss:
                 float(np.dot(center, mask_h)) / total,
             ))
         return results
+
+
+# ---------------------------------------------------------------------------
+# AirPlayPipeSource — reads shairport-sync's named pipe
+# ---------------------------------------------------------------------------
+
+AIRPLAY_PIPE: Path = Path("/run/huesync/airplay.pcm")
+AIRPLAY_SAMPLE_RATE: int = 44100
+_AIRPLAY_STALE_S: float = 2.0
+
+
+class AirPlayPipeSource:
+    """Reads raw PCM from shairport-sync's named pipe.
+
+    Implements PcmSource. shairport-sync writes S16_LE stereo at 44100 Hz
+    to AIRPLAY_PIPE; this class converts it to mono float32 using the same
+    L+R average as SqueezeliteShmSource.
+
+    The pipe is opened non-blocking so open() never stalls waiting for
+    shairport-sync to connect. read_new() returns an empty array (EAGAIN)
+    when shairport-sync has not yet started streaming.
+
+    running returns True when audio data was received within the last
+    _AIRPLAY_STALE_S seconds, enabling the UI to distinguish "waiting for
+    AirPlay connection" from "receiving audio".
+    """
+
+    def __init__(self, path: Path = AIRPLAY_PIPE) -> None:
+        self._path = path
+        self._fd: int | None = None
+        self._last_data_t: float | None = None
+
+    def open(self) -> None:
+        """Open the pipe non-blocking. Raises OSError if it does not exist."""
+        self._fd = os.open(self._path, os.O_RDONLY | os.O_NONBLOCK)
+        self._last_data_t = None
+
+    def close(self) -> None:
+        if self._fd is not None:
+            try:
+                os.close(self._fd)
+            except OSError:
+                pass
+            self._fd = None
+
+    @property
+    def sample_rate(self) -> int:
+        return AIRPLAY_SAMPLE_RATE
+
+    @property
+    def running(self) -> bool:
+        if self._last_data_t is None:
+            return False
+        return time.monotonic() - self._last_data_t < _AIRPLAY_STALE_S
+
+    def read_new(self) -> np.ndarray:
+        """Return mono float32 samples from the pipe, or empty if none available."""
+        if self._fd is None:
+            return np.empty(0, dtype=np.float32)
+        try:
+            raw = os.read(self._fd, 65536)  # up to 64 KB = ~370 ms @ 44100 Hz stereo
+        except OSError as exc:
+            if exc.errno == errno.EAGAIN:
+                return np.empty(0, dtype=np.float32)
+            raise
+        if not raw:
+            return np.empty(0, dtype=np.float32)
+
+        # Round down to complete stereo frames (4 bytes: 2 × s16).
+        n_frames = len(raw) // 4
+        if n_frames == 0:
+            return np.empty(0, dtype=np.float32)
+
+        self._last_data_t = time.monotonic()
+        samples = np.frombuffer(raw[: n_frames * 4], dtype=np.int16)
+        # Interleaved stereo s16 → mono float32 in [−1.0, 1.0].
+        return (samples[0::2].astype(np.float32) + samples[1::2].astype(np.float32)) / (
+            2.0 * 32768.0
+        )
 
 
 if __name__ == "__main__":

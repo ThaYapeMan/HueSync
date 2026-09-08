@@ -8,7 +8,9 @@ visible through the source's read-only view.
 
 import logging
 import mmap
+import os
 import struct
+import struct as _struct
 from pathlib import Path
 
 import numpy as np
@@ -20,9 +22,12 @@ from huesync.pcm_source import (
     _HDR_OFFSET,
     _HDR_SIZE,
     _MMAP_SIZE,
+    AIRPLAY_SAMPLE_RATE,
     VIS_BUF_SIZE,
     WINDOW_SIZE,
+    AirPlayPipeSource,
     PcmHpss,
+    PcmSource,
     PcmStft,
     SqueezeliteShmSource,
 )
@@ -518,3 +523,120 @@ def test_hpss_output_is_float_pairs() -> None:
         assert isinstance(h, float)
         assert 0.0 <= p <= 1.0
         assert 0.0 <= h <= 1.0
+
+
+# ---------------------------------------------------------------------------
+# AirPlayPipeSource
+# ---------------------------------------------------------------------------
+
+
+def _stereo_s16le(left: int, right: int, n_frames: int = 1) -> bytes:
+    """Build S16_LE stereo bytes: n_frames × (L, R)."""
+    frame = _struct.pack("<hh", left, right)
+    return frame * n_frames
+
+
+def test_airplay_source_satisfies_protocol() -> None:
+    """AirPlayPipeSource must satisfy the PcmSource Protocol at runtime."""
+    assert isinstance(AirPlayPipeSource(), PcmSource)
+
+
+def test_airplay_sample_rate() -> None:
+    src = AirPlayPipeSource()
+    assert src.sample_rate == AIRPLAY_SAMPLE_RATE
+
+
+def test_airplay_running_false_before_data() -> None:
+    """running must be False until read_new() has returned non-empty samples."""
+    src = AirPlayPipeSource()
+    assert src.running is False
+
+
+def test_airplay_read_new_without_open_returns_empty() -> None:
+    src = AirPlayPipeSource()
+    result = src.read_new()
+    assert len(result) == 0
+    assert result.dtype == np.float32
+
+
+def test_airplay_read_new_stereo_to_mono() -> None:
+    """S16_LE stereo → average L+R → float32 in [−1, 1]."""
+    r_fd, w_fd = os.pipe()
+    try:
+        # Write one stereo frame: L=16384 (0.5), R=−16384 (−0.5) → average 0.0
+        os.write(w_fd, _stereo_s16le(16384, -16384))
+        src = AirPlayPipeSource()
+        src._fd = r_fd  # inject the read end directly
+        src._last_data_t = None
+        result = src.read_new()
+        src._fd = None  # prevent double-close
+    finally:
+        os.close(w_fd)
+        try:
+            os.close(r_fd)
+        except OSError:
+            pass
+
+    assert len(result) == 1
+    assert result.dtype == np.float32
+    assert abs(result[0]) < 1e-5  # (0.5 + −0.5) / 2 = 0.0
+
+
+def test_airplay_read_new_unity_amplitude() -> None:
+    """Maximum positive s16 value must map to ≈ 1.0 when both channels equal."""
+    r_fd, w_fd = os.pipe()
+    try:
+        os.write(w_fd, _stereo_s16le(32767, 32767))
+        src = AirPlayPipeSource()
+        src._fd = r_fd
+        src._last_data_t = None
+        result = src.read_new()
+        src._fd = None
+    finally:
+        os.close(w_fd)
+        try:
+            os.close(r_fd)
+        except OSError:
+            pass
+
+    assert len(result) == 1
+    assert abs(result[0] - 32767 / 32768.0) < 1e-4
+
+
+def test_airplay_running_true_after_data() -> None:
+    """running must be True immediately after read_new() returns data."""
+    r_fd, w_fd = os.pipe()
+    try:
+        os.write(w_fd, _stereo_s16le(1000, 1000, n_frames=4))
+        src = AirPlayPipeSource()
+        src._fd = r_fd
+        src._last_data_t = None
+        src.read_new()
+        src._fd = None
+        assert src.running is True
+    finally:
+        os.close(w_fd)
+        try:
+            os.close(r_fd)
+        except OSError:
+            pass
+
+
+def test_airplay_incomplete_frame_dropped() -> None:
+    """Trailing bytes that do not complete a stereo frame are silently dropped."""
+    r_fd, w_fd = os.pipe()
+    try:
+        os.write(w_fd, _stereo_s16le(100, 200) + b"\xff")  # 5 bytes: 1 complete frame + 1 orphan
+        src = AirPlayPipeSource()
+        src._fd = r_fd
+        src._last_data_t = None
+        result = src.read_new()
+        src._fd = None
+    finally:
+        os.close(w_fd)
+        try:
+            os.close(r_fd)
+        except OSError:
+            pass
+
+    assert len(result) == 1  # only the complete frame
