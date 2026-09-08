@@ -166,6 +166,15 @@ class AudioFeatures:
     beat: bool | None = None
     tempo: float | None = None
 
+    # HPSS (Harmonic-Percussive Source Separation).
+    # Requires use_hpss_separation=True in AnalysisConfig; both are 0.0 when
+    # hpss_active is False.  Values are normalised fractions ∈ [0, 1] that sum
+    # to ≈ 1.0 and represent each source's share of the current frame's energy.
+    # Multiply by features.full to get an energy-weighted signal in [0, 1].
+    hpss_active: bool = False
+    percussive_energy: float = 0.0   # share that is percussive (drums, transients)
+    harmonic_energy: float = 0.0     # share that is harmonic (tones, sustained)
+
 
 # ---------------------------------------------------------------------------
 # Effect — contract between the colour engine and the analysis layer

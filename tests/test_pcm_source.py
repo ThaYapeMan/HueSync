@@ -22,6 +22,7 @@ from huesync.pcm_source import (
     _MMAP_SIZE,
     VIS_BUF_SIZE,
     WINDOW_SIZE,
+    PcmHpss,
     PcmStft,
     SqueezeliteShmSource,
 )
@@ -413,3 +414,107 @@ def test_multiple_frames_per_push() -> None:
     for frame in frames:
         assert frame.shape == (1025,)
         assert frame.dtype == np.float32
+
+
+# ---------------------------------------------------------------------------
+# PcmHpss
+# ---------------------------------------------------------------------------
+
+
+def _make_harmonic_signal(freq_hz: float = 440.0, n_frames: int = 30) -> np.ndarray:
+    """Repeated 440 Hz sine wave long enough for PcmHpss to fill its buffer."""
+    sr = 44100
+    t = np.arange(WINDOW_SIZE * n_frames) / sr
+    return np.sin(2 * np.pi * freq_hz * t).astype(np.float32)
+
+
+def _make_percussive_signal(n_frames: int = 30) -> np.ndarray:
+    """Silence with ONE impulse in the middle — broadband but NOT sustained.
+
+    A periodic impulse train would fool HPSS into calling it harmonic (constant
+    across time).  A single impulse surrounded by silence is not time-consistent
+    and is correctly identified as percussive.
+    """
+    n = WINDOW_SIZE * n_frames
+    signal = np.zeros(n, dtype=np.float32)
+    # Place impulse at the midpoint of the signal.
+    signal[n // 2] = 1.0
+    return signal
+
+
+def _push_all(hpss: PcmHpss, signal: np.ndarray) -> list[tuple[float, float]]:
+    """Push the full signal through hpss in one batch; return all results."""
+    return hpss.push(signal)
+
+
+def test_hpss_harmonic_signal_dominated_by_harmonic() -> None:
+    """A sustained sine wave should produce harmonic_energy >> percussive_energy."""
+    hpss = PcmHpss(44100)
+    results = _push_all(hpss, _make_harmonic_signal())
+    assert len(results) > 0
+    # Take the last few results (after buffer warmup)
+    tail = results[len(results) // 2:]
+    avg_p = sum(p for p, _ in tail) / len(tail)
+    avg_h = sum(h for _, h in tail) / len(tail)
+    assert avg_h > 0.6, f"harmonic energy unexpectedly low: {avg_h:.3f}"
+    assert avg_p < 0.4, f"percussive energy unexpectedly high: {avg_p:.3f}"
+
+
+def test_hpss_percussive_signal_dominated_by_percussive() -> None:
+    """A series of impulses (spectrally flat, not sustained) should be percussive."""
+    hpss = PcmHpss(44100)
+    results = _push_all(hpss, _make_percussive_signal())
+    assert len(results) > 0
+    tail = results[len(results) // 2:]
+    avg_p = sum(p for p, _ in tail) / len(tail)
+    avg_h = sum(h for _, h in tail) / len(tail)
+    assert avg_p > avg_h, (
+        f"percussive signal not dominated by percussive energy: p={avg_p:.3f} h={avg_h:.3f}"
+    )
+
+
+def test_hpss_energies_sum_to_unity() -> None:
+    """percussive_energy + harmonic_energy must be ≈ 1.0 for all frames."""
+    hpss = PcmHpss(44100)
+    signal = _make_harmonic_signal()
+    results = hpss.push(signal)
+    for p, h in results:
+        assert abs((p + h) - 1.0) < 1e-4, f"energies don't sum to 1: p={p:.4f} h={h:.4f}"
+
+
+def test_hpss_empty_push_returns_empty() -> None:
+    """Pushing fewer than WINDOW_SIZE samples yields no frames."""
+    hpss = PcmHpss(44100)
+    results = hpss.push(np.zeros(100, dtype=np.float32))
+    assert results == []
+
+
+def test_hpss_small_chunks_match_single_push() -> None:
+    """Same harmonic signal pushed in small chunks gives the same tail energy as one push."""
+    signal = _make_harmonic_signal(n_frames=25)
+
+    hpss_one = PcmHpss(44100)
+    results_one = hpss_one.push(signal)
+
+    hpss_chunked = PcmHpss(44100)
+    results_chunked: list[tuple[float, float]] = []
+    chunk = 441  # 10 ms at 44100 Hz
+    for i in range(0, len(signal), chunk):
+        results_chunked.extend(hpss_chunked.push(signal[i : i + chunk]))
+
+    assert len(results_one) == len(results_chunked)
+    for (p1, h1), (p2, h2) in zip(results_one, results_chunked, strict=True):
+        assert abs(p1 - p2) < 1e-5
+        assert abs(h1 - h2) < 1e-5
+
+
+def test_hpss_output_is_float_pairs() -> None:
+    """Each result element is a (float, float) tuple with values in [0, 1]."""
+    hpss = PcmHpss(44100)
+    results = hpss.push(_make_harmonic_signal(n_frames=5))
+    assert len(results) > 0
+    for p, h in results:
+        assert isinstance(p, float)
+        assert isinstance(h, float)
+        assert 0.0 <= p <= 1.0
+        assert 0.0 <= h <= 1.0

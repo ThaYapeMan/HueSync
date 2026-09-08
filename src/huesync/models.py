@@ -195,6 +195,10 @@ class Profile:
     superflux_mu: int = 3   # max-filter half-width in FFT bins
     superflux_lag: int = 2  # compare frame n with frame n-lag
 
+    # HPSS: separate PCM signal into harmonic and percussive streams.
+    # CPU cost ~1 ms/frame at 100 Hz on a Proxmox LXC (2 vCPU) — opt-in only.
+    use_hpss_separation: bool = False
+
     # Three-layer loudness pipeline:
     #   1. exertion_clip (HERE): sets "maximally loud" in relative terms.
     #      Steady-state music at exertion ≈ 1× maps to byte ≈ 255/clip.
@@ -386,6 +390,9 @@ class AnalysisConfig:
     bars: int = 30
     lower_cutoff_freq: int = 50
     higher_cutoff_freq: int = 12000
+    # HPSS: parallel harmonic/percussive separation on the PCM tap.
+    # CPU cost ~1 ms/frame at 100 Hz on a 2-vCPU LXC — disabled by default.
+    use_hpss_separation: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -399,6 +406,7 @@ class AnalysisConfig:
             "bars": self.bars,
             "lower_cutoff_freq": self.lower_cutoff_freq,
             "higher_cutoff_freq": self.higher_cutoff_freq,
+            "use_hpss_separation": self.use_hpss_separation,
         }
 
     @classmethod

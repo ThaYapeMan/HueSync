@@ -29,7 +29,7 @@ import numpy as np
 
 from .latency import NoLatencyProbe
 from .models import Profile
-from .pcm_source import WINDOW_SIZE, PcmStft, SqueezeliteShmSource
+from .pcm_source import WINDOW_SIZE, PcmHpss, PcmStft, SqueezeliteShmSource
 from .types import (
     Analyser,
     AudioFeatures,
@@ -779,7 +779,13 @@ class _PulsesRenderer(_EffectRenderer):
                 self._r = r_raw / peak
                 self._g = g_raw / peak
                 self._b = b_raw / peak
-            self._envelope += 0.7 * (1.0 - self._envelope)
+            # HPSS: scale pulse intensity by percussive content so drum hits
+            # are brighter than harmonic note onsets.
+            if features.hpss_active:
+                target = 0.3 + 0.7 * features.percussive_energy
+                self._envelope += 0.7 * (target - self._envelope)
+            else:
+                self._envelope += 0.7 * (1.0 - self._envelope)
         else:
             self._envelope *= (1.0 - min(profile.effect_decay, 0.99))
 
@@ -800,7 +806,12 @@ class _FlashesRenderer(_EffectRenderer):
 
     def render(self, profile: Profile, features: AudioFeatures, t: float) -> Scene:  # noqa: ARG002
         if features.onset and self._cooldown == 0:
-            self._envelope = 1.0
+            # HPSS: flash envelope proportional to percussive content; pure
+            # drums flash to full white, harmonic-only onsets flash at 30%.
+            if features.hpss_active:
+                self._envelope = 0.3 + 0.7 * features.percussive_energy
+            else:
+                self._envelope = 1.0
             self._cooldown = 4
         self._envelope *= (1.0 - min(profile.effect_decay * 2.0, 0.99))
         self._cooldown = max(0, self._cooldown - 1)
@@ -954,7 +965,10 @@ class _FireworksRenderer(_EffectRenderer):
                 self._r = r_raw / peak
                 self._g = g_raw / peak
                 self._b = b_raw / peak
-            speed = profile.effect_speed
+            # HPSS: scale particle speed by percussive content — drum hits
+            # launch fast wide bursts; harmonic onsets launch slower short bursts.
+            perc_scale = (0.4 + 0.6 * features.percussive_energy) if features.hpss_active else 1.0
+            speed = profile.effect_speed * perc_scale
             self._particles = [
                 _Particle(ox=origin_x, vel=v * speed, birth_t=t,
                           r=self._r, g=self._g, b=self._b)
@@ -989,7 +1003,12 @@ class _SwirlRenderer(_EffectRenderer):
     """Rotating colour gradient across position."""
 
     def render(self, profile: Profile, features: AudioFeatures, t: float) -> Scene:  # noqa: ARG002
-        brightness = max(features.full * profile.sensitivity, profile.brightness_floor)
+        # HPSS: use harmonic-weighted energy for smoother brightness — swirl
+        # stays calm during drum hits (percussive share suppresses the full energy).
+        effective = (
+            features.harmonic_energy * features.full if features.hpss_active else features.full
+        )
+        brightness = max(effective * profile.sensitivity, profile.brightness_floor)
         return _SwirlScene(profile.effect_speed, brightness)
 
 
@@ -1019,7 +1038,11 @@ class _WaveRenderer(_EffectRenderer):
 
     def render(self, profile: Profile, features: AudioFeatures, t: float) -> Scene:  # noqa: ARG002
         self._hue = self._hue * 0.98 + features.centroid * 0.7 * 0.02
-        brightness = max(features.full * profile.sensitivity, profile.brightness_floor)
+        # HPSS: harmonic-weighted energy gives a smoother brightness signal.
+        effective = (
+            features.harmonic_energy * features.full if features.hpss_active else features.full
+        )
+        brightness = max(effective * profile.sensitivity, profile.brightness_floor)
         return _WaveScene(self._hue, brightness, profile.effect_speed, profile.brightness_floor)
 
 
@@ -1031,7 +1054,11 @@ class _SolidRenderer(_EffectRenderer):
 
     def render(self, profile: Profile, features: AudioFeatures, t: float) -> Scene:  # noqa: ARG002
         self._hue = self._hue * 0.99 + features.centroid * 0.7 * 0.01
-        brightness = max(features.full * profile.sensitivity, profile.brightness_floor)
+        # HPSS: harmonic-weighted energy keeps solid colour calm during drum hits.
+        effective = (
+            features.harmonic_energy * features.full if features.hpss_active else features.full
+        )
+        brightness = max(effective * profile.sensitivity, profile.brightness_floor)
         return UniformScene(_hsv_to_colour(self._hue, 0.7, brightness))
 
 
@@ -1215,6 +1242,7 @@ class SyncEngine:
         self._pcm_onset: StftOnsetPipeline | None = None
         self._pcm_multiband: MultibandStftPipeline | None = None
         self._pcm_superflux: SuperfluxStftPipeline | None = None
+        self._pcm_hpss: PcmHpss | None = None
         self._last_pcm_onset: bool = False
         self._last_onset_bass: bool = False
         self._last_onset_mid: bool = False
@@ -1256,6 +1284,9 @@ class SyncEngine:
                 delta=self.profile.onset_delta,
                 alpha=self.profile.onset_alpha,
             )
+        if self.profile.use_hpss_separation:
+            self._pcm_hpss = PcmHpss(source.sample_rate)
+            log.info("HPSS separation enabled for this session")
 
     def update_probe(self, probe: LatencyProbe) -> None:
         """Swap the latency probe live. Safe to call from the asyncio event loop."""
@@ -1289,6 +1320,7 @@ class SyncEngine:
         self._pcm_onset = None
         self._pcm_multiband = None
         self._pcm_superflux = None
+        self._pcm_hpss = None
         self._last_pcm_onset = False
         self._last_onset_bass = False
         self._last_onset_mid = False
@@ -1319,6 +1351,9 @@ class SyncEngine:
                     delta=profile.onset_delta,
                     alpha=profile.onset_alpha,
                 )
+            if profile.use_hpss_separation:
+                self._pcm_hpss = PcmHpss(self._shm_source.sample_rate)
+                log.info("HPSS separation enabled (pipeline rebuild)")
         log.info(
             "[diag] update_onset_pipeline: method=%s (BandNormaliser EMA preserved, "
             "frame counter=%d)",
@@ -1425,6 +1460,15 @@ class SyncEngine:
                         results = self._pcm_onset.push(samples)
                         if results:
                             self._last_pcm_onset = any(onset for onset, _ in results)
+
+                    # HPSS runs in parallel with whichever onset method is active.
+                    if self._pcm_hpss is not None and features is not None:
+                        hpss_results = self._pcm_hpss.push(samples)
+                        if hpss_results:
+                            p_energy, h_energy = hpss_results[-1]
+                            features.hpss_active = True
+                            features.percussive_energy = p_energy
+                            features.harmonic_energy = h_energy
 
             if features is not None:
                 self._last_onset = features.onset

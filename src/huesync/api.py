@@ -130,6 +130,7 @@ class AnalysisConfigCreateBody(BaseModel):
     bars: int = 30
     lower_cutoff_freq: int = 50
     higher_cutoff_freq: int = 12000
+    use_hpss_separation: bool = False
 
 
 class AnalysisConfigPatchBody(BaseModel):
@@ -143,6 +144,7 @@ class AnalysisConfigPatchBody(BaseModel):
     bars: int | None = None
     lower_cutoff_freq: int | None = None
     higher_cutoff_freq: int | None = None
+    use_hpss_separation: bool | None = None
 
 
 class SceneCreateBody(BaseModel):
@@ -235,6 +237,7 @@ class CouplingPatchBody(BaseModel):
     onset_alpha: float | None = None
     superflux_mu: int | None = None
     superflux_lag: int | None = None
+    use_hpss_separation: bool | None = None
     # bass_hz/mid_hz: stored in Scene but pcm-category for restart
     bass_hz: int | None = None
     mid_hz: int | None = None
@@ -272,7 +275,7 @@ _C_CAVA_FIELDS: frozenset[str] = frozenset({
 })
 _C_PCM_FIELDS: frozenset[str] = frozenset({
     "onset_method", "onset_delta", "onset_alpha", "superflux_mu", "superflux_lag",
-    "bass_hz", "mid_hz",
+    "use_hpss_separation", "bass_hz", "mid_hz",
 })
 _C_RENDER_FIELDS: frozenset[str] = frozenset({
     "entertainment_area_name", "light_count",
@@ -288,6 +291,7 @@ _C_PLAYER_INLINE: frozenset[str] = frozenset({
 _C_AC_INLINE: frozenset[str] = frozenset({
     "bars", "lower_cutoff_freq", "higher_cutoff_freq",
     "onset_method", "onset_delta", "onset_alpha", "superflux_mu", "superflux_lag",
+    "use_hpss_separation",
 })
 _C_SCENE_INLINE: frozenset[str] = frozenset({
     "bass_hz", "mid_hz",
@@ -699,6 +703,7 @@ async def create_analysis_config(request: Request, body: AnalysisConfigCreateBod
         bars=body.bars,
         lower_cutoff_freq=body.lower_cutoff_freq,
         higher_cutoff_freq=body.higher_cutoff_freq,
+        use_hpss_separation=body.use_hpss_separation,
     )
     storage.save_analysis_config(ac)
     return JSONResponse(content=ac.to_dict(), status_code=201)

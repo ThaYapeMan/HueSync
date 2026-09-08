@@ -18,6 +18,7 @@ import struct
 from pathlib import Path
 
 import numpy as np
+import numpy.lib.stride_tricks
 
 _log = logging.getLogger(__name__)
 
@@ -165,6 +166,21 @@ class SqueezeliteShmSource:
         )
 
 
+# ---------------------------------------------------------------------------
+# HPSS parameters (Fitzgerald 2010)
+# ---------------------------------------------------------------------------
+
+# Rolling buffer length in STFT frames.  At 100 Hz, 17 frames ≈ 170 ms.
+# The harmonic median filter needs enough history to distinguish sustained
+# tones from transients; shorter buffers miss slower harmonics.
+_HPSS_L_H: int = 17
+
+# Frequency-axis median filter half-width in bins.  31 bins at 44100 Hz /
+# 2048 window ≈ ±325 Hz of neighbourhood — wide enough to catch the broadband
+# spread of a drum hit without swallowing narrow harmonic peaks.
+_HPSS_L_P: int = 31
+
+
 class PcmStft:
     """Rolling STFT over a stream of mono float32 samples.
 
@@ -206,3 +222,101 @@ class PcmStft:
             frames.append(mag)
             self._buf = self._buf[self._hop:]
         return frames
+
+
+# ---------------------------------------------------------------------------
+# PcmHpss — Harmonic-Percussive Source Separation
+# ---------------------------------------------------------------------------
+
+
+class PcmHpss:
+    """Real-time HPSS using vectorised 2D median filters on a rolling STFT buffer.
+
+    Maintains a rolling buffer of _HPSS_L_H STFT magnitude frames and computes
+    ``percussive_energy`` and ``harmonic_energy`` for the most-recently written
+    frame on every call to ``push()``.
+
+    Algorithm (Fitzgerald 2010 — numpy-only, no external deps):
+
+    - Harmonic mask H²/(H²+P²) where H = bin-wise median along the time axis
+      (a bin that is steady across _HPSS_L_H frames scores as harmonic).
+    - Percussive mask P²/(H²+P²) where P = sliding median of width _HPSS_L_P
+      across frequency bins of the current frame (a broadband spike is percussive).
+    - The Wiener soft masks sum to 1.0, so percussive + harmonic ≈ 1.0.
+
+    Both output values are normalised by the total frame energy and lie in
+    [0, 1].  They degrade gracefully during the first _HPSS_L_H/2 frames while
+    the circular buffer fills up from zeros — effects should check
+    ``AudioFeatures.hpss_active`` and fall back to existing behaviour if needed.
+
+    No external dependencies beyond numpy (no librosa, no scipy).  Benchmark on
+    a development machine: ~924 µs/frame (9 % of a 10 ms frame budget) when
+    vectorised via sliding_window_view.
+
+    Usage::
+
+        hpss = PcmHpss(sample_rate=44100)
+        for new_samples in stream:
+            for p_energy, h_energy in hpss.push(new_samples):
+                ...   # p_energy + h_energy ≈ 1.0
+    """
+
+    def __init__(self, sample_rate: int) -> None:
+        self._stft = PcmStft(sample_rate)
+        n_bins = self._stft.n_bins
+        self._buf = np.zeros((n_bins, _HPSS_L_H), dtype=np.float32)
+        self._write_pos: int = 0
+        self._half_p: int = _HPSS_L_P // 2
+
+    def push(self, samples: np.ndarray) -> list[tuple[float, float]]:
+        """Process PCM samples; return *(percussive_energy, harmonic_energy)* per frame.
+
+        Both values are normalised fractions ∈ [0, 1] that sum to ≈ 1.0.
+        Returns an empty list when the internal PcmStft has not yet accumulated
+        enough samples for a complete STFT window.
+        """
+        results: list[tuple[float, float]] = []
+        for frame in self._stft.push(samples):
+            self._buf[:, self._write_pos] = frame
+            self._write_pos = (self._write_pos + 1) % _HPSS_L_H
+
+            center = self._buf[:, (self._write_pos - 1) % _HPSS_L_H]
+
+            # Harmonic component: median across time axis (sustained = harmonic).
+            H = np.median(self._buf, axis=1)
+
+            # Percussive component: sliding median across frequency axis.
+            padded = np.pad(center, (self._half_p, self._half_p), mode="edge")
+            windows = np.lib.stride_tricks.sliding_window_view(padded, _HPSS_L_P)
+            P_vals = np.median(windows, axis=1).astype(np.float32)
+
+            H2 = H * H
+            P2 = P_vals * P_vals
+            denom = H2 + P2 + 1e-8
+            mask_h = H2 / denom
+            mask_p = P2 / denom
+
+            total = float(np.sum(center)) + 1e-8
+            results.append((
+                float(np.dot(center, mask_p)) / total,
+                float(np.dot(center, mask_h)) / total,
+            ))
+        return results
+
+
+if __name__ == "__main__":
+    # Quick benchmark: `python3 -m huesync.pcm_source`
+    import timeit
+
+    _rng = np.random.default_rng(42)
+    _sr = 44100
+    _hpss = PcmHpss(_sr)
+    _hop = PcmStft(_sr).hop
+    _chunk = _rng.standard_normal(_hop).astype(np.float32)
+    # Warm up the STFT buffer so push() reliably yields frames.
+    for _ in range(WINDOW_SIZE // _hop + 1):
+        _hpss.push(_chunk)
+    _n = 2000
+    _elapsed = timeit.timeit(lambda: _hpss.push(_chunk), number=_n)
+    _us = _elapsed / _n * 1e6
+    print(f"PcmHpss.push() per frame: {_us:.1f} µs  ({10000/_us:.0f}x headroom vs 10 ms budget)")
