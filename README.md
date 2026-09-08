@@ -91,7 +91,7 @@ Using "Zone" for the Hue Entertainment Area avoids confusion — a Zone is a
 physical room definition, a sync group is an audio routing concept.
 
 A Coupling can be **cloned** (Clone button in the UI) — the new Coupling gets
-independent copies of its Analysis Config, Scenes, and Crossfader (fresh IDs,
+independent copies of its Analyser, Scenes, and Crossfader (fresh IDs,
 same values), while sharing the same Virtual Player and Zone. This is the
 recommended way to set up A/B comparisons: clone, change one field on the
 copy, switch between them.
@@ -101,7 +101,7 @@ copy, switch between them.
 - One Virtual Player → many Couplings (same squeezelite process, different analysis
   or visual settings).
 - One Controller → many Zones (one per Entertainment Area).
-- Analysis Configs, Scenes, and Crossfaders can be shared across Couplings — or kept
+- Analysers, Scenes, and Crossfaders can be shared across Couplings — or kept
   exclusive per Coupling (as created by Clone).
 - **One Entertainment Area can stream per bridge at a time** (Hue Bridge
   hardware limit). Activating a Coupling automatically stops whatever was running before.
@@ -137,7 +137,7 @@ HueSync runs up to two parallel onset-detection paths:
 | cava-based (`OnsetDetector` in `CavaPipeline`) | ~30 Hz | Normalised bar spectrum |
 | PCM tap (`StftOnsetPipeline` / `MultibandStftPipeline` / `SuperfluxStftPipeline`) | 100 Hz | 2048-sample Hamming-windowed STFT on raw PCM from shared memory |
 
-The **`onset_method`** field in Analysis Config selects the PCM-tap algorithm:
+The **`onset_method`** field in an Analyser selects the PCM-tap algorithm:
 
 | Method | Behaviour |
 |---|---|
@@ -152,7 +152,7 @@ BandNormaliser EMA preserved.
 
 ## Harmonic/percussive separation (HPSS)
 
-Setting `use_hpss_separation: true` on an Analysis Config activates `PcmHpss`
+Setting `use_hpss_separation: true` on an Analyser activates `PcmHpss`
 as an additional layer on top of the STFT. It applies a 2D median filter
 (Fitzgerald 2010) to the rolling magnitude spectrogram and produces two
 per-frame energy values:
@@ -313,7 +313,7 @@ Couplings directly without switching tabs.
 
 ### Configuration UI
 
-All Analysis Config and Scene fields have plain-language descriptions and
+All Analyser and Scene fields have plain-language descriptions and
 context-sensitive hints directly in the editor dialogs — no prior knowledge of
 DSP terminology required. The onset method selector uses the same card-picker
 pattern as the effect selector, with one-line descriptions per option. SuperFlux
@@ -339,7 +339,7 @@ Only the most disruptive category in a given edit triggers an action.
 Editing a **Scene** or **Crossfader** that is currently referenced by the
 active Coupling also applies live — no Coupling restart needed.
 
-### Key Analysis Config fields
+### Key Analyser fields
 
 | Field | Default | Notes |
 |---|---|---|
@@ -422,7 +422,7 @@ GET/PATCH/DELETE /api/crossfaders/{id}
 GET/POST         /api/couplings
 GET/PATCH/DELETE /api/couplings/{id}
 POST             /api/couplings/{id}/activate
-POST             /api/couplings/{id}/clone        deep-clone with fresh AC + Scene + Crossfader copies
+POST             /api/couplings/{id}/clone        deep-clone with fresh Analyser + Scene + Crossfader copies
 POST             /api/couplings/{id}/restart-cava restart cava for the active coupling
 POST             /api/couplings/deactivate
 ```
