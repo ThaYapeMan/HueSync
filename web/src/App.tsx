@@ -72,7 +72,7 @@ export default function App() {
         </nav>
 
         <main className="flex-1 overflow-y-auto">
-          <div className={cn('mx-auto px-6 py-6', activeTab === 'now-playing' ? 'max-w-xl' : activeTab === 'couplings' ? 'max-w-5xl' : 'max-w-3xl')}>
+          <div className={cn('mx-auto px-6 py-6', activeTab === 'couplings' ? 'max-w-5xl' : 'max-w-3xl')}>
             {activeTab === 'now-playing' && (
               <NowPlaying colour={colour} channel_colours={channel_colours} onset={onset} onset_bass={onset_bass} onset_mid={onset_mid} onset_treble={onset_treble} mix={mix} bars={bars} status={status} />
             )}

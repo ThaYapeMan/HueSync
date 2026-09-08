@@ -400,16 +400,19 @@ export function NowPlaying({ colour, channel_colours, onset, onset_bass = false,
           </CardTitle>
         </CardHeader>
         <CardContent>
-          {channels.length > 0 ? (
-            <FloorplanPreview channels={channels} colours={channel_colours} onset={onset} />
-          ) : (
-            <>
+          <div className="flex gap-6 items-start">
+            <div className="flex-1 min-w-0">
               <ColourSwatch r={colour.r} g={colour.g} b={colour.b} onset={onset} />
               <p className="text-xs text-muted-foreground mt-2">
-                Colour of the first light channel. White outline&nbsp;= onset detected.
+                First channel colour. White outline&nbsp;= onset detected.
               </p>
-            </>
-          )}
+            </div>
+            {channels.length > 0 && (
+              <div className="w-[200px] flex-shrink-0">
+                <FloorplanPreview channels={channels} colours={channel_colours} onset={onset} />
+              </div>
+            )}
+          </div>
           <div className="mt-3">
             <div className="flex items-center justify-between mb-1">
               <span className="text-xs text-muted-foreground">Layer mix</span>
