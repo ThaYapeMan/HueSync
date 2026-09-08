@@ -400,17 +400,15 @@ export function NowPlaying({ colour, channel_colours, onset, onset_bass = false,
           </CardTitle>
         </CardHeader>
         <CardContent>
-          <div className="flex gap-6 items-start">
-            <div className="flex-1 min-w-0">
+          <div className={channels.length > 0 ? 'grid grid-cols-2 gap-6 items-start' : ''}>
+            <div>
               <ColourSwatch r={colour.r} g={colour.g} b={colour.b} onset={onset} />
               <p className="text-xs text-muted-foreground mt-2">
                 First channel colour. White outline&nbsp;= onset detected.
               </p>
             </div>
             {channels.length > 0 && (
-              <div className="w-[200px] flex-shrink-0">
-                <FloorplanPreview channels={channels} colours={channel_colours} onset={onset} />
-              </div>
+              <FloorplanPreview channels={channels} colours={channel_colours} onset={onset} />
             )}
           </div>
           <div className="mt-3">

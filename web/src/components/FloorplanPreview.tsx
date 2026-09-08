@@ -44,7 +44,7 @@ export function FloorplanPreview({ channels, colours, onset }: Props) {
         width={W}
         height={H}
         viewBox={`0 0 ${W} ${H}`}
-        className="w-full max-w-[240px] mx-auto block"
+        className="w-full block"
         aria-label="Light floorplan"
       >
         {/* Room outline */}
