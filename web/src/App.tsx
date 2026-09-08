@@ -3,7 +3,7 @@ import { usePreviewSocket } from '@/hooks/usePreviewSocket'
 import { NowPlaying } from '@/pages/NowPlaying'
 import { Latency } from '@/pages/Latency'
 import { Players } from '@/pages/Players'
-import { AnalysisConfigs } from '@/pages/AnalysisConfigs'
+import { Analysers } from '@/pages/Analysers'
 import { Scenes } from '@/pages/Scenes'
 import { Crossfaders } from '@/pages/Crossfaders'
 import { Zones } from '@/pages/Zones'
@@ -11,17 +11,17 @@ import { Couplings } from '@/pages/Couplings'
 import { Badge } from '@/components/ui/badge'
 import { cn } from '@/lib/utils'
 
-type Tab = 'now-playing' | 'players' | 'analysis-configs' | 'scenes' | 'crossfaders' | 'zones' | 'couplings' | 'latency'
+type Tab = 'now-playing' | 'players' | 'analysers' | 'scenes' | 'crossfaders' | 'zones' | 'couplings' | 'latency'
 
 const NAV_ITEMS: { value: Tab; label: string }[] = [
-  { value: 'now-playing',      label: 'Now Playing' },
-  { value: 'couplings',        label: 'Couplings' },
-  { value: 'analysis-configs', label: 'Analysis' },
-  { value: 'scenes',           label: 'Scenes' },
-  { value: 'crossfaders',      label: 'Crossfaders' },
-  { value: 'zones',            label: 'Zones' },
-  { value: 'players',          label: 'Virtual Players' },
-  { value: 'latency',          label: 'Latency' },
+  { value: 'now-playing',  label: 'Now Playing' },
+  { value: 'couplings',    label: 'Couplings' },
+  { value: 'analysers',    label: 'Analysers' },
+  { value: 'scenes',       label: 'Scenes' },
+  { value: 'crossfaders',  label: 'Crossfaders' },
+  { value: 'zones',        label: 'Zones' },
+  { value: 'players',      label: 'Virtual Players' },
+  { value: 'latency',      label: 'Latency' },
 ]
 
 function ConnectionBadge({ connected, attempt }: { connected: boolean; attempt: number }) {
@@ -77,7 +77,7 @@ export default function App() {
               <NowPlaying colour={colour} onset={onset} onset_bass={onset_bass} onset_mid={onset_mid} onset_treble={onset_treble} mix={mix} bars={bars} status={status} />
             )}
             {activeTab === 'players' && <Players />}
-            {activeTab === 'analysis-configs' && <AnalysisConfigs />}
+            {activeTab === 'analysers' && <Analysers />}
             {activeTab === 'scenes' && <Scenes />}
             {activeTab === 'crossfaders' && <Crossfaders />}
             {activeTab === 'zones' && <Zones />}

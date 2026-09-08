@@ -21,11 +21,11 @@ import { ConfirmDialog } from '@/components/ConfirmDialog'
 import { cn } from '@/lib/utils'
 import {
   ONSET_METHODS,
-  type AnalysisConfig,
-  getAnalysisConfigs,
-  createAnalysisConfig,
-  updateAnalysisConfig,
-  deleteAnalysisConfig,
+  type Analyser,
+  getAnalysers,
+  createAnalyser,
+  updateAnalyser,
+  deleteAnalyser,
 } from '@/lib/api'
 
 interface FormState {
@@ -41,7 +41,7 @@ interface FormState {
   use_hpss_separation: boolean
 }
 
-function defaultForm(cfg?: AnalysisConfig): FormState {
+function defaultForm(cfg?: Analyser): FormState {
   return {
     name: cfg?.name ?? '',
     onset_method: cfg?.onset_method ?? 'combined',
@@ -66,19 +66,19 @@ function FormRow({ label, hint, children }: { label: string; hint?: string; chil
   )
 }
 
-export function AnalysisConfigs() {
-  const [configs, setConfigs] = useState<AnalysisConfig[]>([])
+export function Analysers() {
+  const [configs, setConfigs] = useState<Analyser[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [editorOpen, setEditorOpen] = useState(false)
-  const [editingConfig, setEditingConfig] = useState<AnalysisConfig | undefined>(undefined)
+  const [editingConfig, setEditingConfig] = useState<Analyser | undefined>(undefined)
   const [form, setForm] = useState<FormState>(defaultForm())
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
 
   async function load() {
     try {
-      const data = await getAnalysisConfigs()
+      const data = await getAnalysers()
       setConfigs(data)
       setError(null)
     } catch (e) {
@@ -99,7 +99,7 @@ export function AnalysisConfigs() {
     setEditorOpen(true)
   }
 
-  function openEdit(cfg: AnalysisConfig) {
+  function openEdit(cfg: Analyser) {
     setEditingConfig(cfg)
     setForm(defaultForm(cfg))
     setSaveError(null)
@@ -127,9 +127,9 @@ export function AnalysisConfigs() {
         use_hpss_separation: form.use_hpss_separation,
       }
       if (editingConfig) {
-        await updateAnalysisConfig(editingConfig.id, body)
+        await updateAnalyser(editingConfig.id, body)
       } else {
-        await createAnalysisConfig(body)
+        await createAnalyser(body)
       }
       setEditorOpen(false)
       await load()
@@ -141,7 +141,7 @@ export function AnalysisConfigs() {
   }
 
   async function handleDelete(id: string) {
-    await deleteAnalysisConfig(id)
+    await deleteAnalyser(id)
     await load()
   }
 
@@ -156,14 +156,14 @@ export function AnalysisConfigs() {
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <h2 className="text-sm font-semibold">Analysis configs</h2>
+        <h2 className="text-sm font-semibold">Analysers</h2>
         <Button size="sm" onClick={openNew}>
-          New config
+          New analyser
         </Button>
       </div>
 
       {configs.length === 0 ? (
-        <p className="text-sm text-muted-foreground">No analysis configs yet. Create one to get started.</p>
+        <p className="text-sm text-muted-foreground">No analysers yet. Create one to get started.</p>
       ) : (
         <Table>
           <TableHeader>
@@ -195,7 +195,7 @@ export function AnalysisConfigs() {
                           Delete
                         </Button>
                       }
-                      title="Delete analysis config"
+                      title="Delete analyser"
                       description={`Delete "${c.name}"? This cannot be undone.`}
                       onConfirm={() => handleDelete(c.id)}
                     />
@@ -210,7 +210,7 @@ export function AnalysisConfigs() {
       <Dialog open={editorOpen} onOpenChange={(o) => { if (!o) setEditorOpen(false) }}>
         <DialogContent className="max-w-md flex flex-col max-h-[90vh]">
           <DialogHeader>
-            <DialogTitle>{editingConfig ? 'Edit analysis config' : 'New analysis config'}</DialogTitle>
+            <DialogTitle>{editingConfig ? 'Edit analyser' : 'New analyser'}</DialogTitle>
           </DialogHeader>
 
           <div className="overflow-y-auto flex-1 pr-1 space-y-4">
@@ -218,7 +218,7 @@ export function AnalysisConfigs() {
               <Input
                 value={form.name}
                 onChange={(e) => set('name', e.target.value)}
-                placeholder="My analysis config"
+                placeholder="My analyser"
               />
             </FormRow>
 

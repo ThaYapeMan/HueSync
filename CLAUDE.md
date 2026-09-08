@@ -162,7 +162,7 @@ immediately.
 On the backend, `PATCH /api/scenes/{id}` and `PATCH /api/crossfaders/{id}`
 both detect whether the active coupling references the patched entity and call
 `SyncEngine.update_render()` without a restart. Similarly, swapping
-`analysis_config_id` on an active Coupling triggers `restart_cava()` +
+`analyser_id` on an active Coupling triggers `restart_cava()` +
 `update_onset_pipeline()` without touching the Hue DTLS session.
 
 ### Coupling PATCH routes to the minimum necessary action (`api.py`, `player_manager.py`)
@@ -174,7 +174,7 @@ that was the original source of warmup-state interference in A/B comparisons.
 | Category | Fields | Action |
 |---|---|---|
 | deactivate | `player_id`, `zone_id`, `lms_host`, `lms_port`, `player_name`, `alsa_device` | Full deactivate |
-| live FK | `analysis_config_id` | `restart_cava()` + `update_onset_pipeline()` |
+| live FK | `analyser_id` | `restart_cava()` + `update_onset_pipeline()` |
 | live FK | `crossfader_id` | `update_render()` only |
 | cava | `bars`, `lower_cutoff_freq`, `higher_cutoff_freq` | `restart_cava()` |
 | pcm | `onset_method`, `onset_delta`, `onset_alpha`, `superflux_mu`, `superflux_lag`, `bass_hz`, `mid_hz` | `SyncEngine.update_onset_pipeline()` |
@@ -183,20 +183,20 @@ that was the original source of warmup-state interference in A/B comparisons.
 Priority: deactivate > cava > pcm > render. `update_onset_pipeline()` resets
 onset warmup state but NOT the BandNormaliser EMA.
 
-### Swapping AnalysisConfig on an active Coupling is a live operation (`api.py`, `player_manager.py`)
+### Swapping Analyser on an active Coupling is a live operation (`api.py`, `player_manager.py`)
 
-`PATCH /api/couplings/{id}` with `analysis_config_id` changed to a different AC
+`PATCH /api/couplings/{id}` with `analyser_id` changed to a different Analyser
 does **not** require a full session restart. It is intentionally live-updateable:
 
-1. `_apply_coupling_action()` routes `analysis_config_id` to `restart_cava()` +
+1. `_apply_coupling_action()` routes `analyser_id` to `restart_cava()` +
    `update_onset_pipeline()` — the same path as changing `bars` or `onset_method`
    inline. The Hue DTLS session and squeezelite stay running.
 2. `restart_cava()` reloads `session.coupling` from storage before calling
-   `_build_engine_profile()` — so the new `analysis_config_id` (already
+   `_build_engine_profile()` — so the new `analyser_id` (already
    written to storage by `patch_coupling()`) is picked up, not the stale
    in-memory reference.
 
-**Do not move `analysis_config_id` back into `_C_DEACTIVATE_FIELDS`.** It was
+**Do not move `analyser_id` back into `_C_DEACTIVATE_FIELDS`.** It was
 there previously and caused lights to freeze (deactivate called, no re-activate).
 The fix is tested by `test_ac_swap_session_remains_active` in `tests/test_api.py`.
 
@@ -248,7 +248,7 @@ AirPlay 2 input (shairport-sync + nqptp) is a one-time setup step:
 | `src/huesync/hue_output.py` | **Only** file importing `hue_entertainment` for streaming: `HueDriver`, `ChannelInfo`, `get_channel_infos()` |
 | `src/huesync/hue_bridge.py` | Controller pairing and Entertainment Area discovery |
 | `src/huesync/player_manager.py` | Process lifecycle: squeezelite + cava + output driver; `activate_coupling()`, `update_onset_pipeline()`, `update_render()` |
-| `src/huesync/models.py` | Seven-entity model: `Controller`, `VirtualPlayer`, `Zone`, `AnalysisConfig`, `Scene`, `Crossfader`, `Coupling`; also `Profile` as an internal engine type |
+| `src/huesync/models.py` | Seven-entity model: `Controller`, `VirtualPlayer`, `Zone`, `Analyser`, `Scene`, `Crossfader`, `Coupling`; also `Profile` as an internal engine type |
 | `src/huesync/lms_discovery.py` | UDP broadcast discovery of the LMS server |
 | `src/huesync/app.py` | FastAPI web UI |
 | `src/huesync/storage.py` | JSON config persistence |

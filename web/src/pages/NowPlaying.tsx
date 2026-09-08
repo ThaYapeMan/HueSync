@@ -215,7 +215,7 @@ function CouplingSelector({
         <p className="text-xs text-muted-foreground italic leading-snug">
           Switching couplings restarts the full session (squeezelite, cava,
           DTLS) and resets the BandNormaliser EMA. For a live A/B comparison,
-          swap the active coupling's AnalysisConfig or Crossfader instead —
+          swap the active coupling's Analyser or Crossfader instead —
           those update without a session restart.
         </p>
 

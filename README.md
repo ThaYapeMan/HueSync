@@ -73,7 +73,7 @@ Controller ──── Zone
                  │
 VirtualPlayer ──── Coupling ──── Crossfader ──── Scene (active)
      │                                        └── Scene (mellow)
-     └── AnalysisConfig
+     └── Analyser
 ```
 
 | Entity | Responsibility |
@@ -81,10 +81,10 @@ VirtualPlayer ──── Coupling ──── Crossfader ──── Scene (
 | **Controller** | A Hue Bridge: IP, app key, client key. Used for pairing and Entertainment Area discovery. |
 | **Virtual Player** | A virtual squeezelite instance: LMS host, player name, MAC address, ALSA device, follow player MAC. |
 | **Zone** | Links a Controller to one of its Entertainment Areas. Shared across Couplings. |
-| **Analysis Config** | cava parameters (bars, cutoff freqs), onset detection settings (method, delta, alpha), and optional harmonic/percussive separation (`use_hpss_separation`). |
+| **Analyser** | cava parameters (bars, cutoff freqs), onset detection settings (method, delta, alpha), and optional harmonic/percussive separation (`use_hpss_separation`). |
 | **Scene** | Visual output parameters: effect, sensitivity, brightness floor, band boundaries. |
 | **Crossfader** | Links an Active Scene (loud passages) + Mellow Scene (quiet passages) with crossfade thresholds. |
-| **Coupling** | Binds exactly one Virtual Player + Zone + Analysis Config + Crossfader. Activate a Coupling to start the light show. |
+| **Coupling** | Binds exactly one Virtual Player + Zone + Analyser + Crossfader. Activate a Coupling to start the light show. |
 
 **Why "Zone" and not "Group"?** An LMS sync group is also called a "group".
 Using "Zone" for the Hue Entertainment Area avoids confusion — a Zone is a
@@ -327,7 +327,7 @@ HueSync applies the minimum necessary action depending on which fields changed:
 | Changed field(s) | Action |
 |---|---|
 | `player_id`, `zone_id`, `lms_host`, `lms_port`, `player_name`, `alsa_device`, `follow_player_mac` | Full deactivate — squeezelite, cava, and the Hue DTLS session are torn down. Reactivate manually (blind: lights off briefly). |
-| `analysis_config_id` | cava restart + PCM pipeline rebuild — new Analysis Config applied live, Hue session stays up. |
+| `analyser_id` | cava restart + PCM pipeline rebuild — new Analyser applied live, Hue session stays up. |
 | `crossfader_id` | Render update only — new Crossfader applied immediately, nothing restarts. |
 | `bars`, `lower_cutoff_freq`, `higher_cutoff_freq` | cava-only restart — squeezelite and the Hue session stay up. |
 | `onset_method`, `onset_delta`, `onset_alpha`, `superflux_mu`, `superflux_lag`, `bass_hz`, `mid_hz`, `use_hpss_separation` | PCM pipeline rebuilt live — no process restart, BandNormaliser EMA preserved. |
@@ -410,8 +410,8 @@ GET/PATCH/DELETE /api/virtual-players/{id}
 GET/POST         /api/zones
 GET/PATCH/DELETE /api/zones/{id}
 
-GET/POST         /api/analysis-configs
-GET/PATCH/DELETE /api/analysis-configs/{id}
+GET/POST         /api/analysers
+GET/PATCH/DELETE /api/analysers/{id}
 
 GET/POST         /api/scenes
 GET/PATCH/DELETE /api/scenes/{id}

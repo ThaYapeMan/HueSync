@@ -157,7 +157,7 @@ export interface Zone {
   light_count: number
 }
 
-export interface AnalysisConfig {
+export interface Analyser {
   id: string
   name: string
   onset_method: string
@@ -199,7 +199,7 @@ export interface Coupling {
   id: string
   name: string
   player_id: string
-  analysis_config_id: string
+  analyser_id: string
   zone_id: string
   crossfader_id: string
   enabled: boolean
@@ -228,14 +228,14 @@ export const updateZone = (id: string, body: Partial<Omit<Zone, 'id'>>) =>
 export const deleteZone = (id: string) =>
   request<void>(`/api/zones/${id}`, { method: 'DELETE' })
 
-// AnalysisConfigs
-export const getAnalysisConfigs = () => request<AnalysisConfig[]>('/api/analysis-configs')
-export const createAnalysisConfig = (body: Omit<AnalysisConfig, 'id'>) =>
-  request<AnalysisConfig>('/api/analysis-configs', json('POST', body))
-export const updateAnalysisConfig = (id: string, body: Partial<Omit<AnalysisConfig, 'id'>>) =>
-  request<AnalysisConfig>(`/api/analysis-configs/${id}`, json('PATCH', body))
-export const deleteAnalysisConfig = (id: string) =>
-  request<void>(`/api/analysis-configs/${id}`, { method: 'DELETE' })
+// Analysers
+export const getAnalysers = () => request<Analyser[]>('/api/analysers')
+export const createAnalyser = (body: Omit<Analyser, 'id'>) =>
+  request<Analyser>('/api/analysers', json('POST', body))
+export const updateAnalyser = (id: string, body: Partial<Omit<Analyser, 'id'>>) =>
+  request<Analyser>(`/api/analysers/${id}`, json('PATCH', body))
+export const deleteAnalyser = (id: string) =>
+  request<void>(`/api/analysers/${id}`, { method: 'DELETE' })
 
 // Scenes
 export const getScenes = () => request<Scene[]>('/api/scenes')

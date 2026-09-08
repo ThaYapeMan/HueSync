@@ -32,7 +32,7 @@ import {
   type Coupling,
   type VirtualPlayer,
   type Zone,
-  type AnalysisConfig,
+  type Analyser,
   type Scene,
   type Crossfader,
   type Controller,
@@ -48,8 +48,8 @@ import {
   createVirtualPlayer,
   getZones,
   createZone,
-  getAnalysisConfigs,
-  createAnalysisConfig,
+  getAnalysers,
+  createAnalyser,
   getScenes,
   createScene,
   getCrossfaders,
@@ -274,15 +274,15 @@ function NewZoneDialog({ open, onClose, onCreated }: NewZoneDialogProps) {
   )
 }
 
-// ---- Inline mini-dialog: New AnalysisConfig ----
+// ---- Inline mini-dialog: New Analyser ----
 
-interface NewAnalysisConfigDialogProps {
+interface NewAnalyserDialogProps {
   open: boolean
   onClose: () => void
-  onCreated: (cfg: AnalysisConfig) => void
+  onCreated: (cfg: Analyser) => void
 }
 
-function NewAnalysisConfigDialog({ open, onClose, onCreated }: NewAnalysisConfigDialogProps) {
+function NewAnalyserDialog({ open, onClose, onCreated }: NewAnalyserDialogProps) {
   const [name, setName] = useState('')
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -298,7 +298,7 @@ function NewAnalysisConfigDialog({ open, onClose, onCreated }: NewAnalysisConfig
     setSaving(true)
     setError(null)
     try {
-      const cfg = await createAnalysisConfig({
+      const cfg = await createAnalyser({
         name,
         onset_method: 'combined',
         bars: 30,
@@ -322,12 +322,12 @@ function NewAnalysisConfigDialog({ open, onClose, onCreated }: NewAnalysisConfig
     <Dialog open={open} onOpenChange={(o) => { if (!o) onClose() }}>
       <DialogContent className="max-w-sm">
         <DialogHeader>
-          <DialogTitle>New analysis config</DialogTitle>
-          <DialogDescription>Uses sensible defaults — edit in Analysis tab to adjust.</DialogDescription>
+          <DialogTitle>New analyser</DialogTitle>
+          <DialogDescription>Uses sensible defaults — edit in Analysers tab to adjust.</DialogDescription>
         </DialogHeader>
         <div className="space-y-1">
           <Label className="text-sm">Name</Label>
-          <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="My analysis config" />
+          <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="My analyser" />
         </div>
         {error && <p className="text-destructive text-sm mt-2">{error}</p>}
         <DialogFooter className="mt-4">
@@ -571,7 +571,7 @@ interface CouplingEditorProps {
   coupling?: Coupling
   players: VirtualPlayer[]
   zones: Zone[]
-  analysisConfigs: AnalysisConfig[]
+  analysers: Analyser[]
   scenes: Scene[]
   crossfaders: Crossfader[]
   activeCouplingId: string | null
@@ -579,7 +579,7 @@ interface CouplingEditorProps {
   onClose: () => void
   onPlayersChanged: (players: VirtualPlayer[]) => void
   onZonesChanged: (zones: Zone[]) => void
-  onAnalysisConfigsChanged: (cfgs: AnalysisConfig[]) => void
+  onAnalysersChanged: (cfgs: Analyser[]) => void
   onScenesChanged: (scenes: Scene[]) => void
   onCrossfadersChanged: (crossfaders: Crossfader[]) => void
 }
@@ -589,7 +589,7 @@ function CouplingEditor({
   coupling,
   players,
   zones,
-  analysisConfigs,
+  analysers,
   scenes,
   crossfaders,
   activeCouplingId,
@@ -597,7 +597,7 @@ function CouplingEditor({
   onClose,
   onPlayersChanged,
   onZonesChanged,
-  onAnalysisConfigsChanged,
+  onAnalysersChanged,
   onScenesChanged,
   onCrossfadersChanged,
 }: CouplingEditorProps) {
@@ -607,7 +607,7 @@ function CouplingEditor({
   const [name, setName] = useState('')
   const [playerId, setPlayerId] = useState('')
   const [zoneId, setZoneId] = useState('')
-  const [analysisConfigId, setAnalysisConfigId] = useState('')
+  const [analyserId, setAnalyserId] = useState('')
   const [crossfaderId, setCrossfaderId] = useState('')
   const [enabled, setEnabled] = useState(true)
   const [saving, setSaving] = useState(false)
@@ -616,7 +616,7 @@ function CouplingEditor({
   // Nested dialog states
   const [newPlayerOpen, setNewPlayerOpen] = useState(false)
   const [newZoneOpen, setNewZoneOpen] = useState(false)
-  const [newAnalysisConfigOpen, setNewAnalysisConfigOpen] = useState(false)
+  const [newAnalyserOpen, setNewAnalyserOpen] = useState(false)
   const [newCrossfaderOpen, setNewCrossfaderOpen] = useState(false)
 
   useEffect(() => {
@@ -624,7 +624,7 @@ function CouplingEditor({
       setName(coupling?.name ?? '')
       setPlayerId(coupling?.player_id ?? '')
       setZoneId(coupling?.zone_id ?? '')
-      setAnalysisConfigId(coupling?.analysis_config_id ?? '')
+      setAnalyserId(coupling?.analyser_id ?? '')
       setCrossfaderId(coupling?.crossfader_id ?? '')
       setEnabled(coupling?.enabled ?? true)
       setSaveError(null)
@@ -641,7 +641,7 @@ function CouplingEditor({
           enabled,
           player_id: playerId,
           zone_id: zoneId,
-          analysis_config_id: analysisConfigId,
+          analyser_id: analyserId,
           crossfader_id: crossfaderId,
         })
       } else {
@@ -649,7 +649,7 @@ function CouplingEditor({
           name,
           player_id: playerId,
           zone_id: zoneId,
-          analysis_config_id: analysisConfigId,
+          analyser_id: analyserId,
           crossfader_id: crossfaderId,
           enabled,
         })
@@ -676,11 +676,11 @@ function CouplingEditor({
     setZoneId(zone.id)
   }
 
-  async function handleAnalysisConfigCreated(cfg: AnalysisConfig) {
-    setNewAnalysisConfigOpen(false)
-    const updated = await getAnalysisConfigs().catch(() => analysisConfigs)
-    onAnalysisConfigsChanged(updated)
-    setAnalysisConfigId(cfg.id)
+  async function handleAnalyserCreated(cfg: Analyser) {
+    setNewAnalyserOpen(false)
+    const updated = await getAnalysers().catch(() => analysers)
+    onAnalysersChanged(updated)
+    setAnalyserId(cfg.id)
   }
 
   async function handleCrossfaderCreated(cf: Crossfader) {
@@ -756,21 +756,21 @@ function CouplingEditor({
               )}
             </div>
 
-            {/* Analysis config */}
+            {/* Analyser */}
             <div className="space-y-1">
-              <Label className="text-sm">Analysis config</Label>
+              <Label className="text-sm">Analyser</Label>
               <div className="flex gap-2">
-                <Select value={analysisConfigId} onValueChange={setAnalysisConfigId}>
+                <Select value={analyserId} onValueChange={setAnalyserId}>
                   <SelectTrigger className="flex-1">
-                    <SelectValue placeholder="Select analysis config" />
+                    <SelectValue placeholder="Select analyser" />
                   </SelectTrigger>
                   <SelectContent>
-                    {analysisConfigs.map((c) => (
+                    {analysers.map((c) => (
                       <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>
                     ))}
                   </SelectContent>
                 </Select>
-                <Button size="sm" variant="outline" type="button" onClick={() => setNewAnalysisConfigOpen(true)}>
+                <Button size="sm" variant="outline" type="button" onClick={() => setNewAnalyserOpen(true)}>
                   + New
                 </Button>
               </div>
@@ -833,10 +833,10 @@ function CouplingEditor({
         onClose={() => setNewZoneOpen(false)}
         onCreated={handleZoneCreated}
       />
-      <NewAnalysisConfigDialog
-        open={newAnalysisConfigOpen}
-        onClose={() => setNewAnalysisConfigOpen(false)}
-        onCreated={handleAnalysisConfigCreated}
+      <NewAnalyserDialog
+        open={newAnalyserOpen}
+        onClose={() => setNewAnalyserOpen(false)}
+        onCreated={handleAnalyserCreated}
       />
       <NewCrossfaderDialog
         open={newCrossfaderOpen}
@@ -855,7 +855,7 @@ export function Couplings({ activeCouplingId: activeCouplingIdProp, onActivation
   const [couplings, setCouplings] = useState<Coupling[]>([])
   const [players, setPlayers] = useState<VirtualPlayer[]>([])
   const [zones, setZones] = useState<Zone[]>([])
-  const [analysisConfigs, setAnalysisConfigs] = useState<AnalysisConfig[]>([])
+  const [analysers, setAnalysers] = useState<Analyser[]>([])
   const [scenes, setScenes] = useState<Scene[]>([])
   const [crossfaders, setCrossfaders] = useState<Crossfader[]>([])
   const [activeCouplingId, setActiveCouplingId] = useState<string | null>(activeCouplingIdProp)
@@ -871,7 +871,7 @@ export function Couplings({ activeCouplingId: activeCouplingIdProp, onActivation
         getCouplings(),
         getVirtualPlayers(),
         getZones(),
-        getAnalysisConfigs(),
+        getAnalysers(),
         getCrossfaders(),
         getScenes(),
         getStatus(),
@@ -879,7 +879,7 @@ export function Couplings({ activeCouplingId: activeCouplingIdProp, onActivation
       setCouplings(cs)
       setPlayers(ps)
       setZones(zs)
-      setAnalysisConfigs(acs)
+      setAnalysers(acs)
       setCrossfaders(cfs)
       setScenes(scs)
       setActiveCouplingId(st.active_coupling_id ?? activeCouplingIdProp)
@@ -1059,7 +1059,7 @@ export function Couplings({ activeCouplingId: activeCouplingIdProp, onActivation
         coupling={editingCoupling}
         players={players}
         zones={zones}
-        analysisConfigs={analysisConfigs}
+        analysers={analysers}
         scenes={scenes}
         crossfaders={crossfaders}
         activeCouplingId={activeCouplingId}
@@ -1067,7 +1067,7 @@ export function Couplings({ activeCouplingId: activeCouplingIdProp, onActivation
         onClose={() => setEditorOpen(false)}
         onPlayersChanged={setPlayers}
         onZonesChanged={setZones}
-        onAnalysisConfigsChanged={setAnalysisConfigs}
+        onAnalysersChanged={setAnalysers}
         onScenesChanged={setScenes}
         onCrossfadersChanged={setCrossfaders}
       />
