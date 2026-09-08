@@ -15,6 +15,36 @@ fi
 SRC=/usr/local/src
 
 # ---------------------------------------------------------------------------
+# Helper: make a systemd unit visible after make install.
+# make install may write the service file to /usr/local/lib/systemd/system/
+# (when built with the default --prefix=/usr/local), which is not in
+# systemd's standard search path. This symlinks it into /etc/systemd/system/
+# so daemon-reload picks it up. Safe to call even when the file is already
+# in a standard location.
+# ---------------------------------------------------------------------------
+ensure_unit_visible() {
+    local unit_name="$1"
+    local service_file="${unit_name}.service"
+
+    # Already visible — nothing to do.
+    if systemctl cat "$service_file" &>/dev/null; then
+        return 0
+    fi
+
+    local src
+    src=$(find /usr/local/lib/systemd/system /usr/lib/systemd/system \
+               -name "$service_file" 2>/dev/null | head -1)
+
+    if [[ -z "$src" ]]; then
+        echo "error: $service_file not found after make install" >&2
+        return 1
+    fi
+
+    echo "  linking $src → /etc/systemd/system/$service_file"
+    ln -sf "$src" "/etc/systemd/system/$service_file"
+}
+
+# ---------------------------------------------------------------------------
 # Phase 1: build dependencies
 # ---------------------------------------------------------------------------
 echo "==> [1/6] Installing build dependencies..."
@@ -50,6 +80,7 @@ autoreconf -fi
 ./configure --with-systemd-startup
 make -j"$(nproc)"
 make install
+ensure_unit_visible nqptp
 
 systemctl daemon-reload
 systemctl enable nqptp
@@ -125,6 +156,7 @@ EOF
 # /run/huesync/ without extra group membership.
 # ---------------------------------------------------------------------------
 echo "==> [6/6] Installing systemd drop-in and starting services..."
+ensure_unit_visible shairport-sync
 mkdir -p /etc/systemd/system/shairport-sync.service.d
 cat > /etc/systemd/system/shairport-sync.service.d/run-as-huesync.conf << 'EOF'
 [Service]

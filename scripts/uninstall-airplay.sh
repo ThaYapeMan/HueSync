@@ -22,12 +22,15 @@ systemctl disable nqptp          2>/dev/null || true
 
 # ---------------------------------------------------------------------------
 # Step 2: remove systemd unit files and drop-in overrides
-# make install writes to /lib/systemd/system/ or /usr/local/lib/systemd/system/
-# depending on the autoconf prefix; remove both locations to be safe.
+# make install may write to /usr/local/lib/systemd/system/ (non-standard);
+# setup-airplay.sh symlinks those into /etc/systemd/system/ so systemd
+# finds them. Remove all three locations for each unit.
 # ---------------------------------------------------------------------------
 echo "==> [2/6] Removing systemd unit files..."
+rm -f  /etc/systemd/system/shairport-sync.service
 rm -f  /lib/systemd/system/shairport-sync.service
 rm -f  /usr/local/lib/systemd/system/shairport-sync.service
+rm -f  /etc/systemd/system/nqptp.service
 rm -f  /lib/systemd/system/nqptp.service
 rm -f  /usr/local/lib/systemd/system/nqptp.service
 rm -rf /etc/systemd/system/shairport-sync.service.d
