@@ -13,10 +13,10 @@ const PAD = 14
 const INNER_W = W - 2 * PAD
 const INNER_H = H - 2 * PAD
 
-// Dot radius scales with light count; halved twice from the original formula.
-// max(2, min(5, round(10 / √n)))  →  ~5 px for 2 lights, ~2 px for 20+.
+// Dot radius scales with light count.
+// max(3, min(8, round(16 / √n)))  →  8 px for 2 lights, 3 px for 30+.
 function dotRadius(n: number): number {
-  return Math.max(2, Math.min(5, Math.round(10 / Math.sqrt(Math.max(n, 1)))))
+  return Math.max(3, Math.min(8, Math.round(16 / Math.sqrt(Math.max(n, 1)))))
 }
 
 // Map Hue position to SVG coordinate; shrinks usable area by the dot
@@ -41,7 +41,7 @@ export function FloorplanPreview({ channels, colours, onset }: Props) {
       {/* No width/height attributes: SVG is fully responsive via viewBox + CSS. */}
       <svg
         viewBox={`0 0 ${W} ${H}`}
-        className="w-full block"
+        className="w-full h-auto block"
         aria-label="Light floorplan"
       >
         {/* Room outline */}
