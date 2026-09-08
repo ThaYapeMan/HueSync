@@ -276,6 +276,42 @@ def test_patch_virtual_player_clear_follow_player_mac(client: TestClient):
     assert patch_resp.json()["follow_player_mac"] == ""
 
 
+def test_virtual_player_display_name_defaults_to_empty(client: TestClient):
+    resp = client.post("/api/virtual-players", json={"lms_host": "10.0.0.20"})
+    assert resp.status_code == 201
+    assert resp.json()["display_name"] == ""
+
+
+def test_virtual_player_display_name_crud(client: TestClient):
+    resp = client.post(
+        "/api/virtual-players",
+        json={"lms_host": "10.0.0.21", "display_name": "Living Room"},
+    )
+    assert resp.status_code == 201
+    assert resp.json()["display_name"] == "Living Room"
+    player_id = resp.json()["id"]
+
+    patch_resp = client.patch(
+        f"/api/virtual-players/{player_id}", json={"display_name": "Kitchen"}
+    )
+    assert patch_resp.status_code == 200
+    assert patch_resp.json()["display_name"] == "Kitchen"
+
+    get_resp = client.get(f"/api/virtual-players/{player_id}")
+    assert get_resp.json()["display_name"] == "Kitchen"
+
+
+def test_display_name_patch_inactive_player_no_deactivate(client: TestClient):
+    """PATCH display_name on a player with no active coupling must not call deactivate."""
+    resp = client.post("/api/virtual-players", json={"lms_host": "10.0.0.22", "display_name": "Old"})
+    player_id = resp.json()["id"]
+
+    patch_resp = client.patch(f"/api/virtual-players/{player_id}", json={"display_name": "New"})
+    assert patch_resp.status_code == 200
+    assert patch_resp.json()["display_name"] == "New"
+    client._manager.deactivate.assert_not_awaited()
+
+
 def test_lms_players_endpoint_missing_host(client: TestClient):
     resp = client.get("/api/lms/players")
     assert resp.status_code == 422  # missing required query param

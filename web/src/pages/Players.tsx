@@ -41,6 +41,7 @@ interface FormState {
   lms_host: string
   lms_port: string
   player_name: string
+  display_name: string
   alsa_device: string
   follow_player_mac: string
 }
@@ -51,6 +52,7 @@ function defaultForm(player?: VirtualPlayer): FormState {
     lms_host: player?.lms_host ?? '',
     lms_port: String(player?.lms_port ?? 9000),
     player_name: player?.player_name ?? 'HueSync',
+    display_name: player?.display_name ?? '',
     alsa_device: player?.alsa_device ?? '',
     follow_player_mac: player?.follow_player_mac ?? '',
   }
@@ -145,6 +147,7 @@ export function Players() {
           lms_host: form.lms_host,
           lms_port: parseInt(form.lms_port, 10),
           player_name: form.player_name,
+          display_name: form.display_name,
           alsa_device: form.alsa_device,
           follow_player_mac: form.follow_player_mac,
         })
@@ -154,6 +157,7 @@ export function Players() {
           lms_host: form.lms_host,
           lms_port: parseInt(form.lms_port, 10),
           player_name: form.player_name,
+          display_name: form.display_name,
           alsa_device: form.alsa_device,
           follow_player_mac: form.follow_player_mac,
         })
@@ -209,6 +213,7 @@ export function Players() {
               <TableHead>Type</TableHead>
               <TableHead>LMS Host</TableHead>
               <TableHead>Player Name</TableHead>
+              <TableHead>Advertised As</TableHead>
               <TableHead>MAC</TableHead>
               <TableHead className="text-right">Actions</TableHead>
             </TableRow>
@@ -219,6 +224,7 @@ export function Players() {
                 <TableCell className="font-medium">{p.type}</TableCell>
                 <TableCell className="font-mono text-sm text-muted-foreground">{p.lms_host}</TableCell>
                 <TableCell className="text-sm">{p.player_name}</TableCell>
+                <TableCell className="text-sm text-muted-foreground">{p.display_name || p.player_name}</TableCell>
                 <TableCell className="font-mono text-xs text-muted-foreground">{p.player_mac || '—'}</TableCell>
                 <TableCell className="text-right">
                   <div className="flex items-center justify-end gap-1">
@@ -269,15 +275,28 @@ export function Players() {
               )}
             </FormRow>
 
+            <div className="space-y-1">
+              <Label className="text-sm">Advertised name</Label>
+              <p className="text-xs text-muted-foreground">
+                {isAirPlay
+                  ? 'Name shown in the AirPlay menu. Changing this restarts the AirPlay receiver.'
+                  : 'Name shown in the LMS player list. Changing this restarts the player.'}
+              </p>
+              <Input
+                value={form.display_name}
+                onChange={(e) => set('display_name', e.target.value)}
+                placeholder={form.player_name || 'HueSync'}
+              />
+            </div>
+
             {isAirPlay ? (
               <div className="rounded-md border border-muted bg-muted/40 px-4 py-3 text-sm text-muted-foreground space-y-1">
                 <p>
                   <strong className="text-foreground">Silent AirPlay destination for analysis.</strong>
                 </p>
                 <p>
-                  This player appears as "HueSync" in your AirPlay menu. Select it alongside
-                  your real speaker in Control Center to keep audio playing through your speaker
-                  while HueSync analyses the stream.
+                  Select this player alongside your real speaker in Control Center to keep audio
+                  playing through your speaker while HueSync analyses the stream.
                 </p>
               </div>
             ) : (

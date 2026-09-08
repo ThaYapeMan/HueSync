@@ -91,6 +91,7 @@ class VirtualPlayerCreateBody(BaseModel):
     lms_host: str = ""
     lms_port: int = 9000
     player_name: str = "HueSync"
+    display_name: str = ""
     player_mac: str = ""
     alsa_device: str = ""
     follow_player_mac: str = ""
@@ -102,6 +103,7 @@ class VirtualPlayerPatchBody(BaseModel):
     lms_host: str | None = None
     lms_port: int | None = None
     player_name: str | None = None
+    display_name: str | None = None
     alsa_device: str | None = None
     follow_player_mac: str | None = None
 
@@ -263,7 +265,7 @@ _C_DEACTIVATE_FIELDS: frozenset[str] = frozenset({
     # a new process (player_id) or a new Zone cannot be hot-swapped into a
     # running session.
     "player_id", "zone_id",
-    "lms_host", "lms_port", "player_name", "alsa_device", "follow_player_mac",
+    "lms_host", "lms_port", "player_name", "display_name", "alsa_device", "follow_player_mac",
 })
 # FK fields that do NOT require a full restart — handled via lighter live-update
 # paths in _apply_coupling_action().
@@ -579,6 +581,7 @@ async def create_virtual_player(request: Request, body: VirtualPlayerCreateBody)
         lms_host=body.lms_host,
         lms_port=body.lms_port,
         player_name=body.player_name,
+        display_name=body.display_name,
         player_mac=mac,
         alsa_device=body.alsa_device,
         follow_player_mac=body.follow_player_mac,

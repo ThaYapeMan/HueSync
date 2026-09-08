@@ -65,6 +65,7 @@ def _build_engine_profile(coupling: Coupling, storage: Storage) -> Profile | Non
         lms_host=player.lms_host,
         lms_port=player.lms_port,
         player_name=player.player_name,
+        display_name=player.display_name or player.player_name,
         player_mac=player.player_mac,
         alsa_device=player.alsa_device,
         bridge_id=zone.controller_id,
@@ -123,6 +124,7 @@ def _build_mellow_profile(coupling: Coupling, storage: Storage) -> Profile | Non
         lms_host=player.lms_host,
         lms_port=player.lms_port,
         player_name=player.player_name,
+        display_name=player.display_name or player.player_name,
         player_mac=player.player_mac,
         alsa_device=player.alsa_device,
         bridge_id=zone.controller_id,
@@ -427,6 +429,7 @@ class PlayerManager:
             lms_host=player.lms_host,
             lms_port=player.lms_port,
             player_name=player.player_name,
+            display_name=player.display_name or player.player_name,
             player_mac=player.player_mac,
             alsa_device=player.alsa_device,
             bridge_id=zone.controller_id,
@@ -560,6 +563,8 @@ class PlayerManager:
         (bars + onset) so all effects including spectrum_rgb and mono_pulse
         work without modification.
         """
+        self._configure_shairport_name(profile.display_name or profile.player_name)
+
         pipe_source = AirPlayPipeSource()
         pipe_source.open()
         session.shm_source = pipe_source
@@ -911,6 +916,37 @@ class PlayerManager:
     # host kernel) and the resulting /dev/snd nodes passed into the
     # container - see README.
     DEFAULT_ALSA_DEVICE = "hw:CARD=Dummy,DEV=0"
+    _SHAIRPORT_CONF = Path("/usr/local/etc/shairport-sync.conf")
+
+    def _configure_shairport_name(self, name: str) -> None:
+        """Rewrite shairport-sync's config with a new advertised name and restart the service.
+
+        shairport-sync reads its name only at startup, so SIGHUP is not enough —
+        a full service restart is required.  Failures are logged as warnings so
+        that activation can proceed even if systemctl is unavailable (e.g. tests).
+        """
+        conf = (
+            'general = {\n'
+            f'  name = "{name}";\n'
+            '  output_backend = "pipe";\n'
+            '}\n'
+            'pipe = {\n'
+            '  name = "/run/huesync/airplay.pcm";\n'
+            '}\n'
+        )
+        try:
+            self._SHAIRPORT_CONF.write_text(conf)
+        except OSError as exc:
+            log.warning("Could not write shairport-sync config: %s", exc)
+            return
+        try:
+            subprocess.run(
+                ["systemctl", "restart", "shairport-sync"],
+                check=True, timeout=10, capture_output=True,
+            )
+            log.info("shairport-sync restarted with name %r", name)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Could not restart shairport-sync: %s", exc)
 
     def _start_squeezelite(self, session: ActiveSession, profile: Profile) -> None:
         binary = shutil.which("squeezelite")
@@ -931,7 +967,7 @@ class PlayerManager:
 
         cmd = [
             binary,
-            "-n", profile.player_name,
+            "-n", profile.display_name or profile.player_name,
             "-m", profile.player_mac,
             "-o", profile.alsa_device or self.DEFAULT_ALSA_DEVICE,
             "-v",

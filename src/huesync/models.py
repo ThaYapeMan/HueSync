@@ -145,6 +145,9 @@ class Profile:
     lms_host: str = "127.0.0.1"
     lms_port: int = 3483
     player_name: str = "HueSync"
+    # Name advertised to external protocols (LMS player list, AirPlay menu).
+    # Falls back to player_name when empty.
+    display_name: str = ""
     player_mac: str = ""  # auto-generated on first save if left empty
     # ALSA output device for the virtual player. Empty means "use the
     # default" (snd-dummy, see player_manager.DEFAULT_ALSA_DEVICE). Only
@@ -306,6 +309,9 @@ class VirtualPlayer:
     lms_host: str = "127.0.0.1"
     lms_port: int = 3483
     player_name: str = "HueSync"
+    # Name advertised to external protocols (LMS player list, AirPlay menu).
+    # Falls back to player_name when empty (see player_manager).
+    display_name: str = ""
     player_mac: str = ""
     alsa_device: str = ""
     # MAC address of the LMS player to follow for track-mirroring.
@@ -322,6 +328,7 @@ class VirtualPlayer:
             "lms_host": self.lms_host,
             "lms_port": self.lms_port,
             "player_name": self.player_name,
+            "display_name": self.display_name,
             "player_mac": self.player_mac,
             "alsa_device": self.alsa_device,
             "follow_player_mac": self.follow_player_mac,

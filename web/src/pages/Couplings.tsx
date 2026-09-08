@@ -97,6 +97,7 @@ function NewPlayerDialog({ open, onClose, onCreated }: NewPlayerDialogProps) {
         lms_host: lmsHost,
         lms_port: 9000,
         player_name: playerName,
+        display_name: '',
         alsa_device: alsaDevice,
         follow_player_mac: '',
       })

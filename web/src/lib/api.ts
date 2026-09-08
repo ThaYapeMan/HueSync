@@ -141,6 +141,7 @@ export interface VirtualPlayer {
   lms_host: string
   lms_port: number
   player_name: string
+  display_name: string
   player_mac: string
   alsa_device: string
   follow_player_mac: string
