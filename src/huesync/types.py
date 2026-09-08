@@ -2,7 +2,7 @@
 
 These types define the contracts between the four pipeline layers:
 
-    Analyser  →  AudioFeatures  →  Effect  →  Scene  →  Output  →  lights
+    AudioPipeline  →  AudioFeatures  →  Effect  →  Scene  →  Output  →  lights
 
 No layer imports from the layer below it. In particular, nothing here
 imports from hue_entertainment — that is confined to hue_output.py.
@@ -195,12 +195,12 @@ class Effect(Protocol):
 
 
 # ---------------------------------------------------------------------------
-# Analyser — contract between the audio pipeline and the effect engine
+# AudioPipeline — contract between the audio pipeline and the effect engine
 # ---------------------------------------------------------------------------
 
 
 @runtime_checkable
-class Analyser(Protocol):
+class AudioPipeline(Protocol):
     """Produces AudioFeatures from a running audio source.
 
     Planned implementations (in order of implementation priority):

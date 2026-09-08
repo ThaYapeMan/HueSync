@@ -8,7 +8,7 @@ Signal path (one layer at a time):
     CavaAnalyser    — wraps the three above; produces AudioFeatures each frame
     ColourModeEffect— implements Effect; maps AudioFeatures to a Scene using
                       one of the two active ColorMode strategies
-    SyncEngine      — orchestrates Analyser + Effect + Output at 30 Hz,
+    SyncEngine      — orchestrates AudioPipeline + Effect + Output at 30 Hz,
                       with an optional ring-buffer delay on the output
 
 Nothing in this module imports from hue_entertainment; all Hue-specific code
@@ -31,8 +31,8 @@ from .latency import NoLatencyProbe
 from .models import Profile
 from .pcm_source import WINDOW_SIZE, PcmHpss, PcmStft, SqueezeliteShmSource
 from .types import (
-    Analyser,
     AudioFeatures,
+    AudioPipeline,
     Colour,
     LatencyProbe,
     Output,
@@ -604,7 +604,7 @@ def _band_avg(bars: list[float], lo: int, hi: int) -> float:
 
 
 # ---------------------------------------------------------------------------
-# CavaAnalyser — implements the Analyser protocol
+# CavaAnalyser — implements the AudioPipeline protocol
 # ---------------------------------------------------------------------------
 
 
@@ -613,7 +613,7 @@ class CavaAnalyser:
     AudioFeatures including onset detection.
 
     Wraps FifoReader (raw bytes from FIFO), BandNormaliser (AGC), and
-    OnsetDetector (spectral flux).  The Analyser protocol is satisfied by
+    OnsetDetector (spectral flux).  The AudioPipeline protocol is satisfied by
     start(), stop(), and latest().
 
     AudioFeatures produced here:
@@ -1187,7 +1187,7 @@ class LayerMixer:
 
 
 # ---------------------------------------------------------------------------
-# SyncEngine — orchestrates Analyser + Effect + Output at 30 Hz
+# SyncEngine — orchestrates AudioPipeline + Effect + Output at 30 Hz
 # ---------------------------------------------------------------------------
 
 
@@ -1224,7 +1224,7 @@ class SyncEngine:
         mellow_profile: Profile | None = None,
     ) -> None:
         self.profile = profile
-        self._analyser: Analyser = CavaAnalyser(
+        self._analyser: AudioPipeline = CavaAnalyser(
             fifo_path,
             bars=profile.bars,
             onset_delta=profile.onset_delta,

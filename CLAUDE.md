@@ -29,7 +29,7 @@ Lyrion Music Server (LMS).
 ```
 LMS  →  squeezelite -v (virtual player)  →  POSIX shared memory (raw PCM)
      →  cava (spectrum analysis)         →  FIFO (named pipe)
-     →  Analyser → Effect → Scene        →  Output driver
+     →  AudioPipeline → Effect → Scene    →  Output driver
      →  Hue Entertainment API (DTLS/UDP) →  bridge → Entertainment Area
 ```
 
@@ -55,7 +55,7 @@ All protocol types live in `types.py`:
 | `Position` | A point in normalised room space (−1..1 per axis). |
 | `Scene` | Colour as a function of position: `color_at(position, t)`. |
 | `Effect` | Holds state, renders a `Scene` per frame from `AudioFeatures`. |
-| `Analyser` | Produces `AudioFeatures`. Swappable backend. |
+| `AudioPipeline` | Produces `AudioFeatures`. Swappable backend. |
 | `Output` | Samples a `Scene` at its own lights' positions and speaks its protocol. |
 
 **Hard rule: `LightColorCommand` must not appear anywhere outside
@@ -243,7 +243,7 @@ AirPlay 2 input (shairport-sync + nqptp) is a one-time setup step:
 
 | File | Role |
 |---|---|
-| `src/huesync/types.py` | Protocol types: `Colour`, `Position`, `Scene`, `Effect`, `Analyser`, `Output`, `AudioFeatures` |
+| `src/huesync/types.py` | Protocol types: `Colour`, `Position`, `Scene`, `Effect`, `AudioPipeline`, `Output`, `AudioFeatures` |
 | `src/huesync/sync_engine.py` | `FifoReader`, `BandNormaliser`, `CavaAnalyser`, `ColourModeEffect`, `SyncEngine` |
 | `src/huesync/hue_output.py` | **Only** file importing `hue_entertainment` for streaming: `HueDriver`, `ChannelInfo`, `get_channel_infos()` |
 | `src/huesync/hue_bridge.py` | Controller pairing and Entertainment Area discovery |
