@@ -90,6 +90,7 @@ def _build_engine_profile(coupling: Coupling, storage: Storage) -> Profile | Non
         superflux_mu=ac.superflux_mu,
         superflux_lag=ac.superflux_lag,
         use_hpss_separation=ac.use_hpss_separation,
+        bars_source=ac.bars_source,
         bars=ac.bars,
         lower_cutoff_freq=ac.lower_cutoff_freq,
         higher_cutoff_freq=ac.higher_cutoff_freq,
@@ -491,9 +492,42 @@ class PlayerManager:
         output_config: HueOutputConfig,
         channels: list[ChannelInfo],
     ) -> None:
-        """LMS path: squeezelite + cava + SHM tap + Hue."""
+        """LMS path: squeezelite + (cava or PcmAudioPipeline) + Hue."""
         self._start_squeezelite(session, profile)
 
+        if profile.bars_source == "pcm_pipeline":
+            await self._activate_lms_pcm(session, profile, mellow_profile, output_config, channels)
+        else:
+            await self._activate_lms_cava(session, profile, mellow_profile, output_config, channels)
+
+        follow_mac = player.follow_player_mac
+        if follow_mac:
+            session.follower = LmsFollower(
+                lms_host=player.lms_host,
+                follow_mac=follow_mac,
+                huesync_mac=profile.player_mac,
+            )
+        else:
+            log.warning(
+                "Coupling %r: follow_player_mac not configured — "
+                "track mirroring disabled. Set it in the Virtual Player editor.",
+                session.coupling and session.coupling.name,
+            )
+        session.unsync_task = asyncio.create_task(
+            self._delayed_unsync_and_follow(session, player.lms_host, profile.player_mac),
+            name="lms-unsync",
+        )
+        session.unsync_task.add_done_callback(_log_task_failure)
+
+    async def _activate_lms_cava(
+        self,
+        session: ActiveSession,
+        profile: Profile,
+        mellow_profile: Profile | None,
+        output_config: HueOutputConfig,
+        channels: list[ChannelInfo],
+    ) -> None:
+        """LMS cava sub-path: squeezelite + cava/FIFO + optional SHM PCM tap."""
         engine = SyncEngine(
             str(session.fifo_path), profile, probe=session.probe,
             mellow_profile=mellow_profile,
@@ -529,24 +563,56 @@ class PlayerManager:
         session.poller_task = asyncio.create_task(self._poll_sync_master(session))
         session.poller_task.add_done_callback(_log_task_failure)
 
-        follow_mac = player.follow_player_mac
-        if follow_mac:
-            session.follower = LmsFollower(
-                lms_host=player.lms_host,
-                follow_mac=follow_mac,
-                huesync_mac=profile.player_mac,
-            )
-        else:
-            log.warning(
-                "Coupling %r: follow_player_mac not configured — "
-                "track mirroring disabled. Set it in the Virtual Player editor.",
-                session.coupling and session.coupling.name,
-            )
-        session.unsync_task = asyncio.create_task(
-            self._delayed_unsync_and_follow(session, player.lms_host, profile.player_mac),
-            name="lms-unsync",
+    async def _activate_lms_pcm(
+        self,
+        session: ActiveSession,
+        profile: Profile,
+        mellow_profile: Profile | None,
+        output_config: HueOutputConfig,
+        channels: list[ChannelInfo],
+    ) -> None:
+        """LMS pcm_pipeline sub-path: squeezelite + PcmAudioPipeline, no cava/FIFO."""
+        await self._wait_for_shm(profile.player_mac)
+
+        shm_source = SqueezeliteShmSource()
+        shm_source.open(profile.player_mac)
+        session.shm_source = shm_source
+
+        pcm_analyser = PcmAudioPipeline(
+            source=shm_source,
+            bars=profile.bars,
+            lower_cutoff_freq=profile.lower_cutoff_freq,
+            higher_cutoff_freq=profile.higher_cutoff_freq,
+            onset_method=profile.onset_method,
+            onset_delta=profile.onset_delta,
+            onset_alpha=profile.onset_alpha,
+            superflux_mu=profile.superflux_mu,
+            superflux_lag=profile.superflux_lag,
+            bass_hz=profile.bass_hz,
+            mid_hz=profile.mid_hz,
+            exertion_clip=profile.exertion_clip,
         )
-        session.unsync_task.add_done_callback(_log_task_failure)
+
+        engine = SyncEngine(
+            None, profile, probe=session.probe,
+            mellow_profile=mellow_profile, analyser=pcm_analyser,
+        )
+        session.sync_engine = engine
+        engine.start()
+
+        hue_driver = HueDriver(output_config, channels)
+        await hue_driver.start()
+        session.hue_driver = hue_driver
+
+        session.task = asyncio.create_task(engine.run(hue_driver))
+        session.task.add_done_callback(_log_task_failure)
+        session.poller_task = asyncio.create_task(self._poll_sync_master(session))
+        session.poller_task.add_done_callback(_log_task_failure)
+        log.info(
+            "LMS pcm_pipeline coupling %s active — SHM: /dev/shm/squeezelite-%s",
+            session.coupling and session.coupling.name,
+            profile.player_mac,
+        )
 
     async def _activate_airplay(
         self,

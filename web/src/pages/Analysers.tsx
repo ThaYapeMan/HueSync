@@ -21,6 +21,7 @@ import { ConfirmDialog } from '@/components/ConfirmDialog'
 import { cn } from '@/lib/utils'
 import {
   ONSET_METHODS,
+  BARS_SOURCE_OPTIONS,
   type Analyser,
   getAnalysers,
   createAnalyser,
@@ -30,6 +31,7 @@ import {
 
 interface FormState {
   name: string
+  bars_source: string
   onset_method: string
   bars: string
   lower_cutoff_freq: string
@@ -44,6 +46,7 @@ interface FormState {
 function defaultForm(cfg?: Analyser): FormState {
   return {
     name: cfg?.name ?? '',
+    bars_source: cfg?.bars_source ?? 'cava',
     onset_method: cfg?.onset_method ?? 'combined',
     bars: String(cfg?.bars ?? 30),
     lower_cutoff_freq: String(cfg?.lower_cutoff_freq ?? 50),
@@ -116,6 +119,7 @@ export function Analysers() {
     try {
       const body = {
         name: form.name,
+        bars_source: form.bars_source,
         onset_method: form.onset_method,
         bars: parseInt(form.bars, 10),
         lower_cutoff_freq: parseInt(form.lower_cutoff_freq, 10),
@@ -220,6 +224,27 @@ export function Analysers() {
                 onChange={(e) => set('name', e.target.value)}
                 placeholder="My analyser"
               />
+            </FormRow>
+
+            <FormRow label="Bars source">
+              <div className="grid grid-cols-1 gap-1.5">
+                {BARS_SOURCE_OPTIONS.map((m) => (
+                  <button
+                    key={m.value}
+                    type="button"
+                    onClick={() => set('bars_source', m.value)}
+                    className={cn(
+                      'text-left rounded border p-2 text-sm transition-colors',
+                      form.bars_source === m.value
+                        ? 'border-primary bg-primary/10'
+                        : 'border-border hover:border-muted-foreground/60'
+                    )}
+                  >
+                    <div className="font-medium leading-tight">{m.label}</div>
+                    <div className="text-xs text-muted-foreground leading-tight mt-0.5">{m.description}</div>
+                  </button>
+                ))}
+              </div>
             </FormRow>
 
             <FormRow label="Onset method">

@@ -17,6 +17,11 @@ export const ONSET_METHODS = [
 
 export type OnsetMethod = typeof ONSET_METHODS[number]['value']
 
+export const BARS_SOURCE_OPTIONS = [
+  { value: 'cava',         label: 'Cava',         description: 'Default — spectrum via the cava FIFO analyser. Proven, low-CPU, works with all LMS players.' },
+  { value: 'pcm_pipeline', label: 'PCM Pipeline',  description: 'Direct read from the squeezelite shared-memory PCM tap — same pipeline as AirPlay. No cava process; lower latency.' },
+] as const
+
 // Canonical list of colour modes — kept as deprecated alias.
 // New code should use EFFECTS instead.
 export const COLOUR_MODES = [
@@ -187,6 +192,7 @@ export interface Analyser {
   lower_cutoff_freq: number
   higher_cutoff_freq: number
   use_hpss_separation: boolean
+  bars_source: string
 }
 
 export interface Effect {

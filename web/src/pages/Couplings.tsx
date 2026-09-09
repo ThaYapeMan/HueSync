@@ -313,6 +313,7 @@ function NewAnalyserDialog({ open, onClose, onCreated }: NewAnalyserDialogProps)
     try {
       const cfg = await createAnalyser({
         name,
+        bars_source: 'cava',
         onset_method: 'combined',
         bars: 30,
         lower_cutoff_freq: 50,

@@ -202,6 +202,7 @@ class Profile:
     # HPSS: separate PCM signal into harmonic and percussive streams.
     # CPU cost ~1 ms/frame at 100 Hz on a Proxmox LXC (2 vCPU) — opt-in only.
     use_hpss_separation: bool = False
+    bars_source: str = "cava"
 
     # Three-layer loudness pipeline:
     #   1. exertion_clip (HERE): sets "maximally loud" in relative terms.
@@ -412,6 +413,10 @@ class Analyser:
     # HPSS: parallel harmonic/percussive separation on the PCM tap.
     # CPU cost ~1 ms/frame at 100 Hz on a 2-vCPU LXC — disabled by default.
     use_hpss_separation: bool = False
+    # "cava": existing cava/FIFO path (default for LMS players).
+    # "pcm_pipeline": bypass cava; use PcmAudioPipeline on the squeezelite SHM
+    #   segment directly — same pipeline as AirPlay, lower latency, no FIFO.
+    bars_source: str = "cava"
 
     def to_dict(self) -> dict:
         return {
@@ -426,6 +431,7 @@ class Analyser:
             "lower_cutoff_freq": self.lower_cutoff_freq,
             "higher_cutoff_freq": self.higher_cutoff_freq,
             "use_hpss_separation": self.use_hpss_separation,
+            "bars_source": self.bars_source,
         }
 
     @classmethod

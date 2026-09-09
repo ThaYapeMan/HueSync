@@ -134,6 +134,7 @@ class AnalyserCreateBody(BaseModel):
     lower_cutoff_freq: int = 50
     higher_cutoff_freq: int = 12000
     use_hpss_separation: bool = False
+    bars_source: str = "cava"
 
 
 class AnalyserPatchBody(BaseModel):
@@ -148,6 +149,7 @@ class AnalyserPatchBody(BaseModel):
     lower_cutoff_freq: int | None = None
     higher_cutoff_freq: int | None = None
     use_hpss_separation: bool | None = None
+    bars_source: str | None = None
 
 
 class EffectCreateBody(BaseModel):
@@ -783,6 +785,7 @@ async def create_analyser(request: Request, body: AnalyserCreateBody):
         lower_cutoff_freq=body.lower_cutoff_freq,
         higher_cutoff_freq=body.higher_cutoff_freq,
         use_hpss_separation=body.use_hpss_separation,
+        bars_source=body.bars_source,
     )
     storage.save_analyser(ac)
     return JSONResponse(content=ac.to_dict(), status_code=201)
@@ -814,13 +817,18 @@ async def patch_analyser(ac_id: str, request: Request, body: AnalyserPatchBody):
     for field, value in updates.items():
         setattr(ac, field, value)
     storage.save_analyser(ac)
-    # Trigger cava/pcm restart if the active coupling uses this Analyser.
+    # Trigger restart if the active coupling uses this Analyser.
     active_id = storage.get_active_coupling_id()
     active_fields = set(updates.keys()) - {"name"}
     if active_fields and active_id:
         coupling = storage.get_coupling(active_id)
         if coupling and coupling.analyser_id == ac_id:
-            await _apply_coupling_action(coupling, storage, manager, active_fields)
+            if "bars_source" in active_fields:
+                # bars_source changes the SyncEngine initialization mode entirely
+                # (FIFO vs PcmAudioPipeline) — full deactivate required.
+                await manager.deactivate()
+            else:
+                await _apply_coupling_action(coupling, storage, manager, active_fields)
     return ac.to_dict()
 
 

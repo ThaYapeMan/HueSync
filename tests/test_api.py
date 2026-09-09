@@ -637,6 +637,42 @@ def test_ac_swap_session_remains_active(client: TestClient):
     assert saved_ac2.onset_delta == 0.5  # AC2, not AC1's default 0.1
 
 
+def test_bars_source_change_deactivates_session(client: TestClient):
+    """Changing bars_source on an Analyser used by the active Coupling must
+    trigger a full deactivate (SyncEngine initialisation differs between the
+    cava/FIFO path and PcmAudioPipeline — no live-switch possible).
+    """
+    coupling = _make_full_coupling(client._storage)
+    ac_id = client._storage.get_coupling(coupling.id).analyser_id
+    client._storage.set_active_coupling_id(coupling.id)
+
+    resp = client.patch(f"/api/analysers/{ac_id}", json={"bars_source": "pcm_pipeline"})
+    assert resp.status_code == 200
+
+    # Must have been deactivated.
+    client._manager.deactivate.assert_awaited_once()
+
+    # Live-update paths must NOT have been called.
+    client._manager.restart_cava.assert_not_awaited()
+    client._manager.update_onset_pipeline.assert_not_called()
+
+
+def test_bars_source_roundtrip(client: TestClient):
+    """bars_source is stored and returned by GET /api/analysers/{id}."""
+    resp = client.post("/api/analysers", json={"name": "PCM Test", "bars_source": "pcm_pipeline"})
+    assert resp.status_code == 201
+    ac_id = resp.json()["id"]
+
+    resp = client.get(f"/api/analysers/{ac_id}")
+    assert resp.status_code == 200
+    assert resp.json()["bars_source"] == "pcm_pipeline"
+
+    # Default is "cava"
+    resp2 = client.post("/api/analysers", json={"name": "Cava Test"})
+    assert resp2.status_code == 201
+    assert resp2.json()["bars_source"] == "cava"
+
+
 # ---------------------------------------------------------------------------
 # Clone coupling
 # ---------------------------------------------------------------------------
