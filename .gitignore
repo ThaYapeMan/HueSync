@@ -23,3 +23,8 @@ tests/*.mp3
 
 # Web frontend — ignore dependencies, commit the build output
 web/node_modules/
+
+# Local tooling and test artefacts
+.claude/
+test-results/
+web/test-results/
