@@ -6,9 +6,11 @@ Connect HueSync to your audio source — [Lyrion Music Server](https://lyrion.or
 or AirPlay 2 — and your Hue Entertainment lights react live to the music's spectrum and
 dynamics. No pre-computed BPM tags, no extra microphone hardware.
 
-The audio pipeline is built around a source-agnostic interface (`PcmSource`), so adding
-future input types requires only a new adapter — the analysis and rendering layers stay
-unchanged.
+AirPlay always analyses audio through `PcmAudioPipeline`, built on the `PcmSource`
+interface. LMS defaults to an external cava binary (which bypasses `PcmSource`), but
+can switch per-Analyser to the same pipeline via `bars_source = "pcm_pipeline"` — both
+paths confirm the interface in production. A new source type (Roon, JACK, …) needs only
+a `PcmSource` adapter; the analysis and rendering layers stay unchanged.
 
 ## How it works
 

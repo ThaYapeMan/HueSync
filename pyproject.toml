@@ -1,7 +1,7 @@
 [project]
 name = "huesync"
 version = "0.2.0"
-description = "Beat/spectrum-reactive Philips Hue Entertainment sync for Lyrion Music Server, via a virtual squeezelite player and cava."
+description = "Spectrum-reactive Philips Hue Entertainment lighting driven by LMS or AirPlay 2."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
