@@ -146,10 +146,19 @@ class BandNormaliser:
        full brightness regardless of sensitivity.  Not a musical choice.
     """
 
-    #: EMA smoothing factor.  At 30 Hz, α = 0.02 gives a window of ≈ 1.7 s.
-    #: Raise (e.g. 0.05) to react faster; lower (e.g. 0.01) for a longer
-    #: memory that smooths over brief dynamic shifts.
-    DEFAULT_ALPHA: float = 0.02
+    # Time-constant-based asymmetric (attack/release) envelope follower.
+    # alpha = 1 - exp(-dt/tau) is recomputed per call so the EMA evolves at the
+    # same real-time rate regardless of call frequency (30 Hz cava vs ~100 Hz PCM).
+    #
+    # Starting values follow PPM-style ballistics; empirical direction still TBD —
+    # compare_bars.py can be used to test both fast-attack/slow-release and the
+    # inverse before committing to final tau values (see project memory).
+    #
+    # Convention: alpha multiplies the CHANGE (state += alpha*(input-state)), which
+    # corresponds to alpha = 1-exp(-dt/tau).  Do NOT mix with the other common DSP
+    # convention (state = alpha*old + (1-alpha)*new, alpha = exp(-dt/tau)).
+    DEFAULT_ATTACK_TAU_S: float = 0.005   # 5 ms — near-instant rise at any frame rate
+    DEFAULT_RELEASE_TAU_S: float = 0.700  # 0.70 s exponential time constant for decay
 
     #: Mean raw bar value (0-255) below which the entire output frame is
     #: zeroed.  Prevents background noise from being amplified into wild
@@ -162,11 +171,13 @@ class BandNormaliser:
 
     def __init__(
         self,
-        alpha: float = DEFAULT_ALPHA,
+        attack_tau_s: float = DEFAULT_ATTACK_TAU_S,
+        release_tau_s: float = DEFAULT_RELEASE_TAU_S,
         gate: float = DEFAULT_GATE,
         exertion_clip: float = DEFAULT_EXERTION_CLIP,
     ) -> None:
-        self.alpha = alpha
+        self.attack_tau_s = attack_tau_s
+        self.release_tau_s = release_tau_s
         self.gate = gate
         self.exertion_clip = exertion_clip
         # Lazily initialised on the first frame so frame size need not be
@@ -181,8 +192,18 @@ class BandNormaliser:
         """
         self.exertion_clip = clip
 
-    def normalise(self, frame: bytes) -> bytes:
+    def normalise(self, frame: bytes, dt: float) -> bytes:
         """Return an exertion-normalised copy of *frame* as bytes (0-255).
+
+        *dt* is the elapsed time in seconds since the last call.  alpha is
+        computed as 1-exp(-dt/tau) so the time constant is caller-rate-independent
+        (CavaPipeline at ~30 Hz and PcmAudioPipeline at ~100 Hz share the same
+        real-time behaviour).
+
+        Single branching envelope follower — ONE state variable per band, ONE
+        alpha chosen per update (attack when input rises, release when it falls).
+        Never apply both alphas sequentially: that cascades two filters and gives
+        a composite time constant different from either tau.
 
         Always updates the EMA, even below the silence gate, so the
         baseline decays during pauses and recovers cleanly on resumption.
@@ -194,8 +215,14 @@ class BandNormaliser:
             # blind for the first few seconds of a session.
             self._ema = [float(v) for v in frame]
 
-        a = self.alpha
-        self._ema = [ema * (1.0 - a) + v * a for ema, v in zip(self._ema, frame, strict=True)]
+        alpha_rise = 1.0 - math.exp(-dt / self.attack_tau_s)
+        alpha_fall = 1.0 - math.exp(-dt / self.release_tau_s)
+
+        new_ema: list[float] = []
+        for ema, v in zip(self._ema, frame, strict=True):
+            a = alpha_rise if v > ema else alpha_fall
+            new_ema.append(ema + a * (v - ema))
+        self._ema = new_ema
 
         # Silence gate: if the mean raw bar is negligible, keep the lights
         # dark rather than amplifying noise into meaningless colour flashes.
@@ -636,6 +663,7 @@ class CavaPipeline:
         self._reader = FifoReader(fifo_path, frame_size=bars)
         self._normaliser = BandNormaliser(exertion_clip=exertion_clip)
         self._onset = OnsetDetector(delta=onset_delta, alpha=onset_alpha)
+        self._last_normalise_t: float | None = None
 
     def start(self) -> None:
         self._reader.start()
@@ -651,7 +679,10 @@ class CavaPipeline:
         frame = self._reader.latest_frame()
         if frame is None:
             return None
-        normed = self._normaliser.normalise(frame)
+        now = time.monotonic()
+        dt = (now - self._last_normalise_t) if self._last_normalise_t is not None else 1.0 / 30
+        self._last_normalise_t = now
+        normed = self._normaliser.normalise(frame, dt)
         n = len(normed)
         bars = [v / 255.0 for v in normed]
         total = sum(bars)
@@ -733,6 +764,7 @@ class PcmAudioPipeline:
         self._normaliser = BandNormaliser(exertion_clip=exertion_clip)
         # Pipelines are initialised lazily on first sample (sample_rate needed).
         self._bar_stft: PcmStft | None = None
+        self._normalise_dt: float | None = None  # set in _init_pipelines(); hop/sample_rate
         self._onset_pipeline: (
             StftOnsetPipeline | MultibandStftPipeline | SuperfluxStftPipeline | None
         ) = None
@@ -742,9 +774,15 @@ class PcmAudioPipeline:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
+    @property
+    def normaliser(self) -> BandNormaliser:
+        return self._normaliser
+
     def _init_pipelines(self, sample_rate: int) -> None:
         self._sample_rate = sample_rate
         self._bar_stft = PcmStft(sample_rate)
+        # dt per STFT frame = hop / sample_rate (≈ 10 ms at 44.1 kHz).
+        self._normalise_dt = self._bar_stft.hop / sample_rate
         if self._onset_method == "multiband":
             self._onset_pipeline = MultibandStftPipeline(
                 sample_rate,
@@ -820,9 +858,8 @@ class PcmAudioPipeline:
                 #    wrote; intermediate STFT frames (including transient peaks)
                 #    never reached normalise(). Correlation dropped 0.60 → 0.50 and
                 #    the PCM/cava amplitude ratio dropped 0.73 → 0.50.
-                # The 100 Hz vs 30 Hz call-rate difference vs CavaPipeline is a known
-                # open question — do not fix it by moving normalise() to latest().
-                normed = self._normaliser.normalise(bar_bytes)
+                # dt = hop/sample_rate so the time constant is rate-independent (P0 fix).
+                normed = self._normaliser.normalise(bar_bytes, self._normalise_dt or 0.01)
                 bars = [v / 255.0 for v in normed]
                 total = sum(bars)
                 n = len(bars)
@@ -1590,8 +1627,9 @@ class SyncEngine:
         self.profile = profile
         effective_mellow = mellow_profile if mellow_profile is not None else profile
         self._effect = LayerMixer(profile, effective_mellow)
-        if isinstance(self._analyser, CavaPipeline):
-            self._analyser.normaliser.update_exertion_clip(profile.exertion_clip)
+        normaliser = getattr(self._analyser, "normaliser", None)
+        if normaliser is not None:
+            normaliser.update_exertion_clip(profile.exertion_clip)
 
     @property
     def last_onset(self) -> bool:

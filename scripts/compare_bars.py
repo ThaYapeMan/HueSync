@@ -278,16 +278,20 @@ class CavaSide:
             print(f"[cava] stopped (log: {self._log_path})")
 
     def _run(self) -> None:
-        """Poll FifoReader at ~50 Hz, normalise, store latest."""
+        """Poll FifoReader at ~30 Hz (matching CavaPipeline.latest() rate), normalise."""
+        _last_t: float | None = None
         while not self._stop.is_set():
             raw = self._fifo_reader.latest_frame() if self._fifo_reader else None
             if raw is not None:
-                normed = self._normaliser.normalise(raw)
+                now = time.monotonic()
+                dt = (now - _last_t) if _last_t is not None else 1.0 / 30
+                _last_t = now
+                normed = self._normaliser.normalise(raw, dt)
                 bars_float = [v / 255.0 for v in normed]
                 with self._lock:
                     self._latest_raw = raw
                     self._latest_normed = bars_float
-            self._stop.wait(0.020)  # 50 Hz poll
+            self._stop.wait(1.0 / 30)  # ~30 Hz, matching CavaPipeline.latest()
 
     # -- Read ----------------------------------------------------------------
 
@@ -349,23 +353,27 @@ class PcmSide:
         return self._sample_rate
 
     def _run(self) -> None:
-        """Poll SHM at ~100 Hz, push through STFT, normalise, store latest."""
+        """Poll SHM, push ALL STFT frames through normaliser (mirrors PcmAudioPipeline._run()).
+
+        dt per frame is hop/sample_rate so the BandNormaliser EMA evolves at the
+        same real-time rate as in production, regardless of how fast the SHM is polled.
+        """
         while not self._stop.is_set():
             samples = self._shm.read_new()
             if len(samples) > 0 and self._stft is not None:
+                dt = self._stft.hop / self._sample_rate
                 frames = self._stft.push(samples)
-                if frames:
-                    # Use the most recent STFT frame
-                    mag = frames[-1]
+                for mag in frames:  # process every frame, not just [-1]
                     raw_bytes = mag_to_bar_bytes(
                         mag, self._bars, self._lower, self._upper, self._sample_rate
                     )
-                    normed = self._normaliser.normalise(raw_bytes)
+                    normed = self._normaliser.normalise(raw_bytes, dt)
                     bars_float = [v / 255.0 for v in normed]
                     with self._lock:
                         self._latest_raw_bytes = raw_bytes
                         self._latest_normed = bars_float
-            self._stop.wait(0.010)  # 100 Hz poll
+            else:
+                self._stop.wait(0.005)  # only sleep when source is idle
 
     def latest(self) -> tuple[bytes | None, list[float] | None]:
         """Return (raw_bar_bytes, normalised_bars_float) or (None, None)."""

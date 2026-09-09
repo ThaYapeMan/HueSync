@@ -192,27 +192,44 @@ def test_onset_flash_intensity_full_white_at_1():
 # ---------------------------------------------------------------------------
 
 
+_DT_30HZ = 1.0 / 30   # simulate CavaPipeline call rate
+_DT_100HZ = 1.0 / 100  # simulate PcmAudioPipeline call rate
+
+
 def test_normaliser_silence_gate_returns_dark_frame():
     """A frame whose mean bar is below the gate threshold → all-dark output."""
     norm = BandNormaliser()
     silent = bytes([0] * 30)
-    result = norm.normalise(silent)
+    result = norm.normalise(silent, _DT_30HZ)
     assert all(b == 0 for b in result)
     assert len(result) == 30
 
 
-def test_normaliser_spike_above_warmup_produces_bright_output():
-    """After EMA has warmed up to a moderate level, a sudden spike → output
-    well above the steady-state byte (≈ 85 with clip=3.0)."""
+def test_normaliser_fast_attack_tracks_rising_signal():
+    """With a fast attack tau (default 5 ms), the EMA baseline jumps to a new
+    high level within a single frame at 30 Hz (~33 ms >> 5 ms).  A subsequent
+    frame at the original lower level produces output BELOW the steady-state
+    byte because the elevated baseline suppresses it — demonstrating that the
+    attack is near-instant and the baseline now needs time to release."""
     norm = BandNormaliser()
-    # Warm the EMA to a moderate level well above the silence gate.
     warm = bytes([100] * 30)
     for _ in range(200):
-        norm.normalise(warm)
-    # A spike to near-full-scale should yield exertion > 1.0 → bytes > 85.
+        norm.normalise(warm, _DT_30HZ)
+
     spike = bytes([220] * 30)
-    result = norm.normalise(spike)
-    assert all(b > 128 for b in result)
+    norm.normalise(spike, _DT_30HZ)
+    # EMA should now be close to 220 (fast attack).
+    assert all(e > 190 for e in norm._ema), (  # type: ignore[union-attr]
+        f"Expected EMA ≈ 220 after spike (fast attack), got: {norm._ema[:5]}…"
+    )
+
+    # Post-spike: original level produces low exertion against the elevated baseline.
+    post = bytes([100] * 30)
+    result = norm.normalise(post, _DT_30HZ)
+    steady_state_byte = 85  # exertion=1.0 at clip=3.0
+    assert all(b < steady_state_byte for b in result), (
+        f"Expected suppressed output after spike elevated baseline, got: {list(result[:5])}…"
+    )
 
 
 def test_normaliser_steady_state_converges_to_midpoint():
@@ -221,9 +238,11 @@ def test_normaliser_steady_state_converges_to_midpoint():
     (= int(1.0 * 255/3.0)), not 128 — the higher clip gives more headroom."""
     norm = BandNormaliser()
     steady = bytes([180] * 30)
-    for _ in range(300):
-        norm.normalise(steady)
-    result = norm.normalise(steady)
+    # Fast attack seeds the EMA immediately on first call; subsequent calls at
+    # the same level see v == ema → alpha_fall applied with no change.
+    for _ in range(10):
+        norm.normalise(steady, _DT_30HZ)
+    result = norm.normalise(steady, _DT_30HZ)
     assert all(82 <= b <= 88 for b in result), (
         f"Expected bytes near 85 after convergence (clip=3.0), got: {list(result[:5])}…"
     )
@@ -234,17 +253,52 @@ def test_normaliser_ema_still_updates_during_silence():
     decays during pauses and the first post-silence frame is not wild."""
     norm = BandNormaliser()
     loud = bytes([200] * 30)
-    for _ in range(100):
-        norm.normalise(loud)
+    for _ in range(5):
+        norm.normalise(loud, _DT_30HZ)
     ema_after_loud = list(norm._ema)  # type: ignore[union-attr]
 
     silent = bytes([0] * 30)
-    for _ in range(100):
-        norm.normalise(silent)
+    for _ in range(20):
+        norm.normalise(silent, _DT_30HZ)
     ema_after_silence = list(norm._ema)  # type: ignore[union-attr]
 
     # EMA should have decayed toward 0 during silence, not stayed frozen.
     assert all(a < b for a, b in zip(ema_after_silence, ema_after_loud, strict=True))
+
+
+def test_band_normaliser_release_time_constant():
+    """After a peak, the EMA decays to 1/e ≈ 36.8 % of the peak value in exactly
+    release_tau_s seconds, regardless of call rate.
+
+    Synthetic dt values are passed so the test runs without real-time delay and
+    verifies the time-based design: the same tau holds at 30 Hz and 100 Hz.
+    The 1/e point also implicitly detects cascading errors: applying both alphas
+    sequentially in a single update would give a composite tau ≠ release_tau_s.
+    """
+    import math as _math
+
+    RELEASE_TAU = BandNormaliser.DEFAULT_RELEASE_TAU_S
+    PEAK = 200
+
+    for dt in (_DT_30HZ, _DT_100HZ):
+        norm = BandNormaliser()
+        # Seed EMA to PEAK using a large dt so alpha_rise ≈ 1.0 (instant attack).
+        peak_frame = bytes([PEAK] * 10)
+        norm.normalise(peak_frame, dt=1.0)
+
+        # Decay with silence for exactly one release tau's worth of simulated time.
+        silence = bytes([0] * 10)
+        n_steps = round(RELEASE_TAU / dt)
+        for _ in range(n_steps):
+            norm.normalise(silence, dt=dt)
+
+        target = PEAK / _math.e  # ≈ 73.6
+        for band_ema in norm._ema:  # type: ignore[union-attr]
+            assert abs(band_ema - target) / target < 0.10, (
+                f"At dt={dt:.4f}s: EMA after one release_tau expected ≈{target:.1f},"
+                f" got {band_ema:.1f}. "
+                "Possible cascading error or wrong time constant."
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -592,8 +646,9 @@ def test_update_onset_pipeline_without_shm_nulls_pipelines():
 
 
 def test_update_render_updates_exertion_clip():
-    """update_render() must propagate the new exertion_clip to BandNormaliser."""
-    from huesync.sync_engine import CavaPipeline, SyncEngine
+    """update_render() must propagate the new exertion_clip to BandNormaliser
+    via the shared .normaliser property — without requiring a specific pipeline type."""
+    from huesync.sync_engine import SyncEngine
 
     fifo = "/tmp/_nonexistent_fifo_for_test_render"
     profile = Profile(exertion_clip=3.0)
@@ -602,8 +657,9 @@ def test_update_render_updates_exertion_clip():
     new_profile = Profile(exertion_clip=2.0)
     engine.update_render(new_profile)
 
-    assert isinstance(engine._analyser, CavaPipeline)
-    assert engine._analyser.normaliser.exertion_clip == pytest.approx(2.0)
+    normaliser = getattr(engine._analyser, "normaliser", None)
+    assert normaliser is not None, "analyser must expose a .normaliser property"
+    assert normaliser.exertion_clip == pytest.approx(2.0)
 
 
 def test_update_render_replaces_effect():
@@ -631,7 +687,7 @@ def test_band_normaliser_update_exertion_clip_preserves_ema():
     norm = BandNormaliser(exertion_clip=3.0)
     # Warm up EMA with a frame so _ema is no longer None.
     frame = bytes([100, 100, 100, 100])
-    norm.normalise(frame)
+    norm.normalise(frame, _DT_30HZ)
     ema_before = list(norm._ema)  # type: ignore[arg-type]
 
     norm.update_exertion_clip(2.0)
