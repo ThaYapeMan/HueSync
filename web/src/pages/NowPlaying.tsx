@@ -235,7 +235,7 @@ function CouplingSelector({
         <p className="text-xs text-muted-foreground italic leading-snug">
           Switching couplings restarts the full session (squeezelite, cava,
           DTLS) and resets the BandNormaliser EMA. For a live A/B comparison,
-          swap the active coupling's Analyser or Crossfader instead —
+          swap the active coupling's Analyser or Energy Profile instead —
           those update without a session restart.
         </p>
 
@@ -426,19 +426,19 @@ export function NowPlaying({ colour, channel_colours, onset, onset_bass = false,
           </div>
           <div className="mt-3">
             <div className="flex items-center justify-between mb-1">
-              <span className="text-xs text-muted-foreground">Layer mix</span>
+              <span className="text-xs text-muted-foreground">Energy blend</span>
               <span className="text-xs font-mono text-muted-foreground">{Math.round(mix * 100)}%</span>
             </div>
             <div className="relative h-2 w-full overflow-hidden rounded-full bg-secondary">
               <div
                 className="h-full bg-primary transition-none"
                 style={{ width: `${mix * 100}%` }}
-                title={`Active scene: ${Math.round(mix * 100)}% (Mellow: ${Math.round((1 - mix) * 100)}%)`}
+                title={`High-energy Effect: ${Math.round(mix * 100)}% (Low energy: ${Math.round((1 - mix) * 100)}%)`}
               />
             </div>
             <div className="flex justify-between mt-0.5">
-              <span className="text-[10px] text-muted-foreground">Mellow</span>
-              <span className="text-[10px] text-muted-foreground">Active</span>
+              <span className="text-[10px] text-muted-foreground">Low energy</span>
+              <span className="text-[10px] text-muted-foreground">High energy</span>
             </div>
           </div>
         </CardContent>

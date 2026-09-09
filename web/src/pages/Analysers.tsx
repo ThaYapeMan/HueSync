@@ -282,8 +282,8 @@ export function Analysers() {
                 </Label>
                 <p className="text-xs text-muted-foreground mt-0.5">
                   Splits the music into a percussive layer (drums, rhythm) and a harmonic
-                  layer (vocals, chords) for more targeted effects. Active effects react to
-                  rhythm; Mellow effects react to melody. Costs ~0.4 ms per frame — well
+                  layer (vocals, chords) for more targeted effects. High-energy effects react to
+                  rhythm; low-energy effects react to melody. Costs ~0.4 ms per frame — well
                   within the 10 ms budget.
                 </p>
               </div>

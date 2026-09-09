@@ -113,7 +113,7 @@ export function SpectrumBars({
 
       {!isRgb && colorMode !== null && (
         <p className="mt-1 text-xs text-muted-foreground italic">
-          Bass/mid/treble colour-coding only applies when the active scene&apos;s effect is Spectrum RGB.
+          Bass/mid/treble colour-coding only applies when the active Effect is Spectrum RGB.
         </p>
       )}
 
