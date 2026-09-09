@@ -11,23 +11,35 @@ no extra microphone hardware.
 ## How it works
 
 ```
+── LMS path (squeezelite) ────────────────────────────────────────────────────
 LMS (audio orchestration)
    │  slimproto
 squeezelite -v  →  /dev/shm/squeezelite-<mac>   ← virtual player; snd-dummy for pacing
    │
-   ├─ cava (shmem input → FIFO)         ←  FFT + log-spaced spectrum bars, ~30 Hz
-   │      │  30-bar spectrum frames
-   │  BandNormaliser (per-band AGC)
-   │      │  normalised bars → AudioFeatures
+   ├─ bars_source = "cava" (default):
+   │    ├─ cava (shmem input → FIFO)     ←  FFT + log-spaced spectrum bars, ~30 Hz
+   │    │      │  30-bar spectrum frames
+   │    │  BandNormaliser (per-band AGC)
+   │    │      │  normalised bars
+   │    └─ PcmStft (100 Hz STFT tap)    ←  onset detection + optional HPSS
+   │             │  magnitude frames per 10 ms hop
+   │             ├─ MultibandStftPipeline / SuperfluxStftPipeline / StftOnsetPipeline
+   │             │        │  onset flags (bass / mid / treble)
+   │             └─ PcmHpss (when use_hpss_separation = true)
+   │                      │  percussive_energy, harmonic_energy per frame
    │
-   └─ PcmStft (100 Hz STFT tap)         ←  onset detection + optional HPSS
-          │  magnitude frames per 10 ms hop
-          ├─ MultibandStftPipeline / SuperfluxStftPipeline / StftOnsetPipeline
-          │        │  onset flags (bass / mid / treble)
-          └─ PcmHpss (when use_hpss_separation = true)
-                   │  percussive_energy, harmonic_energy per frame
+   └─ bars_source = "pcm_pipeline":
+        PcmAudioPipeline (SHM source, ~100 Hz STFT; same pipeline as AirPlay)
+             │  bars + onset flags → AudioFeatures
 
-SyncEngine  →  ColourModeEffect  →  Scene
+── AirPlay path (shairport-sync) ─────────────────────────────────────────────
+shairport-sync  →  /run/huesync/airplay.pcm  (named pipe)
+   │
+AirPlayPipeSource  →  PcmAudioPipeline (~100 Hz STFT, source-agnostic)
+   │  bars + onset flags → AudioFeatures
+
+── Rendering (both paths) ────────────────────────────────────────────────────
+SyncEngine  →  Effect  →  Scene (Protocol)
    │  30 Hz send loop (DTLS/UDP)
 HueDriver  →  Hue Bridge  →  Entertainment Area
 ```
@@ -474,12 +486,14 @@ The WebSocket at `/ws/preview` sends typed JSON messages at up to 20 Hz:
 ## Architecture — effect pipeline
 
 ```
-Analyser  →  AudioFeatures  →  Effect  →  Scene  →  Output
+AudioPipeline  →  AudioFeatures  →  Effect  →  Scene (Protocol)  →  Output
 ```
 
-- **AudioPipeline** (`CavaPipeline`): reads cava bars, applies per-band EMA AGC
-  (`BandNormaliser`), runs Dixon onset detection.
-- **Effect** (`ColourModeEffect`): maps `AudioFeatures` to a `Scene`.
+- **AudioPipeline** (`CavaPipeline` or `PcmAudioPipeline`): produces `AudioFeatures`
+  — normalised spectrum bars and onset flags. `CavaPipeline` reads the cava FIFO;
+  `PcmAudioPipeline` runs its own STFT directly on a PCM source (squeezelite SHM
+  or AirPlay pipe) and is fully source-agnostic.
+- **Effect** (`ColourModeEffect`): maps `AudioFeatures` to a `Scene` (Protocol).
 - **Scene**: `color_at(position, t) → Colour` — effects never touch Hue
   protocol types or channel IDs.
 - **Output** (`HueDriver`): samples the `Scene` at each light's `(x, y, z)`
