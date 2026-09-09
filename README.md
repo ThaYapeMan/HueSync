@@ -1,12 +1,14 @@
 # HueSync
 
-Spectrum-reactive Philips Hue Entertainment lighting for [Lyrion Music
-Server](https://lyrion.org/) (formerly Logitech Media Server / Squeezebox).
+Spectrum-reactive Philips Hue Entertainment lighting that follows your music in real time.
 
-HueSync registers a **Virtual Player** with your LMS server. It follows
-whatever real player you're actually listening on and the room's Hue lights
-react live to the music's spectrum and dynamics — no pre-computed BPM tags,
-no extra microphone hardware.
+Connect HueSync to your audio source — [Lyrion Music Server](https://lyrion.org/) (LMS)
+or AirPlay 2 — and your Hue Entertainment lights react live to the music's spectrum and
+dynamics. No pre-computed BPM tags, no extra microphone hardware.
+
+The audio pipeline is built around a source-agnostic interface (`PcmSource`), so adding
+future input types requires only a new adapter — the analysis and rendering layers stay
+unchanged.
 
 ## How it works
 
