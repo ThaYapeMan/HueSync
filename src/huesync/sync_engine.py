@@ -1354,7 +1354,7 @@ def _make_renderer(effect: str) -> _EffectRenderer:
 
 
 class ColourModeEffect:
-    """Dispatches to one of the _EffectRenderer implementations based on profile.effect.
+    """Dispatches to one of the _EffectRenderer implementations based on profile.effect_type.
 
     Clipping: each band value is multiplied by profile.sensitivity and clipped
     to 1.0.  This is the *second* ceiling in the pipeline (the first is
@@ -1366,7 +1366,7 @@ class ColourModeEffect:
 
     def __init__(self, profile: Profile) -> None:
         self.profile = profile
-        self._renderer = _make_renderer(profile.effect)
+        self._renderer = _make_renderer(profile.effect_type)
 
     def render(self, features: AudioFeatures, t: float) -> Scene:
         return self._renderer.render(self.profile, features, t)

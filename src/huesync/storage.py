@@ -20,8 +20,8 @@ from .models import (
     Controller,
     Coupling,
     Crossfader,
+    Effect,
     PlayerLatency,
-    Scene,
     VirtualPlayer,
     Zone,
 )
@@ -207,26 +207,26 @@ class Storage:
             data["analysers"] = [x for x in data["analysers"] if x["id"] != ac_id]
             self._write(data)
 
-    # -- Scenes -------------------------------------------------------------
+    # -- Effects ------------------------------------------------------------
 
-    def list_scenes(self) -> list[Scene]:
+    def list_effects(self) -> list[Effect]:
         with _lock:
-            return [Scene.from_dict(s) for s in self._read()["scenes"]]
+            return [Effect.from_dict(s) for s in self._read()["scenes"]]
 
-    def get_scene(self, scene_id: str) -> Scene | None:
-        return next((s for s in self.list_scenes() if s.id == scene_id), None)
+    def get_effect(self, effect_id: str) -> Effect | None:
+        return next((e for e in self.list_effects() if e.id == effect_id), None)
 
-    def save_scene(self, scene: Scene) -> None:
+    def save_effect(self, effect: Effect) -> None:
         with _lock:
             data = self._read()
-            data["scenes"] = [x for x in data["scenes"] if x["id"] != scene.id]
-            data["scenes"].append(scene.to_dict())
+            data["scenes"] = [x for x in data["scenes"] if x["id"] != effect.id]
+            data["scenes"].append(effect.to_dict())
             self._write(data)
 
-    def delete_scene(self, scene_id: str) -> None:
+    def delete_effect(self, effect_id: str) -> None:
         with _lock:
             data = self._read()
-            data["scenes"] = [x for x in data["scenes"] if x["id"] != scene_id]
+            data["scenes"] = [x for x in data["scenes"] if x["id"] != effect_id]
             self._write(data)
 
     # -- Crossfaders --------------------------------------------------------
@@ -279,7 +279,7 @@ class Storage:
         """Idempotent data migration: handles all format changes in one pass.
 
         Migrations applied (in order):
-        1. mellow_colour_mode → separate Scene clone per coupling
+        1. mellow_colour_mode → separate Effect clone per coupling
         2. color_mode → effect rename in scene dicts
         3. render_configs key → scenes key
         4. light_providers key → zones key
@@ -340,14 +340,22 @@ class Storage:
                     c["mellow_render_config_id"] = rc_id
                 changed = True
 
-            # Rename color_mode → effect in all scene dicts (after the
+            # Rename color_mode → effect_type in all scene dicts (after the
             # mellow-clone loop so newly created mellow scenes also get renamed).
+            # Also upgrade old "effect" key → "effect_type" (written before the
+            # Fase-1 rename of the Python field).
             for scene in data.get("scenes", []):
-                if "color_mode" in scene and "effect" not in scene:
-                    scene["effect"] = scene.pop("color_mode")
+                if "color_mode" in scene and "effect_type" not in scene:
+                    scene["effect_type"] = scene.pop("color_mode")
                     changed = True
                 elif "color_mode" in scene:
                     scene.pop("color_mode")
+                    changed = True
+                if "effect" in scene and "effect_type" not in scene:
+                    scene["effect_type"] = scene.pop("effect")
+                    changed = True
+                elif "effect" in scene:
+                    scene.pop("effect")
                     changed = True
                 # Remove obsolete mellow_colour_mode if still present.
                 if "mellow_colour_mode" in scene:

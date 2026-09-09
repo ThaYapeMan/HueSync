@@ -9,7 +9,7 @@ from huesync.models import (
     ControllerType,
     Coupling,
     Crossfader,
-    Scene,
+    Effect,
     VirtualPlayer,
     Zone,
 )
@@ -119,26 +119,26 @@ def test_analyser_from_dict_strips_unknown_keys():
 
 
 # ---------------------------------------------------------------------------
-# Scene round-trip (was RenderConfig)
+# Effect round-trip (was Scene / RenderConfig)
 # ---------------------------------------------------------------------------
 
 
 def test_scene_roundtrip():
-    sc = Scene(name="Vivid", effect="mono_pulse",
+    e = Effect(name="Vivid", effect_type="mono_pulse",
                sensitivity=2.0, brightness_floor=0.1,
                bass_hz=300, mid_hz=2500, exertion_clip=4.0)
-    sc2 = Scene.from_dict(sc.to_dict())
-    assert sc2.id == sc.id
-    assert sc2.effect == "mono_pulse"
-    assert sc2.sensitivity == 2.0
-    assert sc2.exertion_clip == 4.0
+    e2 = Effect.from_dict(e.to_dict())
+    assert e2.id == e.id
+    assert e2.effect_type == "mono_pulse"
+    assert e2.sensitivity == 2.0
+    assert e2.exertion_clip == 4.0
 
 
 def test_scene_bad_color_mode_falls_back():
-    d = Scene().to_dict()
+    d = Effect().to_dict()
     d["color_mode"] = "bass_brightness"  # legacy value — should migrate to spectrum_rgb
-    sc = Scene.from_dict(d)
-    assert sc.effect == "spectrum_rgb"
+    e = Effect.from_dict(d)
+    assert e.effect_type == "spectrum_rgb"
 
 
 # ---------------------------------------------------------------------------
@@ -306,15 +306,15 @@ def test_storage_delete_analyser():
 
 
 # ---------------------------------------------------------------------------
-# Storage CRUD — Scene (was RenderConfig)
+# Storage CRUD — Effect (was Scene / RenderConfig)
 # ---------------------------------------------------------------------------
 
 
 def test_storage_save_and_get_scene():
     s = make_storage()
-    sc = Scene(name="Vivid", sensitivity=2.0, exertion_clip=4.0)
-    s.save_scene(sc)
-    fetched = s.get_scene(sc.id)
+    e = Effect(name="Vivid", sensitivity=2.0, exertion_clip=4.0)
+    s.save_effect(e)
+    fetched = s.get_effect(e.id)
     assert fetched is not None
     assert fetched.sensitivity == 2.0
     assert fetched.exertion_clip == 4.0
@@ -322,10 +322,10 @@ def test_storage_save_and_get_scene():
 
 def test_storage_delete_scene():
     s = make_storage()
-    sc = Scene()
-    s.save_scene(sc)
-    s.delete_scene(sc.id)
-    assert s.get_scene(sc.id) is None
+    e = Effect()
+    s.save_effect(e)
+    s.delete_effect(e.id)
+    assert s.get_effect(e.id) is None
 
 
 # ---------------------------------------------------------------------------

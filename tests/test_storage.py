@@ -32,7 +32,7 @@ def test_delete_virtual_player():
 
 
 def test_migrate_creates_mellow_scene_from_old_format(tmp_path: Path):
-    """migrate() converts old render_configs + mellow_colour_mode to a Scene clone + Crossfader."""
+    """migrate() converts old render_configs + mellow_colour_mode to an Effect clone."""
     config = tmp_path / "config.json"
     rc_id = "rc-1"
     coupling_id = "c-1"
@@ -98,12 +98,12 @@ def test_migrate_creates_mellow_scene_from_old_format(tmp_path: Path):
     assert cf.mellow_scene_id != ""
     assert cf.mellow_scene_id != rc_id
 
-    # Two scenes exist: the original and the mellow clone.
-    scenes = storage.list_scenes()
-    mellow_scene = next((s for s in scenes if s.id == cf.mellow_scene_id), None)
-    assert mellow_scene is not None
-    assert mellow_scene.effect == "mono_pulse"
-    assert "(Mellow)" in mellow_scene.name
+    # Two effects exist: the original and the mellow clone.
+    effects = storage.list_effects()
+    mellow_effect = next((e for e in effects if e.id == cf.mellow_scene_id), None)
+    assert mellow_effect is not None
+    assert mellow_effect.effect_type == "mono_pulse"
+    assert "(Mellow)" in mellow_effect.name
 
     # Calling migrate() again is a no-op (idempotent).
     storage.migrate()
@@ -159,12 +159,12 @@ def test_migrate_same_colour_mode_reuses_scene(tmp_path: Path):
     cf = storage.get_crossfader(c.crossfader_id)
     assert cf is not None
     assert cf.mellow_scene_id == ""
-    # Only the original scene exists (no clone was created).
-    assert len(storage.list_scenes()) == 1
+    # Only the original effect exists (no clone was created).
+    assert len(storage.list_effects()) == 1
 
 
 def test_migrate_renames_color_mode_to_effect(tmp_path: Path):
-    """migrate() renames color_mode → effect in scene raw dicts."""
+    """migrate() renames color_mode → effect_type in effect raw dicts."""
     config = tmp_path / "config.json"
     rc_id = "rc-migrate"
     old_data = {
@@ -205,15 +205,15 @@ def test_migrate_renames_color_mode_to_effect(tmp_path: Path):
     storage = Storage(config)
     storage.migrate()
 
-    scene = storage.get_scene(rc_id)
-    assert scene is not None
-    assert scene.effect == "mono_pulse"
-    # Scene no longer has a color_mode attribute.
-    assert not hasattr(scene, "color_mode")
+    effect = storage.get_effect(rc_id)
+    assert effect is not None
+    assert effect.effect_type == "mono_pulse"
+    # Effect no longer has a color_mode attribute.
+    assert not hasattr(effect, "color_mode")
 
     # Verify the raw JSON also has the renamed key.
     raw = json.loads(config.read_text())
-    assert raw["scenes"][0].get("effect") == "mono_pulse"
+    assert raw["scenes"][0].get("effect_type") == "mono_pulse"
     assert "color_mode" not in raw["scenes"][0]
 
 
@@ -283,7 +283,7 @@ def test_light_providers_key_migrated_to_zones(tmp_path: Path):
 
 
 def test_render_configs_key_migrated_to_scenes(tmp_path: Path):
-    """Old config files with 'render_configs' key are migrated to 'scenes'."""
+    """Old config files with 'render_configs' key are migrated and accessible as Effects."""
     config = tmp_path / "config.json"
     old_data = {
         "player_latencies": [],
@@ -312,10 +312,10 @@ def test_render_configs_key_migrated_to_scenes(tmp_path: Path):
     config.write_text(json.dumps(old_data))
 
     storage = Storage(config)
-    scenes = storage.list_scenes()
-    assert len(scenes) == 1
-    assert scenes[0].name == "My RC"
-    assert scenes[0].effect == "spectrum_rgb"
+    effects = storage.list_effects()
+    assert len(effects) == 1
+    assert effects[0].name == "My RC"
+    assert effects[0].effect_type == "spectrum_rgb"
 
 
 def test_analysis_configs_key_migrated_to_analysers(tmp_path: Path):

@@ -28,8 +28,8 @@ from .models import (
     ControllerType,
     Coupling,
     Crossfader,
+    Effect,
     PlayerLatency,
-    Scene,
     VirtualPlayer,
     VirtualPlayerType,
     Zone,
@@ -150,9 +150,9 @@ class AnalyserPatchBody(BaseModel):
     use_hpss_separation: bool | None = None
 
 
-class SceneCreateBody(BaseModel):
-    name: str = "Default Scene"
-    effect: str = "spectrum_rgb"
+class EffectCreateBody(BaseModel):
+    name: str = "Default Effect"
+    effect_type: str = "spectrum_rgb"
     effect_speed: float = 1.0
     effect_decay: float = 0.3
     sensitivity: float = 1.0
@@ -163,10 +163,10 @@ class SceneCreateBody(BaseModel):
     onset_flash_intensity: float = 0.0
 
 
-class ScenePatchBody(BaseModel):
+class EffectPatchBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str | None = None
-    effect: str | None = None
+    effect_type: str | None = None
     effect_speed: float | None = None
     effect_decay: float | None = None
     sensitivity: float | None = None
@@ -241,7 +241,7 @@ class CouplingPatchBody(BaseModel):
     superflux_mu: int | None = None
     superflux_lag: int | None = None
     use_hpss_separation: bool | None = None
-    # bass_hz/mid_hz: stored in Scene but pcm-category for restart
+    # bass_hz/mid_hz: stored in Effect but pcm-category for restart
     bass_hz: int | None = None
     mid_hz: int | None = None
     # Zone render fields
@@ -296,7 +296,7 @@ _C_ANALYSER_INLINE: frozenset[str] = frozenset({
     "onset_method", "onset_delta", "onset_alpha", "superflux_mu", "superflux_lag",
     "use_hpss_separation",
 })
-_C_SCENE_INLINE: frozenset[str] = frozenset({
+_C_EFFECT_INLINE: frozenset[str] = frozenset({
     "bass_hz", "mid_hz",
 })
 _C_ZONE_INLINE: frozenset[str] = frozenset({"entertainment_area_name", "light_count"})
@@ -830,26 +830,26 @@ async def delete_analyser(ac_id: str, request: Request):
 
 
 # ---------------------------------------------------------------------------
-# Scenes
+# Effects (route paths keep /scenes for API backward compatibility — Fase 2+)
 # ---------------------------------------------------------------------------
 
 
 @router.get("/scenes")
 async def list_scenes(request: Request):
-    return [s.to_dict() for s in _storage(request).list_scenes()]
+    return [e.to_dict() for e in _storage(request).list_effects()]
 
 
 @router.post("/scenes", status_code=201)
-async def create_scene(request: Request, body: SceneCreateBody):
+async def create_scene(request: Request, body: EffectCreateBody):
     storage = _storage(request)
-    _assert_name_unique(body.name, [(s.id, s.name) for s in storage.list_scenes()], "Scene")
-    if body.effect not in EFFECT_IDS:
+    _assert_name_unique(body.name, [(e.id, e.name) for e in storage.list_effects()], "Effect")
+    if body.effect_type not in EFFECT_IDS:
         raise HTTPException(
-            status_code=422, detail=f"Unknown effect: {body.effect!r}"
+            status_code=422, detail=f"Unknown effect: {body.effect_type!r}"
         )
-    scene = Scene(
+    effect = Effect(
         name=body.name,
-        effect=body.effect,
+        effect_type=body.effect_type,
         effect_speed=body.effect_speed,
         effect_decay=body.effect_decay,
         sensitivity=body.sensitivity,
@@ -859,41 +859,41 @@ async def create_scene(request: Request, body: SceneCreateBody):
         exertion_clip=body.exertion_clip,
         onset_flash_intensity=body.onset_flash_intensity,
     )
-    storage.save_scene(scene)
-    return JSONResponse(content=scene.to_dict(), status_code=201)
+    storage.save_effect(effect)
+    return JSONResponse(content=effect.to_dict(), status_code=201)
 
 
 @router.get("/scenes/{scene_id}")
 async def get_scene(scene_id: str, request: Request):
-    scene = _storage(request).get_scene(scene_id)
-    if scene is None:
-        raise HTTPException(status_code=404, detail="Scene not found")
-    return scene.to_dict()
+    effect = _storage(request).get_effect(scene_id)
+    if effect is None:
+        raise HTTPException(status_code=404, detail="Effect not found")
+    return effect.to_dict()
 
 
 @router.patch("/scenes/{scene_id}")
-async def patch_scene(scene_id: str, request: Request, body: ScenePatchBody):
+async def patch_scene(scene_id: str, request: Request, body: EffectPatchBody):
     storage = _storage(request)
     manager = _manager(request)
-    scene = storage.get_scene(scene_id)
-    if scene is None:
-        raise HTTPException(status_code=404, detail="Scene not found")
+    effect = storage.get_effect(scene_id)
+    if effect is None:
+        raise HTTPException(status_code=404, detail="Effect not found")
     updates = body.model_dump(exclude_unset=True)
     if "name" in updates:
         _assert_name_unique(
             updates["name"],
-            [(s.id, s.name) for s in storage.list_scenes()],
-            "Scene",
+            [(e.id, e.name) for e in storage.list_effects()],
+            "Effect",
             exclude_id=scene_id,
         )
     for field, value in updates.items():
-        if field == "effect" and value not in EFFECT_IDS:
+        if field == "effect_type" and value not in EFFECT_IDS:
             raise HTTPException(
                 status_code=422, detail=f"Unknown effect: {value!r}"
             )
-        setattr(scene, field, value)
-    storage.save_scene(scene)
-    # Trigger render/pcm update if the active coupling uses this Scene
+        setattr(effect, field, value)
+    storage.save_effect(effect)
+    # Trigger render/pcm update if the active coupling uses this Effect
     # (via its crossfader's active_scene_id).
     active_id = storage.get_active_coupling_id()
     active_fields = set(updates.keys()) - {"name"}
@@ -903,12 +903,12 @@ async def patch_scene(scene_id: str, request: Request, body: ScenePatchBody):
             cf = storage.get_crossfader(coupling.crossfader_id)
             if cf and cf.active_scene_id == scene_id:
                 await _apply_coupling_action(coupling, storage, manager, active_fields)
-    return scene.to_dict()
+    return effect.to_dict()
 
 
 @router.delete("/scenes/{scene_id}", status_code=204)
 async def delete_scene(scene_id: str, request: Request):
-    _storage(request).delete_scene(scene_id)
+    _storage(request).delete_effect(scene_id)
 
 
 # ---------------------------------------------------------------------------
@@ -1065,17 +1065,17 @@ async def restart_coupling_cava(
 
         crossfader = storage.get_crossfader(coupling.crossfader_id)
         if crossfader is not None:
-            scene = storage.get_scene(crossfader.active_scene_id)
-            if scene is not None:
-                changed_scene = False
+            effect = storage.get_effect(crossfader.active_scene_id)
+            if effect is not None:
+                changed_effect = False
                 if body.bass_hz is not None:
-                    scene.bass_hz = body.bass_hz
-                    changed_scene = True
+                    effect.bass_hz = body.bass_hz
+                    changed_effect = True
                 if body.mid_hz is not None:
-                    scene.mid_hz = body.mid_hz
-                    changed_scene = True
-                if changed_scene:
-                    storage.save_scene(scene)
+                    effect.mid_hz = body.mid_hz
+                    changed_effect = True
+                if changed_effect:
+                    storage.save_effect(effect)
 
     try:
         await manager.restart_cava()
@@ -1130,13 +1130,13 @@ async def patch_coupling(coupling_id: str, request: Request, body: CouplingPatch
         else None
     )
     cf_inline = storage.get_crossfader(coupling.crossfader_id) if coupling.crossfader_id else None
-    scene_inline = (
-        storage.get_scene(cf_inline.active_scene_id)
+    effect_inline = (
+        storage.get_effect(cf_inline.active_scene_id)
         if cf_inline and cf_inline.active_scene_id
         else None
     )
 
-    player_changed = ac_changed = zone_changed = scene_changed = False
+    player_changed = ac_changed = zone_changed = effect_changed = False
 
     for field, value in updates.items():
         if field in _C_COUPLING_DIRECT_FIELDS | _C_FK_FIELDS:
@@ -1150,9 +1150,9 @@ async def patch_coupling(coupling_id: str, request: Request, body: CouplingPatch
         elif field in _C_ZONE_INLINE and zone:
             setattr(zone, field, value)
             zone_changed = True
-        elif field in _C_SCENE_INLINE and scene_inline:
-            setattr(scene_inline, field, value)
-            scene_changed = True
+        elif field in _C_EFFECT_INLINE and effect_inline:
+            setattr(effect_inline, field, value)
+            effect_changed = True
 
     storage.save_coupling(coupling)
     if player_changed and player:
@@ -1161,8 +1161,8 @@ async def patch_coupling(coupling_id: str, request: Request, body: CouplingPatch
         storage.save_analyser(ac)
     if zone_changed and zone:
         storage.save_zone(zone)
-    if scene_changed and scene_inline:
-        storage.save_scene(scene_inline)
+    if effect_changed and effect_inline:
+        storage.save_effect(effect_inline)
 
     if was_active:
         changed = set(updates.keys())
@@ -1187,7 +1187,7 @@ async def delete_coupling(coupling_id: str, request: Request):
 
 @router.post("/couplings/{coupling_id}/clone", status_code=201)
 async def clone_coupling(coupling_id: str, request: Request):
-    """Deep-clone a Coupling with fresh Analyser, Scene, and Crossfader copies.
+    """Deep-clone a Coupling with fresh Analyser, Effect, and Crossfader copies.
 
     The Player and Zone references are shared (not cloned).
     The new Coupling is named "<original name> (copy)".
@@ -1200,8 +1200,8 @@ async def clone_coupling(coupling_id: str, request: Request):
 
     ac = storage.get_analyser(coupling.analyser_id)
     cf = storage.get_crossfader(coupling.crossfader_id)
-    scene = storage.get_scene(cf.active_scene_id) if cf else None
-    if ac is None or cf is None or scene is None:
+    effect = storage.get_effect(cf.active_scene_id) if cf else None
+    if ac is None or cf is None or effect is None:
         raise HTTPException(status_code=422, detail="Coupling has missing sub-entities")
 
     new_ac = replace(
@@ -1209,15 +1209,15 @@ async def clone_coupling(coupling_id: str, request: Request):
         id=str(uuid.uuid4()),
         name=_unique_copy_name(ac.name, {a.name.lower() for a in storage.list_analysers()}),
     )
-    new_scene = replace(
-        scene,
+    new_effect = replace(
+        effect,
         id=str(uuid.uuid4()),
-        name=_unique_copy_name(scene.name, {s.name.lower() for s in storage.list_scenes()}),
+        name=_unique_copy_name(effect.name, {e.name.lower() for e in storage.list_effects()}),
     )
     new_cf = replace(
         cf,
         id=str(uuid.uuid4()),
-        active_scene_id=new_scene.id,
+        active_scene_id=new_effect.id,
         name=_unique_copy_name(cf.name, {x.name.lower() for x in storage.list_crossfaders()}),
     )
     new_coupling = replace(
@@ -1229,7 +1229,7 @@ async def clone_coupling(coupling_id: str, request: Request):
     )
 
     storage.save_analyser(new_ac)
-    storage.save_scene(new_scene)
+    storage.save_effect(new_effect)
     storage.save_crossfader(new_cf)
     storage.save_coupling(new_coupling)
 

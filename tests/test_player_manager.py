@@ -18,8 +18,8 @@ from huesync.models import (
     ControllerType,
     Coupling,
     Crossfader,
+    Effect,
     Profile,
-    Scene,
     VirtualPlayer,
     VirtualPlayerType,
     Zone,
@@ -225,12 +225,12 @@ def _make_full_storage(tmp_path: Path) -> tuple[Storage, Coupling]:
     )
     storage.save_analyser(ac)
 
-    scene = Scene(
-        id="scene-1", name="Default", effect="spectrum_rgb",
+    effect = Effect(
+        id="scene-1", name="Default", effect_type="spectrum_rgb",
         sensitivity=1.0, brightness_floor=0.15, bass_hz=250, mid_hz=2000,
         exertion_clip=3.0,
     )
-    storage.save_scene(scene)
+    storage.save_effect(effect)
 
     crossfader = Crossfader(
         id="cf-1", name="Default CF",
@@ -267,7 +267,7 @@ def test_build_profile_from_coupling_maps_all_fields(tmp_path: Path) -> None:
     assert profile.entertainment_area_id == "ae-001"
     assert profile.entertainment_area_name == "Living Room AE"
     assert profile.light_count == 4
-    assert profile.effect == "spectrum_rgb"
+    assert profile.effect_type == "spectrum_rgb"
     assert profile.sensitivity == 1.0
     assert profile.bass_hz == 250
     assert profile.onset_method == "combined"
@@ -302,7 +302,7 @@ def test_build_profile_from_coupling_returns_none_on_missing_crossfader(tmp_path
 
 def test_build_profile_from_coupling_returns_none_on_missing_scene(tmp_path: Path) -> None:
     storage, coupling = _make_full_storage(tmp_path)
-    storage.delete_scene("scene-1")
+    storage.delete_effect("scene-1")
     assert _build_engine_profile(coupling, storage) is None
 
 
@@ -349,10 +349,10 @@ def test_activate_coupling_raises_on_missing_crossfader(tmp_path: Path) -> None:
 
 def test_activate_coupling_raises_on_missing_scene(tmp_path: Path) -> None:
     storage, coupling = _make_full_storage(tmp_path)
-    storage.delete_scene("scene-1")
+    storage.delete_effect("scene-1")
     manager = PlayerManager(storage)
 
-    with pytest.raises(ValueError, match="missing Scene"):
+    with pytest.raises(ValueError, match="missing Effect"):
         asyncio.run(manager.activate_coupling(coupling))
 
 
@@ -456,8 +456,8 @@ def test_deactivate_clears_active_coupling_id(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 # active_color_mode / active_bass_hz / active_mid_hz property chain
 #
-# Regression guard: these properties read self._active.profile.{effect,bass_hz,
-# mid_hz}.  Any future rename that breaks the chain (e.g. "effect" field moved,
+# Regression guard: these properties read self._active.profile.{effect_type,bass_hz,
+# mid_hz}.  Any future rename that breaks the chain (e.g. "effect_type" field moved,
 # update_render not setting self._active.profile) will fail these tests.
 # Uses real code paths — no mocking of the properties themselves.
 # ---------------------------------------------------------------------------
@@ -466,18 +466,18 @@ def test_deactivate_clears_active_coupling_id(tmp_path: Path) -> None:
 def _make_session_from_storage(tmp_path: Path) -> tuple[PlayerManager, ActiveSession]:
     """Create a PlayerManager with a live ActiveSession built from real entities.
 
-    The Scene has effect='spectrum_rgb', bass_hz=300, mid_hz=3000 so
+    The Effect has effect_type='spectrum_rgb', bass_hz=300, mid_hz=3000 so
     assertions can distinguish correct values from dataclass defaults.
     """
     storage, coupling = _make_full_storage(tmp_path)
 
-    # Override Scene values to be distinct from defaults (250 / 2000).
-    scene = storage.get_scene("scene-1")
-    assert scene is not None
-    scene.effect = "spectrum_rgb"
-    scene.bass_hz = 300
-    scene.mid_hz = 3000
-    storage.save_scene(scene)
+    # Override Effect values to be distinct from defaults (250 / 2000).
+    effect = storage.get_effect("scene-1")
+    assert effect is not None
+    effect.effect_type = "spectrum_rgb"
+    effect.bass_hz = 300
+    effect.mid_hz = 3000
+    storage.save_effect(effect)
 
     profile = _build_engine_profile(coupling, storage)
     assert profile is not None, "_build_engine_profile must succeed with a full storage"
@@ -488,20 +488,20 @@ def _make_session_from_storage(tmp_path: Path) -> tuple[PlayerManager, ActiveSes
 
 
 def test_active_color_mode_reads_scene_effect(tmp_path: Path) -> None:
-    """active_color_mode must reflect the Scene effect stored in the active profile.
+    """active_color_mode must reflect the Effect effect_type stored in the active profile.
 
-    Regression: any rename that breaks self._active.profile.effect causes all
+    Regression: any rename that breaks self._active.profile.effect_type causes all
     spectrum bars to render in accent colour (purple) instead of R/G/B.
     """
     manager, _ = _make_session_from_storage(tmp_path)
     assert manager.active_color_mode == "spectrum_rgb", (
-        f"active_color_mode must return the Scene effect ('spectrum_rgb'); "
-        f"got {manager.active_color_mode!r} — check the self._active.profile.effect property chain"
+        f"active_color_mode must return the Effect effect_type ('spectrum_rgb'); "
+        f"got {manager.active_color_mode!r} — check profile.effect_type property chain"
     )
 
 
 def test_active_band_hz_reads_scene_values(tmp_path: Path) -> None:
-    """active_bass_hz / active_mid_hz must return Scene values, not dataclass defaults."""
+    """active_bass_hz / active_mid_hz must return Effect values, not dataclass defaults."""
     manager, _ = _make_session_from_storage(tmp_path)
     assert manager.active_bass_hz == 300, (
         f"active_bass_hz must return Scene.bass_hz (300); got {manager.active_bass_hz}"
@@ -522,7 +522,7 @@ def test_update_render_propagates_effect_to_active_profile(tmp_path: Path) -> No
 
     new_profile = Profile(
         id="coupling-1", player_mac="aa:bb:cc:dd:ee:ff",
-        effect="mono_pulse", bass_hz=400, mid_hz=4000,
+        effect_type="mono_pulse", bass_hz=400, mid_hz=4000,
     )
     manager.update_render(new_profile)
 
@@ -545,7 +545,7 @@ def test_update_onset_pipeline_propagates_profile(tmp_path: Path) -> None:
 
     new_profile = Profile(
         id="coupling-1", player_mac="aa:bb:cc:dd:ee:ff",
-        effect="spectrum_rgb", bass_hz=500, mid_hz=5000,
+        effect_type="spectrum_rgb", bass_hz=500, mid_hz=5000,
     )
     manager.update_onset_pipeline(new_profile)
 
@@ -591,8 +591,8 @@ def _make_airplay_storage(tmp_path: Path) -> tuple[Storage, Coupling]:
     )
     storage.save_analyser(ac)
 
-    scene = Scene(id="scene-ap", name="Default", effect="spectrum_rgb")
-    storage.save_scene(scene)
+    effect = Effect(id="scene-ap", name="Default", effect_type="spectrum_rgb")
+    storage.save_effect(effect)
 
     crossfader = Crossfader(id="cf-ap", name="Default CF", active_scene_id="scene-ap")
     storage.save_crossfader(crossfader)

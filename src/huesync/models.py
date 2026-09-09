@@ -35,7 +35,7 @@ class ColorMode(StrEnum):
     mapped bass energy to a fixed warm hue.  Profiles that stored it are
     migrated to spectrum_rgb on load.
 
-    New code should use EFFECT_IDS and the ``effect`` field on Scene.
+    New code should use EFFECT_IDS and the ``effect_type`` field on Effect.
     """
 
     # Whole spectrum split in three bands (bass/mid/treble) mapped to R/G/B.
@@ -161,7 +161,7 @@ class Profile:
     light_count: int = 0
 
     # Colour mapping / effect selection
-    effect: str = "spectrum_rgb"
+    effect_type: str = "spectrum_rgb"
     effect_speed: float = 1.0
     effect_decay: float = 0.3
     mix_low_threshold: float = 0.3
@@ -226,18 +226,18 @@ class Profile:
     def from_dict(cls, d: dict) -> Profile:
         d = dict(d)
 
-        # Migrate legacy color_mode field to effect.
-        if "color_mode" in d and "effect" not in d:
+        # Migrate legacy color_mode field to effect_type.
+        if "color_mode" in d and "effect_type" not in d:
             cm_val = d.pop("color_mode")
             # Map legacy ColorMode values; unknown values fall back to spectrum_rgb.
             if cm_val in ("spectrum_rgb", "mono_pulse"):
-                d["effect"] = cm_val
+                d["effect_type"] = cm_val
             else:
                 log.warning(
                     "Unsupported color_mode %r in saved profile; falling back to spectrum_rgb",
                     cm_val,
                 )
-                d["effect"] = "spectrum_rgb"
+                d["effect_type"] = "spectrum_rgb"
         elif "color_mode" in d:
             d.pop("color_mode")
 
@@ -254,7 +254,7 @@ _PROFILE_FIELDS = frozenset(f.name for f in fields(Profile))
 
 # ---------------------------------------------------------------------------
 # Phase-2 entities: Controller, Player, Zone, Analyser,
-# Scene, Crossfader, Coupling.
+# Effect, Crossfader, Coupling.
 # ---------------------------------------------------------------------------
 
 
@@ -425,20 +425,17 @@ class Analyser:
 _ANALYSER_FIELDS = frozenset(f.name for f in fields(Analyser))
 
 
-_SCENE_FIELDS: frozenset[str] = frozenset()  # filled after class
-
-
 @dataclass
-class Scene:
+class Effect:
     """Visual output parameters (colour mode, sensitivity, …), provider-neutral.
 
-    A Scene describes a single colour rendering mode. The Crossfader picks two
-    Scenes (active and mellow) and owns the crossfade settings.
+    An Effect defines how the lights react to music. The EnergyProfile picks
+    two Effects (high-energy and low-energy) and owns the blend settings.
     """
 
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
-    name: str = "Default Scene"
-    effect: str = "spectrum_rgb"
+    name: str = "Default Effect"
+    effect_type: str = "spectrum_rgb"
     effect_speed: float = 1.0
     effect_decay: float = 0.3
     sensitivity: float = 1.0
@@ -452,7 +449,7 @@ class Scene:
         return {
             "id": self.id,
             "name": self.name,
-            "effect": self.effect,
+            "effect_type": self.effect_type,
             "effect_speed": self.effect_speed,
             "effect_decay": self.effect_decay,
             "sensitivity": self.sensitivity,
@@ -464,27 +461,32 @@ class Scene:
         }
 
     @classmethod
-    def from_dict(cls, d: dict) -> Scene:
+    def from_dict(cls, d: dict) -> Effect:
         d = dict(d)
-        # Migrate legacy color_mode field to effect.
-        if "color_mode" in d and "effect" not in d:
+        # Migrate legacy color_mode field to effect_type.
+        if "color_mode" in d and "effect_type" not in d:
             cm_val = d.pop("color_mode")
             if cm_val in ("spectrum_rgb", "mono_pulse"):
-                d["effect"] = cm_val
+                d["effect_type"] = cm_val
             else:
                 log.warning(
-                    "Unsupported color_mode %r in saved Scene; falling back to spectrum_rgb",
+                    "Unsupported color_mode %r in saved Effect; falling back to spectrum_rgb",
                     cm_val,
                 )
-                d["effect"] = "spectrum_rgb"
+                d["effect_type"] = "spectrum_rgb"
         elif "color_mode" in d:
             d.pop("color_mode")
+        # Migrate old "effect" key written before the effect_type rename.
+        if "effect" in d and "effect_type" not in d:
+            d["effect_type"] = d.pop("effect")
+        elif "effect" in d:
+            d.pop("effect")
         # Old keys (mellow_colour_mode, mix_low_threshold, mix_high_threshold,
         # mix_ema_alpha) are silently dropped by the field filter below.
-        return cls(**{k: v for k, v in d.items() if k in _SCENE_FIELDS})
+        return cls(**{k: v for k, v in d.items() if k in _EFFECT_FIELDS})
 
 
-_SCENE_FIELDS = frozenset(f.name for f in fields(Scene))
+_EFFECT_FIELDS = frozenset(f.name for f in fields(Effect))
 
 
 _CROSSFADER_FIELDS: frozenset[str] = frozenset()  # filled after class
@@ -492,17 +494,17 @@ _CROSSFADER_FIELDS: frozenset[str] = frozenset()  # filled after class
 
 @dataclass
 class Crossfader:
-    """Links an active Scene and a mellow Scene with crossfade parameters.
+    """Links an active Effect and a mellow Effect with crossfade parameters.
 
     The Coupling references one Crossfader. The Crossfader owns the two-layer
-    scene selection and all LayerMixer parameters, keeping Coupling focused on
+    effect selection and all LayerMixer parameters, keeping Coupling focused on
     routing (player → analysis → zone → crossfader).
     """
 
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     name: str = "Default Crossfader"
-    active_scene_id: str = ""   # Scene used in loud passages
-    mellow_scene_id: str = ""   # Scene used in quiet passages (empty = same as active)
+    active_scene_id: str = ""   # Effect used in loud passages
+    mellow_scene_id: str = ""   # Effect used in quiet passages (empty = same as active)
     low_threshold: float = 0.3  # energy below this → pure mellow (mix=0)
     high_threshold: float = 0.7  # energy above this → pure active (mix=1)
     fade_speed: float = 0.1     # EMA alpha for mix smoothing (was mix_ema_alpha)
@@ -536,7 +538,7 @@ class Coupling:
     Activation happens on a Coupling. The linked entities can be shared
     across multiple Couplings, but each Coupling runs its own cava process.
 
-    The Crossfader owns the active Scene, optional mellow Scene, and all
+    The Crossfader owns the active Effect, optional mellow Effect, and all
     LayerMixer crossfade parameters. Coupling is focused on routing:
     player → analysis → zone → crossfader.
     """
