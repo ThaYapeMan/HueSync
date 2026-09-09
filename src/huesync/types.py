@@ -2,7 +2,7 @@
 
 These types define the contracts between the four pipeline layers:
 
-    AudioPipeline  →  AudioFeatures  →  Effect  →  Scene  →  Output  →  lights
+    AudioPipeline  →  AudioFeatures  →  Renderer  →  Scene  →  Output  →  lights
 
 No layer imports from the layer below it. In particular, nothing here
 imports from hue_entertainment — that is confined to hue_output.py.
@@ -177,17 +177,17 @@ class AudioFeatures:
 
 
 # ---------------------------------------------------------------------------
-# Effect — contract between the colour engine and the analysis layer
+# Renderer — contract between the colour engine and the analysis layer
 # ---------------------------------------------------------------------------
 
 
 @runtime_checkable
-class Effect(Protocol):
+class Renderer(Protocol):
     """Transforms AudioFeatures into a Scene for one frame.
 
-    Effects may be stateful (decay envelopes, palette position, onset
+    Renderers may be stateful (decay envelopes, palette position, onset
     cooldown) and are instantiated once per active session.  Stateless
-    effects simply ignore *t* and return the same Scene shape for the same
+    renderers simply ignore *t* and return the same Scene shape for the same
     features.
     """
 

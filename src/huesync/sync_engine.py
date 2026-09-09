@@ -6,9 +6,9 @@ Signal path (one layer at a time):
     BandNormaliser  — AGC: normalises each bar against its own rolling average
     OnsetDetector   — spectral flux onset detection with EMA-based threshold
     CavaPipeline    — wraps the three above; produces AudioFeatures each frame
-    ColourModeEffect— implements Effect; maps AudioFeatures to a Scene using
+    ColourModeEffect— implements Renderer; maps AudioFeatures to a Scene using
                       one of the two active ColorMode strategies
-    SyncEngine      — orchestrates AudioPipeline + Effect + Output at 30 Hz,
+    SyncEngine      — orchestrates AudioPipeline + Renderer + Output at 30 Hz,
                       with an optional ring-buffer delay on the output
 
 Nothing in this module imports from hue_entertainment; all Hue-specific code
@@ -1349,7 +1349,7 @@ def _make_renderer(effect: str) -> _EffectRenderer:
 
 
 # ---------------------------------------------------------------------------
-# ColourModeEffect — implements the Effect protocol
+# ColourModeEffect — implements the Renderer protocol
 # ---------------------------------------------------------------------------
 
 
@@ -1438,7 +1438,7 @@ class LayerMixer:
 
 
 # ---------------------------------------------------------------------------
-# SyncEngine — orchestrates AudioPipeline + Effect + Output at 30 Hz
+# SyncEngine — orchestrates AudioPipeline + Renderer + Output at 30 Hz
 # ---------------------------------------------------------------------------
 
 
