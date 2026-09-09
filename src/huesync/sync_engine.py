@@ -24,7 +24,6 @@ import os
 import threading
 import time
 from collections import deque
-from typing import NamedTuple
 
 import numpy as np
 
@@ -678,25 +677,6 @@ class CavaPipeline:
 # ---------------------------------------------------------------------------
 
 
-class _PcmRawFrame(NamedTuple):
-    """Intermediate frame stored by PcmAudioPipeline._run().
-
-    Holds raw (pre-normalisation) bar bytes and pre-computed onset results.
-    BandNormaliser.normalise() is called in latest() (30 Hz), not here
-    (100 Hz), so the EMA time constant matches CavaPipeline's.
-    """
-
-    bar_bytes: bytes
-    onset: bool
-    onset_strength: float
-    onset_bass: bool
-    onset_mid: bool
-    onset_treble: bool
-    onset_bass_str: float
-    onset_mid_str: float
-    onset_treble_str: float
-
-
 class PcmAudioPipeline:
     """AudioPipeline that derives AudioFeatures from any PcmSource.
 
@@ -757,7 +737,7 @@ class PcmAudioPipeline:
             StftOnsetPipeline | MultibandStftPipeline | SuperfluxStftPipeline | None
         ) = None
         self._sample_rate: int | None = None
-        self._latest: _PcmRawFrame | None = None
+        self._latest: AudioFeatures | None = None
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -828,13 +808,29 @@ class PcmAudioPipeline:
             onset_frames = self._onset_pipeline.push(samples)
 
             # Both STFTs share the same hop, so frame counts are always equal.
-            # Normalization (BandNormaliser.normalise) is intentionally NOT
-            # called here — it runs in latest() at 30 Hz (consumption rate) so
-            # the EMA time constant matches CavaPipeline (~1.7 s vs ~0.5 s when
-            # called here at ~100 Hz).  Only raw bar bytes and onset results are
-            # stored; latest() builds the full AudioFeatures from them.
             for bar_frame, onset_result in zip(bar_frames, onset_frames, strict=False):
                 bar_bytes = self._mag_to_bar_bytes(bar_frame)
+                # normalise() runs here in _run() (~100 Hz), not in latest() (30 Hz).
+                # Moving it to latest() was attempted (Optie B, commit e0c425d) and
+                # caused two bugs:
+                # 1. Freeze: latest() kept calling normalise() with the same stale
+                #    _latest bytes when the source went quiet — the EMA converged to
+                #    a constant, producing 17 s of identical output.
+                # 2. Regression: latest() reads only whichever frame _run() last
+                #    wrote; intermediate STFT frames (including transient peaks)
+                #    never reached normalise(). Correlation dropped 0.60 → 0.50 and
+                #    the PCM/cava amplitude ratio dropped 0.73 → 0.50.
+                # The 100 Hz vs 30 Hz call-rate difference vs CavaPipeline is a known
+                # open question — do not fix it by moving normalise() to latest().
+                normed = self._normaliser.normalise(bar_bytes)
+                bars = [v / 255.0 for v in normed]
+                total = sum(bars)
+                n = len(bars)
+                centroid = (
+                    sum(idx * v for idx, v in enumerate(bars)) / total / n
+                    if total > 1e-9
+                    else 0.0
+                )
 
                 onset = False
                 onset_strength = 0.0
@@ -851,17 +847,28 @@ class PcmAudioPipeline:
                 else:
                     onset, onset_strength = onset_result
 
+                # Silence gate: onset detector runs on raw STFT magnitudes, so its
+                # flux variance can collapse to ~0 during silence and amplify the
+                # next noise spike into a false onset. Suppress onset when bars are silent.
+                if total < 1e-9:
+                    onset = onset_bass = onset_mid = onset_treble = False
+                    onset_strength = onset_bass_str = onset_mid_str = onset_treble_str = 0.0
+
                 with self._lock:
-                    self._latest = _PcmRawFrame(
-                        bar_bytes=bar_bytes,
+                    self._latest = AudioFeatures(
+                        bars=bars,
+                        bass=_slice_avg(bars, 0.0, 0.20),
+                        mid=_slice_avg(bars, 0.0, 0.55),
+                        full=_slice_avg(bars, 0.0, 1.0),
+                        centroid=centroid,
                         onset=onset,
                         onset_strength=onset_strength,
                         onset_bass=onset_bass,
                         onset_mid=onset_mid,
                         onset_treble=onset_treble,
-                        onset_bass_str=onset_bass_str,
-                        onset_mid_str=onset_mid_str,
-                        onset_treble_str=onset_treble_str,
+                        onset_bass_strength=onset_bass_str,
+                        onset_mid_strength=onset_mid_str,
+                        onset_treble_strength=onset_treble_str,
                     )
 
     def start(self) -> None:
@@ -876,54 +883,7 @@ class PcmAudioPipeline:
 
     def latest(self) -> AudioFeatures | None:
         with self._lock:
-            raw = self._latest
-        if raw is None:
-            return None
-
-        # Normalise at 30 Hz (here, on the consumer side) rather than at
-        # ~100 Hz in _run().  This gives the same EMA time constant as
-        # CavaPipeline (~1.7 s at alpha=0.02, 30 Hz) and prevents the AGC
-        # from over-adapting to rapid transients.
-        normed = self._normaliser.normalise(raw.bar_bytes)
-        bars = [v / 255.0 for v in normed]
-        total = sum(bars)
-        n = len(bars)
-        centroid = (
-            sum(idx * v for idx, v in enumerate(bars)) / total / n
-            if total > 1e-9
-            else 0.0
-        )
-
-        onset = raw.onset
-        onset_strength = raw.onset_strength
-        onset_bass = raw.onset_bass
-        onset_mid = raw.onset_mid
-        onset_treble = raw.onset_treble
-        onset_bass_str = raw.onset_bass_str
-        onset_mid_str = raw.onset_mid_str
-        onset_treble_str = raw.onset_treble_str
-
-        # Silence gate: when bars are silent (normaliser gate fired),
-        # suppress any onset the detector may have raised on raw STFT noise.
-        if total < 1e-9:
-            onset = onset_bass = onset_mid = onset_treble = False
-            onset_strength = onset_bass_str = onset_mid_str = onset_treble_str = 0.0
-
-        return AudioFeatures(
-            bars=bars,
-            bass=_slice_avg(bars, 0.0, 0.20),
-            mid=_slice_avg(bars, 0.0, 0.55),
-            full=_slice_avg(bars, 0.0, 1.0),
-            centroid=centroid,
-            onset=onset,
-            onset_strength=onset_strength,
-            onset_bass=onset_bass,
-            onset_mid=onset_mid,
-            onset_treble=onset_treble,
-            onset_bass_strength=onset_bass_str,
-            onset_mid_strength=onset_mid_str,
-            onset_treble_strength=onset_treble_str,
-        )
+            return self._latest
 
 
 # ---------------------------------------------------------------------------
