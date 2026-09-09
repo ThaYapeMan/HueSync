@@ -299,6 +299,21 @@ class Controller:
             "client_key": self.client_key,
         }
 
+    def to_safe_dict(self) -> dict:
+        """Public-API serialisation: credentials replaced by boolean presence flags.
+
+        Never expose app_key / client_key over HTTP — they grant full bridge
+        control to anyone who can reach the HueSync API port.
+        """
+        return {
+            "id": self.id,
+            "name": self.name,
+            "type": self.type.value,
+            "host": self.host,
+            "app_key_configured": bool(self.app_key),
+            "client_key_configured": bool(self.client_key),
+        }
+
     @classmethod
     def from_dict(cls, d: dict) -> Controller:
         d = dict(d)

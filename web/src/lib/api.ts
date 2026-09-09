@@ -143,8 +143,8 @@ export interface Controller {
   id: string
   name: string
   host: string
-  app_key: string
-  client_key: string
+  app_key_configured: boolean
+  client_key_configured: boolean
 }
 
 export interface VirtualPlayer {

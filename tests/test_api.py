@@ -170,6 +170,61 @@ def test_create_and_get_controller(client: TestClient):
     assert resp2.json()["id"] == controller_id
 
 
+def test_controller_responses_never_expose_credentials(client: TestClient):
+    """GET /api/controllers and GET /api/controllers/{id} must never include
+    actual app_key / client_key values, regardless of whether they are set.
+    Credentials are replaced by boolean presence flags (app_key_configured /
+    client_key_configured).
+    """
+    # Controller with both credentials set
+    payload = {
+        "name": "Bridge with keys",
+        "host": "10.0.0.1",
+        "type": "hue",
+        "app_key": "secret-app-key",
+        "client_key": "secret-client-key",
+    }
+    resp = client.post("/api/controllers", json=payload)
+    assert resp.status_code == 201
+    body = resp.json()
+    controller_id = body["id"]
+
+    # POST response must not contain credential values
+    assert "app_key" not in body
+    assert "client_key" not in body
+    assert body["app_key_configured"] is True
+    assert body["client_key_configured"] is True
+
+    # GET /api/controllers/{id} must not contain credential values
+    resp2 = client.get(f"/api/controllers/{controller_id}")
+    assert resp2.status_code == 200
+    body2 = resp2.json()
+    assert "app_key" not in body2
+    assert "client_key" not in body2
+    assert body2["app_key_configured"] is True
+    assert body2["client_key_configured"] is True
+
+    # GET /api/controllers (list) must not contain credential values
+    resp3 = client.get("/api/controllers")
+    assert resp3.status_code == 200
+    items = resp3.json()
+    for item in items:
+        assert "app_key" not in item
+        assert "client_key" not in item
+
+    # Controller with no credentials: flags must be False
+    payload2 = {"name": "Unconfigured", "host": "10.0.0.2", "type": "hue"}
+    resp4 = client.post("/api/controllers", json=payload2)
+    assert resp4.status_code == 201
+    body4 = resp4.json()
+    assert body4["app_key_configured"] is False
+    assert body4["client_key_configured"] is False
+
+    resp5 = client.get(f"/api/controllers/{body4['id']}")
+    assert resp5.json()["app_key_configured"] is False
+    assert resp5.json()["client_key_configured"] is False
+
+
 # ---------------------------------------------------------------------------
 # VirtualPlayers
 # ---------------------------------------------------------------------------

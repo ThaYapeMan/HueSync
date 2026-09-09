@@ -516,12 +516,12 @@ async def pair_controller(request: Request, body: ControllerPairBody):
         client_key=bridge.client_key,
     )
     storage.save_controller(controller)
-    return JSONResponse(content=controller.to_dict(), status_code=201)
+    return JSONResponse(content=controller.to_safe_dict(), status_code=201)
 
 
 @router.get("/controllers")
 async def list_controllers(request: Request):
-    return [c.to_dict() for c in _storage(request).list_controllers()]
+    return [c.to_safe_dict() for c in _storage(request).list_controllers()]
 
 
 @router.post("/controllers", status_code=201)
@@ -541,7 +541,7 @@ async def create_controller(request: Request, body: ControllerCreateBody):
         client_key=body.client_key,
     )
     storage.save_controller(controller)
-    return JSONResponse(content=controller.to_dict(), status_code=201)
+    return JSONResponse(content=controller.to_safe_dict(), status_code=201)
 
 
 @router.get("/controllers/{controller_id}")
@@ -549,7 +549,7 @@ async def get_controller(controller_id: str, request: Request):
     c = _storage(request).get_controller(controller_id)
     if c is None:
         raise HTTPException(status_code=404, detail="Controller not found")
-    return c.to_dict()
+    return c.to_safe_dict()
 
 
 @router.patch("/controllers/{controller_id}")
@@ -561,7 +561,7 @@ async def patch_controller(controller_id: str, request: Request, body: Controlle
     for field, value in body.model_dump(exclude_unset=True).items():
         setattr(c, field, value)
     storage.save_controller(c)
-    return c.to_dict()
+    return c.to_safe_dict()
 
 
 @router.get("/controllers/{controller_id}/areas")
