@@ -983,6 +983,57 @@ class _SpectrumRgbRenderer(_EffectRenderer):
         return UniformScene(Colour(r=r, g=g, b=b))
 
 
+def _tri_weight(x: float, anchor: float) -> float:
+    """Linear crossfade weight: 1.0 at anchor, 0.0 one unit away, negative clamped to 0."""
+    return max(0.0, 1.0 - abs(x - anchor))
+
+
+class _SpectrumRgbSpatialScene:
+    """Spatial scene: bass/mid/treble bands placed at x=-1/0/+1 (left/centre/right),
+    cross-faded linearly between neighbours — the spatial decomposition of the
+    spectrum_rgb EffectType's combined colour, rather than blending all three
+    into one colour shown uniformly across the entertainment area."""
+
+    __slots__ = ("_r", "_g", "_b")
+
+    def __init__(self, r: float, g: float, b: float) -> None:
+        self._r = r
+        self._g = g
+        self._b = b
+
+    def color_at(self, position: Position, t: float) -> Colour:  # noqa: ARG002
+        x = max(-1.0, min(1.0, position.x))
+        w_bass = _tri_weight(x, -1.0)
+        w_mid = _tri_weight(x, 0.0)
+        w_treble = _tri_weight(x, 1.0)
+        return Colour(self._r * w_bass, self._g * w_mid, self._b * w_treble)
+
+
+class _SpectrumRgbSpatialRenderer(_EffectRenderer):
+    """Spatial variant of the spectrum_rgb EffectType: bass=left, mid=centre,
+    treble=right, cross-faded across the entertainment area instead of
+    blended into one colour shown on every light."""
+
+    def render(self, profile: Profile, features: AudioFeatures, t: float) -> Scene:  # noqa: ARG002
+        sens = profile.sensitivity
+        bars = features.bars
+        n = len(bars)
+        lo = profile.lower_cutoff_freq
+        hi = profile.higher_cutoff_freq
+        bass_hi = int(_hz_to_frac(profile.bass_hz, lo, hi) * n)
+        mid_hi = int(_hz_to_frac(profile.mid_hz, lo, hi) * n)
+        r = min(_band_avg(bars, 0, bass_hi) * sens, 1.0)
+        g = min(_band_avg(bars, bass_hi, mid_hi) * sens, 1.0)
+        b = min(_band_avg(bars, mid_hi, n) * sens, 1.0)
+        if features.onset:
+            fi = profile.onset_flash_intensity
+            if fi > 0.0:
+                r = r + fi * (1.0 - r)
+                g = g + fi * (1.0 - g)
+                b = b + fi * (1.0 - b)
+        return _SpectrumRgbSpatialScene(r, g, b)
+
+
 class _MonoPulseRenderer(_EffectRenderer):
     """Single colour; brightness follows overall energy."""
 
@@ -1325,6 +1376,8 @@ def _make_renderer(effect: str) -> _EffectRenderer:
     match effect:
         case "spectrum_rgb":
             return _SpectrumRgbRenderer()
+        case "spectrum_rgb_spatial":
+            return _SpectrumRgbSpatialRenderer()
         case "mono_pulse":
             return _MonoPulseRenderer()
         case "pulses":

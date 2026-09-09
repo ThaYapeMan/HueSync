@@ -52,6 +52,7 @@ COLOUR_MODES: frozenset[str] = frozenset(cm.value for cm in ColorMode)
 # these exact strings.  Keep in sync with EFFECTS in web/src/lib/api.ts.
 EFFECT_IDS: frozenset[str] = frozenset({
     "spectrum_rgb",
+    "spectrum_rgb_spatial",
     "mono_pulse",
     "pulses",
     "flashes",

@@ -130,6 +130,7 @@ colour and motion.
 | Effect | Style | Description |
 |---|---|---|
 | `spectrum_rgb` | Spectral colour | Bass → red, mid → green, treble → blue. Hue and brightness track the live spectrum in real time. |
+| `spectrum_rgb_spatial` | Spatial spectral colour | Same band mapping as `spectrum_rgb`, but spread across the entertainment area: bass on the left, mid in the centre, treble on the right, cross-faded between neighbours instead of blended into one colour. |
 | `mono_pulse` | Intensity-based | Single hue (configurable); overall brightness follows loudness. Clean look for uniform rooms. |
 | `pulses` | Transient bursts | Short brightness pulses radiate outward from onset triggers. Fast and punchy. |
 | `flashes` | Onset-driven | Hard flash on beat/onset with a brief cooldown; very dark between hits. High contrast. |
@@ -545,11 +546,11 @@ Then deploy as usual (`git pull && pip install . && systemctl restart huesync`).
 
 - One active Entertainment stream per bridge (Hue Bridge hardware limit;
   enforced in `HueDriver`, not in shared code).
-- Spatial effects (`fireworks`, `wave`, `swirl`, `splotches`) distribute colour
-  across the entertainment area by position. The remaining effects
-  (`spectrum_rgb`, `mono_pulse`, `pulses`, `flashes`) currently send the same
-  colour to every light. Per-light spatial mapping for those effects is a
-  planned milestone.
+- Spatial effects (`fireworks`, `wave`, `swirl`, `splotches`,
+  `spectrum_rgb_spatial`) distribute colour across the entertainment area by
+  position. The remaining effects (`spectrum_rgb`, `mono_pulse`, `pulses`,
+  `flashes`) currently send the same colour to every light. Per-light spatial
+  mapping for those effects is a planned milestone.
 - No authentication on the web UI — intended for a trusted home LAN only.
 - LMS discovery uses UDP broadcast and does not cross subnets.
 

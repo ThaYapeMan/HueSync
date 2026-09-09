@@ -988,6 +988,21 @@ def test_wave_differs_by_position():
     )
 
 
+def test_spectrum_rgb_spatial_differs_by_position():
+    """Spectrum RGB Spatial scene produces different colours at different x-positions."""
+    from huesync.sync_engine import ColourModeEffect
+
+    effect = ColourModeEffect(_prof(effect_type="spectrum_rgb_spatial"))
+    scene = effect.render(_ef(onset=False, full=0.5), 0.0)
+    pos_left = Position(-0.9, 0.0, 0.0)
+    pos_right = Position(0.9, 0.0, 0.0)
+    colour_left = scene.color_at(pos_left, 0.0)
+    colour_right = scene.color_at(pos_right, 0.0)
+    assert colour_left != colour_right, (
+        f"Spectrum RGB Spatial: positions must differ, left={colour_left}, right={colour_right}"
+    )
+
+
 def test_solid_uniform_across_positions():
     """Solid effect returns the same colour at all positions."""
     from huesync.sync_engine import ColourModeEffect

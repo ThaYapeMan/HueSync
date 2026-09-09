@@ -86,7 +86,7 @@ def test_colour_modes_contains_expected_values() -> None:
 def test_effect_ids_contains_expected_effects() -> None:
     """EFFECT_IDS must contain all documented effect identifiers."""
     expected = {
-        "spectrum_rgb", "mono_pulse", "pulses", "flashes",
+        "spectrum_rgb", "spectrum_rgb_spatial", "mono_pulse", "pulses", "flashes",
         "splotches", "fireworks", "swirl", "wave", "solid", "none",
     }
     assert EFFECT_IDS == expected

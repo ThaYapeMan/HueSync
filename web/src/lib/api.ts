@@ -34,6 +34,7 @@ export type ColourMode = typeof COLOUR_MODES[number]['value']
 // Canonical list of effects.  Keep in sync with EFFECT_IDS in models.py.
 export const EFFECTS = [
   { id: 'spectrum_rgb', label: 'Spectrum RGB', description: 'Bass drives red, mid drives green, treble drives blue',       hasSpeed: false, hasDecay: false },
+  { id: 'spectrum_rgb_spatial', label: 'Spectrum RGB (Spatial)', description: 'Bass left, mid centre, treble right — cross-faded across the room', hasSpeed: false, hasDecay: false },
   { id: 'mono_pulse',   label: 'Mono Pulse',   description: 'All lights dim and brighten with the overall energy',         hasSpeed: false, hasDecay: false },
   { id: 'pulses',       label: 'Pulses',       description: 'Lights flash on each beat and fade out smoothly',             hasSpeed: false, hasDecay: true  },
   { id: 'flashes',      label: 'Flashes',      description: 'Hard white flash on each beat, dark between beats',           hasSpeed: false, hasDecay: true  },

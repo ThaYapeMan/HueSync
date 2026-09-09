@@ -278,6 +278,9 @@ Without positions every light is identical. With them:
 - **Waves** — `brightness = envelope((t × speed) − (position.x × wavelength))`
 - **Fireworks** — decay strength as function of distance from origin light
 - **Splotches** — spatial clustering of colour assignments
+- **Spectrum RGB Spatial** — bass/mid/treble bands placed at `position.x`
+  = -1/0/+1, cross-faded linearly between neighbours (EffectType
+  `spectrum_rgb_spatial`)
 
 Position capture is the prerequisite for everything spatial and should be one
 of the first things added.

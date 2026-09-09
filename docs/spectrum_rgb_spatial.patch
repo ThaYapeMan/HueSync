@@ -1,0 +1,177 @@
+diff --git a/README.md b/README.md
+index a5e4877..eed6016 100644
+--- a/README.md
++++ b/README.md
+@@ -130,6 +130,7 @@ colour and motion.
+ | Effect | Style | Description |
+ |---|---|---|
+ | `spectrum_rgb` | Spectral colour | Bass → red, mid → green, treble → blue. Hue and brightness track the live spectrum in real time. |
++| `spectrum_rgb_spatial` | Spatial spectral colour | Same band mapping as `spectrum_rgb`, but spread across the entertainment area: bass on the left, mid in the centre, treble on the right, cross-faded between neighbours instead of blended into one colour. |
+ | `mono_pulse` | Intensity-based | Single hue (configurable); overall brightness follows loudness. Clean look for uniform rooms. |
+ | `pulses` | Transient bursts | Short brightness pulses radiate outward from onset triggers. Fast and punchy. |
+ | `flashes` | Onset-driven | Hard flash on beat/onset with a brief cooldown; very dark between hits. High contrast. |
+@@ -545,11 +546,11 @@ Then deploy as usual (`git pull && pip install . && systemctl restart huesync`).
+ 
+ - One active Entertainment stream per bridge (Hue Bridge hardware limit;
+   enforced in `HueDriver`, not in shared code).
+-- Spatial effects (`fireworks`, `wave`, `swirl`, `splotches`) distribute colour
+-  across the entertainment area by position. The remaining effects
+-  (`spectrum_rgb`, `mono_pulse`, `pulses`, `flashes`) currently send the same
+-  colour to every light. Per-light spatial mapping for those effects is a
+-  planned milestone.
++- Spatial effects (`fireworks`, `wave`, `swirl`, `splotches`,
++  `spectrum_rgb_spatial`) distribute colour across the entertainment area by
++  position. The remaining effects (`spectrum_rgb`, `mono_pulse`, `pulses`,
++  `flashes`) currently send the same colour to every light. Per-light spatial
++  mapping for those effects is a planned milestone.
+ - No authentication on the web UI — intended for a trusted home LAN only.
+ - LMS discovery uses UDP broadcast and does not cross subnets.
+ 
+diff --git a/docs/EFFECT_ENGINE.md b/docs/EFFECT_ENGINE.md
+index 7eeb2a8..aeb85bf 100644
+--- a/docs/EFFECT_ENGINE.md
++++ b/docs/EFFECT_ENGINE.md
+@@ -278,6 +278,9 @@ Without positions every light is identical. With them:
+ - **Waves** — `brightness = envelope((t × speed) − (position.x × wavelength))`
+ - **Fireworks** — decay strength as function of distance from origin light
+ - **Splotches** — spatial clustering of colour assignments
++- **Spectrum RGB Spatial** — bass/mid/treble bands placed at `position.x`
++  = -1/0/+1, cross-faded linearly between neighbours (EffectType
++  `spectrum_rgb_spatial`)
+ 
+ Position capture is the prerequisite for everything spatial and should be one
+ of the first things added.
+diff --git a/src/huesync/models.py b/src/huesync/models.py
+index 530887d..2453b6c 100644
+--- a/src/huesync/models.py
++++ b/src/huesync/models.py
+@@ -52,6 +52,7 @@ COLOUR_MODES: frozenset[str] = frozenset(cm.value for cm in ColorMode)
+ # these exact strings.  Keep in sync with EFFECTS in web/src/lib/api.ts.
+ EFFECT_IDS: frozenset[str] = frozenset({
+     "spectrum_rgb",
++    "spectrum_rgb_spatial",
+     "mono_pulse",
+     "pulses",
+     "flashes",
+diff --git a/src/huesync/sync_engine.py b/src/huesync/sync_engine.py
+index 4279359..513f711 100755
+--- a/src/huesync/sync_engine.py
++++ b/src/huesync/sync_engine.py
+@@ -983,6 +983,57 @@ class _SpectrumRgbRenderer(_EffectRenderer):
+         return UniformScene(Colour(r=r, g=g, b=b))
+ 
+ 
++def _tri_weight(x: float, anchor: float) -> float:
++    """Linear crossfade weight: 1.0 at anchor, 0.0 one unit away, negative clamped to 0."""
++    return max(0.0, 1.0 - abs(x - anchor))
++
++
++class _SpectrumRgbSpatialScene:
++    """Spatial scene: bass/mid/treble bands placed at x=-1/0/+1 (left/centre/right),
++    cross-faded linearly between neighbours — the spatial decomposition of the
++    spectrum_rgb EffectType's combined colour, rather than blending all three
++    into one colour shown uniformly across the entertainment area."""
++
++    __slots__ = ("_r", "_g", "_b")
++
++    def __init__(self, r: float, g: float, b: float) -> None:
++        self._r = r
++        self._g = g
++        self._b = b
++
++    def color_at(self, position: Position, t: float) -> Colour:  # noqa: ARG002
++        x = max(-1.0, min(1.0, position.x))
++        w_bass = _tri_weight(x, -1.0)
++        w_mid = _tri_weight(x, 0.0)
++        w_treble = _tri_weight(x, 1.0)
++        return Colour(self._r * w_bass, self._g * w_mid, self._b * w_treble)
++
++
++class _SpectrumRgbSpatialRenderer(_EffectRenderer):
++    """Spatial variant of the spectrum_rgb EffectType: bass=left, mid=centre,
++    treble=right, cross-faded across the entertainment area instead of
++    blended into one colour shown on every light."""
++
++    def render(self, profile: Profile, features: AudioFeatures, t: float) -> Scene:  # noqa: ARG002
++        sens = profile.sensitivity
++        bars = features.bars
++        n = len(bars)
++        lo = profile.lower_cutoff_freq
++        hi = profile.higher_cutoff_freq
++        bass_hi = int(_hz_to_frac(profile.bass_hz, lo, hi) * n)
++        mid_hi = int(_hz_to_frac(profile.mid_hz, lo, hi) * n)
++        r = min(_band_avg(bars, 0, bass_hi) * sens, 1.0)
++        g = min(_band_avg(bars, bass_hi, mid_hi) * sens, 1.0)
++        b = min(_band_avg(bars, mid_hi, n) * sens, 1.0)
++        if features.onset:
++            fi = profile.onset_flash_intensity
++            if fi > 0.0:
++                r = r + fi * (1.0 - r)
++                g = g + fi * (1.0 - g)
++                b = b + fi * (1.0 - b)
++        return _SpectrumRgbSpatialScene(r, g, b)
++
++
+ class _MonoPulseRenderer(_EffectRenderer):
+     """Single colour; brightness follows overall energy."""
+ 
+@@ -1325,6 +1376,8 @@ def _make_renderer(effect: str) -> _EffectRenderer:
+     match effect:
+         case "spectrum_rgb":
+             return _SpectrumRgbRenderer()
++        case "spectrum_rgb_spatial":
++            return _SpectrumRgbSpatialRenderer()
+         case "mono_pulse":
+             return _MonoPulseRenderer()
+         case "pulses":
+diff --git a/tests/test_enum_fields.py b/tests/test_enum_fields.py
+index ff8af80..73263fb 100644
+--- a/tests/test_enum_fields.py
++++ b/tests/test_enum_fields.py
+@@ -86,7 +86,7 @@ def test_colour_modes_contains_expected_values() -> None:
+ def test_effect_ids_contains_expected_effects() -> None:
+     """EFFECT_IDS must contain all documented effect identifiers."""
+     expected = {
+-        "spectrum_rgb", "mono_pulse", "pulses", "flashes",
++        "spectrum_rgb", "spectrum_rgb_spatial", "mono_pulse", "pulses", "flashes",
+         "splotches", "fireworks", "swirl", "wave", "solid", "none",
+     }
+     assert EFFECT_IDS == expected
+diff --git a/tests/test_sync_engine.py b/tests/test_sync_engine.py
+index 329965b..66d6335 100755
+--- a/tests/test_sync_engine.py
++++ b/tests/test_sync_engine.py
+@@ -988,6 +988,21 @@ def test_wave_differs_by_position():
+     )
+ 
+ 
++def test_spectrum_rgb_spatial_differs_by_position():
++    """Spectrum RGB Spatial scene produces different colours at different x-positions."""
++    from huesync.sync_engine import ColourModeEffect
++
++    effect = ColourModeEffect(_prof(effect_type="spectrum_rgb_spatial"))
++    scene = effect.render(_ef(onset=False, full=0.5), 0.0)
++    pos_left = Position(-0.9, 0.0, 0.0)
++    pos_right = Position(0.9, 0.0, 0.0)
++    colour_left = scene.color_at(pos_left, 0.0)
++    colour_right = scene.color_at(pos_right, 0.0)
++    assert colour_left != colour_right, (
++        f"Spectrum RGB Spatial: positions must differ, left={colour_left}, right={colour_right}"
++    )
++
++
+ def test_solid_uniform_across_positions():
+     """Solid effect returns the same colour at all positions."""
+     from huesync.sync_engine import ColourModeEffect
+diff --git a/web/src/lib/api.ts b/web/src/lib/api.ts
+index fdc788a..2969b01 100644
+--- a/web/src/lib/api.ts
++++ b/web/src/lib/api.ts
+@@ -34,6 +34,7 @@ export type ColourMode = typeof COLOUR_MODES[number]['value']
+ // Canonical list of effects.  Keep in sync with EFFECT_IDS in models.py.
+ export const EFFECTS = [
+   { id: 'spectrum_rgb', label: 'Spectrum RGB', description: 'Bass drives red, mid drives green, treble drives blue',       hasSpeed: false, hasDecay: false },
++  { id: 'spectrum_rgb_spatial', label: 'Spectrum RGB (Spatial)', description: 'Bass left, mid centre, treble right — cross-faded across the room', hasSpeed: false, hasDecay: false },
+   { id: 'mono_pulse',   label: 'Mono Pulse',   description: 'All lights dim and brighten with the overall energy',         hasSpeed: false, hasDecay: false },
+   { id: 'pulses',       label: 'Pulses',       description: 'Lights flash on each beat and fade out smoothly',             hasSpeed: false, hasDecay: true  },
+   { id: 'flashes',      label: 'Flashes',      description: 'Hard white flash on each beat, dark between beats',           hasSpeed: false, hasDecay: true  },
