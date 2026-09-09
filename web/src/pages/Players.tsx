@@ -299,15 +299,25 @@ export function Players() {
             </div>
 
             {isAirPlay ? (
-              <div className="rounded-md border border-muted bg-muted/40 px-4 py-3 text-sm text-muted-foreground space-y-1">
-                <p>
-                  <strong className="text-foreground">Silent AirPlay destination for analysis.</strong>
-                </p>
-                <p>
-                  Select this player alongside your real speaker in Control Center to keep audio
-                  playing through your speaker while HueSync analyses the stream.
-                </p>
-              </div>
+              <>
+                <div className="space-y-1">
+                  <Label className="text-sm">Player name</Label>
+                  <Input
+                    value={form.player_name}
+                    onChange={(e) => { set('player_name', e.target.value); setNameError(null) }}
+                  />
+                  {nameError && <p className="text-xs text-destructive">{nameError}</p>}
+                </div>
+                <div className="rounded-md border border-muted bg-muted/40 px-4 py-3 text-sm text-muted-foreground space-y-1">
+                  <p>
+                    <strong className="text-foreground">Silent AirPlay destination for analysis.</strong>
+                  </p>
+                  <p>
+                    Select this player alongside your real speaker in Control Center to keep audio
+                    playing through your speaker while HueSync analyses the stream.
+                  </p>
+                </div>
+              </>
             ) : (
               <>
                 <FormRow label="LMS host">
