@@ -6,6 +6,8 @@ PlayerManager is mocked to avoid needing actual processes or bridges.
 
 from __future__ import annotations
 
+import uuid
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, PropertyMock
 
@@ -216,8 +218,8 @@ def test_create_airplay_virtual_player(client: TestClient):
 
 def test_airplay_virtual_player_in_list(client: TestClient):
     """An AirPlay player appears in the virtual-players list with correct type."""
-    client.post("/api/virtual-players", json={"type": "AirPlay"})
-    client.post("/api/virtual-players", json={"lms_host": "10.0.0.1"})
+    client.post("/api/virtual-players", json={"type": "AirPlay", "player_name": "HueSyncAirPlay"})
+    client.post("/api/virtual-players", json={"lms_host": "10.0.0.1", "player_name": "HueSyncLMS"})
 
     resp = client.get("/api/virtual-players")
     assert resp.status_code == 200
@@ -303,7 +305,9 @@ def test_virtual_player_display_name_crud(client: TestClient):
 
 def test_display_name_patch_inactive_player_no_deactivate(client: TestClient):
     """PATCH display_name on a player with no active coupling must not call deactivate."""
-    resp = client.post("/api/virtual-players", json={"lms_host": "10.0.0.22", "display_name": "Old"})
+    resp = client.post(
+        "/api/virtual-players", json={"lms_host": "10.0.0.22", "display_name": "Old"}
+    )
     player_id = resp.json()["id"]
 
     patch_resp = client.patch(f"/api/virtual-players/{player_id}", json={"display_name": "New"})
@@ -755,3 +759,46 @@ def test_ws_preview_status_frame_null_when_no_session(client: TestClient):
     assert status.get("color_mode") is None
     assert status.get("bass_hz") is None
     assert status.get("mid_hz") is None
+
+
+# ---------------------------------------------------------------------------
+# Name uniqueness validation
+# ---------------------------------------------------------------------------
+
+
+def test_name_duplicate_create_rejected(client: TestClient):
+    """Creating two analysers with the same name (case-insensitive) must return 409."""
+    client.post("/api/analysers", json={"name": "Alpha"})
+    resp = client.post("/api/analysers", json={"name": "alpha"})
+    assert resp.status_code == 409
+
+
+def test_name_duplicate_patch_rejected(client: TestClient):
+    """Patching an analyser's name to a name already used by another must return 409."""
+    client.post("/api/analysers", json={"name": "Alpha"})
+    r2 = client.post("/api/analysers", json={"name": "Beta"})
+    ac_id = r2.json()["id"]
+    resp = client.patch(f"/api/analysers/{ac_id}", json={"name": "alpha"})
+    assert resp.status_code == 409
+
+
+def test_name_patch_self_ok(client: TestClient):
+    """Patching an entity's name to its own current name must not return 409."""
+    r = client.post("/api/analysers", json={"name": "Alpha"})
+    ac_id = r.json()["id"]
+    resp = client.patch(f"/api/analysers/{ac_id}", json={"name": "Alpha"})
+    assert resp.status_code == 200
+
+
+def test_clone_generates_unique_name(client: TestClient):
+    """Cloning a coupling whose default copy name is already taken generates a unique name."""
+    coupling = _make_full_coupling(client._storage)
+    # Pre-occupy the first candidate name so clone must pick a different one.
+    client._storage.save_coupling(replace(
+        coupling,
+        id=str(uuid.uuid4()),
+        name=f"{coupling.name} (copy)",
+    ))
+    resp = client.post(f"/api/couplings/{coupling.id}/clone")
+    assert resp.status_code == 201
+    assert resp.json()["name"] == f"{coupling.name} (copy 2)"

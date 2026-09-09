@@ -403,6 +403,29 @@ class Storage:
                     c.pop("analysis_config_id")
                     changed = True
 
+            # --- Step 8: deduplicate names within each entity type ---
+            # Rename later duplicates with a numeric suffix so uniqueness
+            # validation introduced after existing data was written doesn't
+            # leave the config in a permanently broken state.
+            for key, name_key in [
+                ("virtual_players", "player_name"),
+                ("zones", "name"),
+                ("analysers", "name"),
+                ("scenes", "name"),
+                ("crossfaders", "name"),
+                ("couplings", "name"),
+            ]:
+                seen: dict[str, int] = {}
+                for e in data.get(key, []):
+                    raw = e.get(name_key, "")
+                    lower = raw.strip().lower()
+                    if lower in seen:
+                        seen[lower] += 1
+                        e[name_key] = f"{raw} {seen[lower]}"
+                        changed = True
+                    else:
+                        seen[lower] = 1
+
             if changed:
                 self._write(data)
 

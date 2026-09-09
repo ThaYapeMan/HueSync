@@ -158,6 +158,7 @@ function NewZoneDialog({ open, onClose, onCreated }: NewZoneDialogProps) {
   const [loadingAreas, setLoadingAreas] = useState(false)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [nameError, setNameError] = useState<string | null>(null)
 
   useEffect(() => {
     if (open) {
@@ -166,6 +167,7 @@ function NewZoneDialog({ open, onClose, onCreated }: NewZoneDialogProps) {
       setSelectedAreaId('')
       setName('')
       setError(null)
+      setNameError(null)
       setLoadingControllers(true)
       getControllers()
         .then(setControllers)
@@ -197,6 +199,7 @@ function NewZoneDialog({ open, onClose, onCreated }: NewZoneDialogProps) {
   async function handleSave() {
     setSaving(true)
     setError(null)
+    setNameError(null)
     try {
       const area = areas.find((a) => a.id === selectedAreaId)
       const zone = await createZone({
@@ -208,7 +211,12 @@ function NewZoneDialog({ open, onClose, onCreated }: NewZoneDialogProps) {
       })
       onCreated(zone)
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Save failed')
+      const msg = e instanceof Error ? e.message : 'Save failed'
+      if ((e as any).status === 409) {
+        setNameError(msg)
+      } else {
+        setError(msg)
+      }
     } finally {
       setSaving(false)
     }
@@ -261,7 +269,8 @@ function NewZoneDialog({ open, onClose, onCreated }: NewZoneDialogProps) {
           {selectedAreaId && (
             <div className="space-y-1">
               <Label className="text-sm">Name</Label>
-              <Input value={name} onChange={(e) => setName(e.target.value)} />
+              <Input value={name} onChange={(e) => { setName(e.target.value); setNameError(null) }} />
+              {nameError && <p className="text-xs text-destructive">{nameError}</p>}
             </div>
           )}
         </div>
@@ -287,17 +296,20 @@ function NewAnalyserDialog({ open, onClose, onCreated }: NewAnalyserDialogProps)
   const [name, setName] = useState('')
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [nameError, setNameError] = useState<string | null>(null)
 
   useEffect(() => {
     if (open) {
       setName('')
       setError(null)
+      setNameError(null)
     }
   }, [open])
 
   async function handleSave() {
     setSaving(true)
     setError(null)
+    setNameError(null)
     try {
       const cfg = await createAnalyser({
         name,
@@ -313,7 +325,12 @@ function NewAnalyserDialog({ open, onClose, onCreated }: NewAnalyserDialogProps)
       })
       onCreated(cfg)
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Save failed')
+      const msg = e instanceof Error ? e.message : 'Save failed'
+      if ((e as any).status === 409) {
+        setNameError(msg)
+      } else {
+        setError(msg)
+      }
     } finally {
       setSaving(false)
     }
@@ -328,7 +345,8 @@ function NewAnalyserDialog({ open, onClose, onCreated }: NewAnalyserDialogProps)
         </DialogHeader>
         <div className="space-y-1">
           <Label className="text-sm">Name</Label>
-          <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="My analyser" />
+          <Input value={name} onChange={(e) => { setName(e.target.value); setNameError(null) }} placeholder="My analyser" />
+          {nameError && <p className="text-xs text-destructive">{nameError}</p>}
         </div>
         {error && <p className="text-destructive text-sm mt-2">{error}</p>}
         <DialogFooter className="mt-4">
@@ -353,18 +371,21 @@ function NewSceneDialog({ open, onClose, onCreated }: NewSceneDialogProps) {
   const [effect, setEffect] = useState('spectrum_rgb')
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [nameError, setNameError] = useState<string | null>(null)
 
   useEffect(() => {
     if (open) {
       setName('')
       setEffect('spectrum_rgb')
       setError(null)
+      setNameError(null)
     }
   }, [open])
 
   async function handleSave() {
     setSaving(true)
     setError(null)
+    setNameError(null)
     try {
       const cfg = await createScene({
         name,
@@ -380,7 +401,12 @@ function NewSceneDialog({ open, onClose, onCreated }: NewSceneDialogProps) {
       })
       onCreated(cfg)
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Save failed')
+      const msg = e instanceof Error ? e.message : 'Save failed'
+      if ((e as any).status === 409) {
+        setNameError(msg)
+      } else {
+        setError(msg)
+      }
     } finally {
       setSaving(false)
     }
@@ -409,7 +435,8 @@ function NewSceneDialog({ open, onClose, onCreated }: NewSceneDialogProps) {
         <div className="space-y-3">
           <div className="space-y-1">
             <Label className="text-sm">Name</Label>
-            <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="My scene" />
+            <Input value={name} onChange={(e) => { setName(e.target.value); setNameError(null) }} placeholder="My scene" />
+            {nameError && <p className="text-xs text-destructive">{nameError}</p>}
           </div>
           <div className="space-y-1">
             <Label className="text-sm">Effect</Label>
@@ -451,6 +478,7 @@ function NewCrossfaderDialog({ open, onClose, onCreated, scenes, onScenesChanged
   const [mellowSceneId, setMellowSceneId] = useState('')
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [nameError, setNameError] = useState<string | null>(null)
   const [newSceneOpen, setNewSceneOpen] = useState(false)
   const [newSceneTarget, setNewSceneTarget] = useState<'active' | 'mellow'>('active')
 
@@ -460,6 +488,7 @@ function NewCrossfaderDialog({ open, onClose, onCreated, scenes, onScenesChanged
       setActiveSceneId('')
       setMellowSceneId('')
       setError(null)
+      setNameError(null)
     }
   }, [open])
 
@@ -481,6 +510,7 @@ function NewCrossfaderDialog({ open, onClose, onCreated, scenes, onScenesChanged
     }
     setSaving(true)
     setError(null)
+    setNameError(null)
     try {
       const cf = await createCrossfader({
         name: name || 'Crossfader',
@@ -492,7 +522,12 @@ function NewCrossfaderDialog({ open, onClose, onCreated, scenes, onScenesChanged
       })
       onCreated(cf)
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Save failed')
+      const msg = e instanceof Error ? e.message : 'Save failed'
+      if ((e as any).status === 409) {
+        setNameError(msg)
+      } else {
+        setError(msg)
+      }
     } finally {
       setSaving(false)
     }
@@ -509,7 +544,8 @@ function NewCrossfaderDialog({ open, onClose, onCreated, scenes, onScenesChanged
           <div className="space-y-3">
             <div className="space-y-1">
               <Label className="text-sm">Name</Label>
-              <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="My crossfader" />
+              <Input value={name} onChange={(e) => { setName(e.target.value); setNameError(null) }} placeholder="My crossfader" />
+              {nameError && <p className="text-xs text-destructive">{nameError}</p>}
             </div>
             <div className="space-y-1">
               <Label className="text-sm">Active scene</Label>
@@ -613,6 +649,7 @@ function CouplingEditor({
   const [enabled, setEnabled] = useState(true)
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
+  const [nameError, setNameError] = useState<string | null>(null)
 
   // Nested dialog states
   const [newPlayerOpen, setNewPlayerOpen] = useState(false)
@@ -629,12 +666,14 @@ function CouplingEditor({
       setCrossfaderId(coupling?.crossfader_id ?? '')
       setEnabled(coupling?.enabled ?? true)
       setSaveError(null)
+      setNameError(null)
     }
   }, [open, coupling])
 
   async function handleSave() {
     setSaving(true)
     setSaveError(null)
+    setNameError(null)
     try {
       if (isEditing && coupling) {
         await updateCoupling(coupling.id, {
@@ -657,7 +696,12 @@ function CouplingEditor({
       }
       onSave()
     } catch (e) {
-      setSaveError(e instanceof Error ? e.message : 'Save failed')
+      const msg = e instanceof Error ? e.message : 'Save failed'
+      if ((e as any).status === 409) {
+        setNameError(msg)
+      } else {
+        setSaveError(msg)
+      }
     } finally {
       setSaving(false)
     }
@@ -709,7 +753,8 @@ function CouplingEditor({
           <div className="overflow-y-auto flex-1 pr-1 space-y-4">
             <div className="space-y-1">
               <Label className="text-sm">Name</Label>
-              <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="My coupling" />
+              <Input value={name} onChange={(e) => { setName(e.target.value); setNameError(null) }} placeholder="My coupling" />
+              {nameError && <p className="text-xs text-destructive">{nameError}</p>}
             </div>
 
             {/* Player */}

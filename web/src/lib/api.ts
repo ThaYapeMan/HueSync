@@ -79,8 +79,15 @@ export interface ApiStatus {
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(path, options)
   if (!res.ok) {
-    const body = await res.text().catch(() => '')
-    throw new Error(`${res.status} ${res.statusText}${body ? ': ' + body : ''}`)
+    const text = await res.text().catch(() => '')
+    let message = `${res.status} ${res.statusText}`
+    try {
+      const parsed = JSON.parse(text)
+      if (parsed.detail) message = String(parsed.detail)
+    } catch { /* keep default */ }
+    const err = new Error(message)
+    ;(err as any).status = res.status
+    throw err
   }
   if (res.status === 204) return undefined as T
   return res.json() as Promise<T>

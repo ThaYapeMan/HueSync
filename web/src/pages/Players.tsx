@@ -76,6 +76,7 @@ export function Players() {
   const [form, setForm] = useState<FormState>(defaultForm())
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
+  const [nameError, setNameError] = useState<string | null>(null)
   const [lmsPlayers, setLmsPlayers] = useState<LmsPlayer[]>([])
   const [discovering, setDiscovering] = useState(false)
   const [discoverError, setDiscoverError] = useState<string | null>(null)
@@ -101,6 +102,7 @@ export function Players() {
     setForm(defaultForm())
     setLmsPlayers([])
     setSaveError(null)
+    setNameError(null)
     setDiscoverError(null)
     setEditorOpen(true)
   }
@@ -110,6 +112,7 @@ export function Players() {
     setForm(defaultForm(player))
     setLmsPlayers([])
     setSaveError(null)
+    setNameError(null)
     setDiscoverError(null)
     setEditorOpen(true)
   }
@@ -141,6 +144,7 @@ export function Players() {
   async function handleSave() {
     setSaving(true)
     setSaveError(null)
+    setNameError(null)
     try {
       if (editingPlayer) {
         await updateVirtualPlayer(editingPlayer.id, {
@@ -165,7 +169,12 @@ export function Players() {
       setEditorOpen(false)
       await load()
     } catch (e) {
-      setSaveError(e instanceof Error ? e.message : 'Save failed')
+      const msg = e instanceof Error ? e.message : 'Save failed'
+      if ((e as any).status === 409) {
+        setNameError(msg)
+      } else {
+        setSaveError(msg)
+      }
     } finally {
       setSaving(false)
     }
@@ -315,12 +324,14 @@ export function Players() {
                     onChange={(e) => set('lms_port', e.target.value)}
                   />
                 </FormRow>
-                <FormRow label="Player name">
+                <div className="space-y-1">
+                  <Label className="text-sm">Player name</Label>
                   <Input
                     value={form.player_name}
-                    onChange={(e) => set('player_name', e.target.value)}
+                    onChange={(e) => { set('player_name', e.target.value); setNameError(null) }}
                   />
-                </FormRow>
+                  {nameError && <p className="text-xs text-destructive">{nameError}</p>}
+                </div>
                 <FormRow label="ALSA device">
                   <Input
                     value={form.alsa_device}

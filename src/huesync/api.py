@@ -310,6 +310,30 @@ _C_COUPLING_DIRECT_FIELDS: frozenset[str] = frozenset({
 })
 
 
+def _assert_name_unique(
+    name: str,
+    id_names: list[tuple[str, str]],
+    entity_label: str,
+    exclude_id: str | None = None,
+) -> None:
+    lower = name.strip().lower()
+    for eid, ename in id_names:
+        if eid != exclude_id and ename.strip().lower() == lower:
+            raise HTTPException(status_code=409, detail=f"{entity_label} name already in use")
+
+
+def _unique_copy_name(base: str, existing_lower: set[str]) -> str:
+    candidate = f"{base} (copy)"
+    if candidate.lower() not in existing_lower:
+        return candidate
+    n = 2
+    while True:
+        candidate = f"{base} (copy {n})"
+        if candidate.lower() not in existing_lower:
+            return candidate
+        n += 1
+
+
 async def _apply_coupling_action(
     coupling: Coupling,
     storage: Storage,
@@ -575,6 +599,11 @@ async def create_virtual_player(request: Request, body: VirtualPlayerCreateBody)
     if body.type not in VIRTUAL_PLAYER_TYPES:
         raise HTTPException(status_code=422, detail=f"Unknown player type {body.type!r}")
     storage = _storage(request)
+    _assert_name_unique(
+        body.player_name,
+        [(p.id, p.player_name) for p in storage.list_virtual_players()],
+        "VirtualPlayer",
+    )
     mac = body.player_mac or generate_locally_administered_mac()
     player = VirtualPlayer(
         type=VirtualPlayerType(body.type),
@@ -610,6 +639,13 @@ async def patch_virtual_player(player_id: str, request: Request, body: VirtualPl
         if updates["type"] not in VIRTUAL_PLAYER_TYPES:
             raise HTTPException(status_code=422, detail=f"Unknown player type {updates['type']!r}")
         updates["type"] = VirtualPlayerType(updates["type"])
+    if "player_name" in updates:
+        _assert_name_unique(
+            updates["player_name"],
+            [(p.id, p.player_name) for p in storage.list_virtual_players()],
+            "VirtualPlayer",
+            exclude_id=player_id,
+        )
     for field, value in updates.items():
         setattr(player, field, value)
     storage.save_virtual_player(player)
@@ -641,6 +677,7 @@ async def list_zones(request: Request):
 @router.post("/zones", status_code=201)
 async def create_zone(request: Request, body: ZoneCreateBody):
     storage = _storage(request)
+    _assert_name_unique(body.name, [(z.id, z.name) for z in storage.list_zones()], "Zone")
     zone = Zone(
         name=body.name,
         controller_id=body.controller_id,
@@ -668,6 +705,13 @@ async def patch_zone(zone_id: str, request: Request, body: ZonePatchBody):
     if zone is None:
         raise HTTPException(status_code=404, detail="Zone not found")
     updates = body.model_dump(exclude_unset=True)
+    if "name" in updates:
+        _assert_name_unique(
+            updates["name"],
+            [(z.id, z.name) for z in storage.list_zones()],
+            "Zone",
+            exclude_id=zone_id,
+        )
     for field, value in updates.items():
         setattr(zone, field, value)
     storage.save_zone(zone)
@@ -727,6 +771,7 @@ async def list_analysers(request: Request):
 @router.post("/analysers", status_code=201)
 async def create_analyser(request: Request, body: AnalyserCreateBody):
     storage = _storage(request)
+    _assert_name_unique(body.name, [(a.id, a.name) for a in storage.list_analysers()], "Analyser")
     ac = Analyser(
         name=body.name,
         onset_method=body.onset_method,
@@ -759,6 +804,13 @@ async def patch_analyser(ac_id: str, request: Request, body: AnalyserPatchBody):
     if ac is None:
         raise HTTPException(status_code=404, detail="Analyser not found")
     updates = body.model_dump(exclude_unset=True)
+    if "name" in updates:
+        _assert_name_unique(
+            updates["name"],
+            [(a.id, a.name) for a in storage.list_analysers()],
+            "Analyser",
+            exclude_id=ac_id,
+        )
     for field, value in updates.items():
         setattr(ac, field, value)
     storage.save_analyser(ac)
@@ -790,6 +842,7 @@ async def list_scenes(request: Request):
 @router.post("/scenes", status_code=201)
 async def create_scene(request: Request, body: SceneCreateBody):
     storage = _storage(request)
+    _assert_name_unique(body.name, [(s.id, s.name) for s in storage.list_scenes()], "Scene")
     if body.effect not in EFFECT_IDS:
         raise HTTPException(
             status_code=422, detail=f"Unknown effect: {body.effect!r}"
@@ -826,6 +879,13 @@ async def patch_scene(scene_id: str, request: Request, body: ScenePatchBody):
     if scene is None:
         raise HTTPException(status_code=404, detail="Scene not found")
     updates = body.model_dump(exclude_unset=True)
+    if "name" in updates:
+        _assert_name_unique(
+            updates["name"],
+            [(s.id, s.name) for s in storage.list_scenes()],
+            "Scene",
+            exclude_id=scene_id,
+        )
     for field, value in updates.items():
         if field == "effect" and value not in EFFECT_IDS:
             raise HTTPException(
@@ -864,6 +924,9 @@ async def list_crossfaders(request: Request):
 @router.post("/crossfaders", status_code=201)
 async def create_crossfader(request: Request, body: CrossfaderCreateBody):
     storage = _storage(request)
+    _assert_name_unique(
+        body.name, [(x.id, x.name) for x in storage.list_crossfaders()], "Crossfader"
+    )
     cf = Crossfader(
         name=body.name,
         active_scene_id=body.active_scene_id,
@@ -892,6 +955,13 @@ async def patch_crossfader(cf_id: str, request: Request, body: CrossfaderPatchBo
     if cf is None:
         raise HTTPException(status_code=404, detail="Crossfader not found")
     updates = body.model_dump(exclude_unset=True)
+    if "name" in updates:
+        _assert_name_unique(
+            updates["name"],
+            [(x.id, x.name) for x in storage.list_crossfaders()],
+            "Crossfader",
+            exclude_id=cf_id,
+        )
     for field, value in updates.items():
         setattr(cf, field, value)
     storage.save_crossfader(cf)
@@ -923,6 +993,9 @@ async def list_couplings(request: Request):
 @router.post("/couplings", status_code=201)
 async def create_coupling(request: Request, body: CouplingCreateBody):
     storage = _storage(request)
+    _assert_name_unique(
+        body.name, [(c.id, c.name) for c in storage.list_couplings()], "Coupling"
+    )
     coupling = Coupling(
         name=body.name,
         player_id=body.player_id,
@@ -1034,6 +1107,14 @@ async def patch_coupling(coupling_id: str, request: Request, body: CouplingPatch
     if not updates:
         return coupling.to_dict()
 
+    if "name" in updates:
+        _assert_name_unique(
+            updates["name"],
+            [(c.id, c.name) for c in storage.list_couplings()],
+            "Coupling",
+            exclude_id=coupling_id,
+        )
+
     was_active = storage.get_active_coupling_id() == coupling_id
 
     # Resolve sub-entities for inline field updates
@@ -1123,13 +1204,26 @@ async def clone_coupling(coupling_id: str, request: Request):
     if ac is None or cf is None or scene is None:
         raise HTTPException(status_code=422, detail="Coupling has missing sub-entities")
 
-    new_ac = replace(ac, id=str(uuid.uuid4()))
-    new_scene = replace(scene, id=str(uuid.uuid4()))
-    new_cf = replace(cf, id=str(uuid.uuid4()), active_scene_id=new_scene.id)
+    new_ac = replace(
+        ac,
+        id=str(uuid.uuid4()),
+        name=_unique_copy_name(ac.name, {a.name.lower() for a in storage.list_analysers()}),
+    )
+    new_scene = replace(
+        scene,
+        id=str(uuid.uuid4()),
+        name=_unique_copy_name(scene.name, {s.name.lower() for s in storage.list_scenes()}),
+    )
+    new_cf = replace(
+        cf,
+        id=str(uuid.uuid4()),
+        active_scene_id=new_scene.id,
+        name=_unique_copy_name(cf.name, {x.name.lower() for x in storage.list_crossfaders()}),
+    )
     new_coupling = replace(
         coupling,
         id=str(uuid.uuid4()),
-        name=f"{coupling.name} (copy)",
+        name=_unique_copy_name(coupling.name, {c.name.lower() for c in storage.list_couplings()}),
         analyser_id=new_ac.id,
         crossfader_id=new_cf.id,
     )
