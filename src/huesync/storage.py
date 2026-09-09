@@ -19,8 +19,8 @@ from .models import (
     Analyser,
     Controller,
     Coupling,
-    Crossfader,
     Effect,
+    EnergyProfile,
     PlayerLatency,
     VirtualPlayer,
     Zone,
@@ -229,26 +229,26 @@ class Storage:
             data["scenes"] = [x for x in data["scenes"] if x["id"] != effect_id]
             self._write(data)
 
-    # -- Crossfaders --------------------------------------------------------
+    # -- EnergyProfiles (stored under "crossfaders" key for backward compat) --
 
-    def list_crossfaders(self) -> list[Crossfader]:
+    def list_energy_profiles(self) -> list[EnergyProfile]:
         with _lock:
-            return [Crossfader.from_dict(x) for x in self._read()["crossfaders"]]
+            return [EnergyProfile.from_dict(x) for x in self._read()["crossfaders"]]
 
-    def get_crossfader(self, crossfader_id: str) -> Crossfader | None:
-        return next((x for x in self.list_crossfaders() if x.id == crossfader_id), None)
+    def get_energy_profile(self, ep_id: str) -> EnergyProfile | None:
+        return next((x for x in self.list_energy_profiles() if x.id == ep_id), None)
 
-    def save_crossfader(self, crossfader: Crossfader) -> None:
+    def save_energy_profile(self, ep: EnergyProfile) -> None:
         with _lock:
             data = self._read()
-            data["crossfaders"] = [x for x in data["crossfaders"] if x["id"] != crossfader.id]
-            data["crossfaders"].append(crossfader.to_dict())
+            data["crossfaders"] = [x for x in data["crossfaders"] if x["id"] != ep.id]
+            data["crossfaders"].append(ep.to_dict())
             self._write(data)
 
-    def delete_crossfader(self, crossfader_id: str) -> None:
+    def delete_energy_profile(self, ep_id: str) -> None:
         with _lock:
             data = self._read()
-            data["crossfaders"] = [x for x in data["crossfaders"] if x["id"] != crossfader_id]
+            data["crossfaders"] = [x for x in data["crossfaders"] if x["id"] != ep_id]
             self._write(data)
 
     # -- Couplings ----------------------------------------------------------
@@ -280,11 +280,13 @@ class Storage:
 
         Migrations applied (in order):
         1. mellow_colour_mode → separate Effect clone per coupling
-        2. color_mode → effect rename in scene dicts
+        2. color_mode / effect → effect_type in scene dicts
         3. render_configs key → scenes key
         4. light_providers key → zones key
         5. light_provider_id → zone_id on couplings
-        6. render_config_id + mix fields → Crossfader entity per coupling
+        6. render_config_id + mix fields → EnergyProfile entity per coupling
+        6b. old EnergyProfile field names → new names (active_scene_id etc.)
+        6c. crossfader_id → energy_profile_id on couplings
         7. analysis_config_id → analyser_id on couplings
         """
         import uuid as _uuid
@@ -299,8 +301,9 @@ class Storage:
 
             for c in data.get("couplings", []):
                 # Only run the old mellow migration if the coupling still has
-                # render_config_id (not yet migrated to crossfader_id).
-                if c.get("crossfader_id") or not c.get("render_config_id"):
+                # render_config_id (not yet migrated to an energy_profile_id).
+                has_ep = c.get("crossfader_id") or c.get("energy_profile_id")
+                if has_ep or not c.get("render_config_id"):
                     continue
                 if c.get("mellow_render_config_id"):
                     continue  # already done the mellow clone step
@@ -374,12 +377,12 @@ class Storage:
                     c.pop("light_provider_id")
                     changed = True
 
-            # --- Step 6: render_config_id + mix fields → Crossfader per coupling ---
-            # Create one Crossfader per coupling that has render_config_id but no crossfader_id.
-            cf_by_id: dict = {cf["id"]: cf for cf in data.get("crossfaders", [])}
+            # --- Step 6: render_config_id + mix fields → EnergyProfile per coupling ---
+            # Create one EnergyProfile per coupling with render_config_id but no energy_profile_id.
+            ep_by_id: dict = {ep["id"]: ep for ep in data.get("crossfaders", [])}
 
             for c in data.get("couplings", []):
-                if c.get("crossfader_id"):
+                if c.get("crossfader_id") or c.get("energy_profile_id"):
                     continue  # already migrated
                 rc_id = c.pop("render_config_id", "")
                 mellow_rc_id = c.pop("mellow_render_config_id", "")
@@ -387,20 +390,45 @@ class Storage:
                 high = c.pop("mix_high_threshold", 0.7)
                 alpha = c.pop("mix_ema_alpha", 0.1)
 
-                cf_id = str(_uuid.uuid4())
-                cf = {
-                    "id": cf_id,
-                    "name": c.get("name", "Crossfader") + " Crossfader",
-                    "active_scene_id": rc_id,
-                    "mellow_scene_id": mellow_rc_id if mellow_rc_id != rc_id else "",
-                    "low_threshold": low,
-                    "high_threshold": high,
-                    "fade_speed": alpha,
+                ep_id = str(_uuid.uuid4())
+                ep = {
+                    "id": ep_id,
+                    "name": c.get("name", "EnergyProfile") + " EnergyProfile",
+                    "high_energy_effect_id": rc_id,
+                    "low_energy_effect_id": mellow_rc_id if mellow_rc_id != rc_id else "",
+                    "blend_start": low,
+                    "blend_end": high,
+                    "blend_response": alpha,
                 }
-                data.setdefault("crossfaders", []).append(cf)
-                cf_by_id[cf_id] = cf
-                c["crossfader_id"] = cf_id
+                data.setdefault("crossfaders", []).append(ep)
+                ep_by_id[ep_id] = ep
+                c["energy_profile_id"] = ep_id
                 changed = True
+
+            # --- Step 6b: upgrade old EnergyProfile field names in existing raw dicts ---
+            for ep in data.get("crossfaders", []):
+                for old, new in (
+                    ("active_scene_id", "high_energy_effect_id"),
+                    ("mellow_scene_id", "low_energy_effect_id"),
+                    ("low_threshold", "blend_start"),
+                    ("high_threshold", "blend_end"),
+                    ("fade_speed", "blend_response"),
+                ):
+                    if old in ep and new not in ep:
+                        ep[new] = ep.pop(old)
+                        changed = True
+                    elif old in ep:
+                        ep.pop(old)
+                        changed = True
+
+            # --- Step 6c: crossfader_id → energy_profile_id on couplings ---
+            for c in data.get("couplings", []):
+                if "crossfader_id" in c and "energy_profile_id" not in c:
+                    c["energy_profile_id"] = c.pop("crossfader_id")
+                    changed = True
+                elif "crossfader_id" in c:
+                    c.pop("crossfader_id")
+                    changed = True
 
             # --- Step 7: analysis_config_id → analyser_id on couplings ---
             for c in data.get("couplings", []):

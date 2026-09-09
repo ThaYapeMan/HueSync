@@ -77,30 +77,30 @@ def test_migrate_creates_mellow_scene_from_old_format(tmp_path: Path):
     storage = Storage(config)
     storage.migrate()
 
-    # Coupling now has crossfader_id set.
+    # Coupling now has energy_profile_id set.
     couplings = storage.list_couplings()
     assert len(couplings) == 1
     c = couplings[0]
-    assert c.crossfader_id != ""
+    assert c.energy_profile_id != ""
     # Coupling no longer has zone_id from the old lp (just migrated).
     assert c.zone_id == "lp-1"
 
     # A crossfader was created with the mix params.
-    crossfaders = storage.list_crossfaders()
+    crossfaders = storage.list_energy_profiles()
     assert len(crossfaders) == 1
     cf = crossfaders[0]
-    assert cf.low_threshold == 0.2
-    assert cf.high_threshold == 0.6
-    assert cf.fade_speed == 0.05
-    assert cf.active_scene_id == rc_id
+    assert cf.blend_start == 0.2
+    assert cf.blend_end == 0.6
+    assert cf.blend_response == 0.05
+    assert cf.high_energy_effect_id == rc_id
 
     # Mellow scene was created (different colour mode).
-    assert cf.mellow_scene_id != ""
-    assert cf.mellow_scene_id != rc_id
+    assert cf.low_energy_effect_id != ""
+    assert cf.low_energy_effect_id != rc_id
 
     # Two effects exist: the original and the mellow clone.
     effects = storage.list_effects()
-    mellow_effect = next((e for e in effects if e.id == cf.mellow_scene_id), None)
+    mellow_effect = next((e for e in effects if e.id == cf.low_energy_effect_id), None)
     assert mellow_effect is not None
     assert mellow_effect.effect_type == "mono_pulse"
     assert "(Mellow)" in mellow_effect.name
@@ -108,11 +108,11 @@ def test_migrate_creates_mellow_scene_from_old_format(tmp_path: Path):
     # Calling migrate() again is a no-op (idempotent).
     storage.migrate()
     assert len(storage.list_couplings()) == 1
-    assert storage.list_couplings()[0].crossfader_id == c.crossfader_id
+    assert storage.list_couplings()[0].energy_profile_id == c.energy_profile_id
 
 
 def test_migrate_same_colour_mode_reuses_scene(tmp_path: Path):
-    """migrate() sets mellow_scene_id to empty when modes are the same."""
+    """migrate() sets low_energy_effect_id to empty when modes are the same."""
     config = tmp_path / "config.json"
     rc_id = "rc-same"
     old_data = {
@@ -154,11 +154,11 @@ def test_migrate_same_colour_mode_reuses_scene(tmp_path: Path):
     storage.migrate()
 
     c = storage.list_couplings()[0]
-    # Crossfader was created; mellow_scene_id is empty (same mode).
-    assert c.crossfader_id != ""
-    cf = storage.get_crossfader(c.crossfader_id)
+    # EnergyProfile was created; low_energy_effect_id is empty (same mode).
+    assert c.energy_profile_id != ""
+    cf = storage.get_energy_profile(c.energy_profile_id)
     assert cf is not None
-    assert cf.mellow_scene_id == ""
+    assert cf.low_energy_effect_id == ""
     # Only the original effect exists (no clone was created).
     assert len(storage.list_effects()) == 1
 
@@ -374,7 +374,7 @@ def test_migrate_analysis_config_id_to_analyser_id_on_coupling(tmp_path: Path):
                 "player_id": "p-1",
                 "analysis_config_id": "ac-1",
                 "zone_id": "z-1",
-                "crossfader_id": "cf-1",
+                "energy_profile_id": "cf-1",
                 "enabled": True,
             }
         ],
@@ -432,4 +432,4 @@ def test_migrate_light_provider_id_to_zone_id_on_coupling(tmp_path: Path):
 
     c = storage.list_couplings()[0]
     assert c.zone_id == "lp-1"
-    assert c.crossfader_id != ""
+    assert c.energy_profile_id != ""

@@ -55,8 +55,8 @@ def _build_engine_profile(coupling: Coupling, storage: Storage) -> Profile | Non
     player = storage.get_virtual_player(coupling.player_id)
     zone   = storage.get_zone(coupling.zone_id)
     ac     = storage.get_analyser(coupling.analyser_id)
-    cf     = storage.get_crossfader(coupling.crossfader_id)
-    effect = storage.get_effect(cf.active_scene_id) if cf else None
+    cf     = storage.get_energy_profile(coupling.energy_profile_id)
+    effect = storage.get_effect(cf.high_energy_effect_id) if cf else None
     if not all([player, zone, ac, cf, effect]):
         return None
     return Profile(
@@ -75,9 +75,9 @@ def _build_engine_profile(coupling: Coupling, storage: Storage) -> Profile | Non
         effect_type=effect.effect_type,
         effect_speed=effect.effect_speed,
         effect_decay=effect.effect_decay,
-        mix_low_threshold=cf.low_threshold,
-        mix_high_threshold=cf.high_threshold,
-        mix_ema_alpha=cf.fade_speed,
+        blend_start=cf.blend_start,
+        blend_end=cf.blend_end,
+        blend_response=cf.blend_response,
         sensitivity=effect.sensitivity,
         brightness_floor=effect.brightness_floor,
         bass_hz=effect.bass_hz,
@@ -98,16 +98,16 @@ def _build_engine_profile(coupling: Coupling, storage: Storage) -> Profile | Non
 
 
 def _build_mellow_profile(coupling: Coupling, storage: Storage) -> Profile | None:
-    """Build a Profile for the mellow (quiet-passage) layer from the Crossfader's mellow Effect.
+    """Build a Profile for the low-energy (quiet-passage) layer from the EnergyProfile's low Effect.
 
-    Returns None if the crossfader has no mellow_scene_id or the entity is
+    Returns None if the energy profile has no low_energy_effect_id or the entity is
     missing — the caller (SyncEngine) then falls back to the active profile for
     both layers, which is a valid no-op state.
     """
-    cf = storage.get_crossfader(coupling.crossfader_id)
-    if not cf or not cf.mellow_scene_id:
+    cf = storage.get_energy_profile(coupling.energy_profile_id)
+    if not cf or not cf.low_energy_effect_id:
         return None
-    mellow_effect = storage.get_effect(cf.mellow_scene_id)
+    mellow_effect = storage.get_effect(cf.low_energy_effect_id)
     if mellow_effect is None:
         return None
 
@@ -134,9 +134,9 @@ def _build_mellow_profile(coupling: Coupling, storage: Storage) -> Profile | Non
         effect_type=mellow_effect.effect_type,
         effect_speed=mellow_effect.effect_speed,
         effect_decay=mellow_effect.effect_decay,
-        mix_low_threshold=cf.low_threshold,
-        mix_high_threshold=cf.high_threshold,
-        mix_ema_alpha=cf.fade_speed,
+        blend_start=cf.blend_start,
+        blend_end=cf.blend_end,
+        blend_response=cf.blend_response,
         sensitivity=mellow_effect.sensitivity,
         brightness_floor=mellow_effect.brightness_floor,
         bass_hz=mellow_effect.bass_hz,
@@ -381,8 +381,8 @@ class PlayerManager:
         player = self.storage.get_virtual_player(coupling.player_id)
         zone = self.storage.get_zone(coupling.zone_id)
         ac = self.storage.get_analyser(coupling.analyser_id)
-        cf = self.storage.get_crossfader(coupling.crossfader_id)
-        effect = self.storage.get_effect(cf.active_scene_id) if cf else None
+        cf = self.storage.get_energy_profile(coupling.energy_profile_id)
+        effect = self.storage.get_effect(cf.high_energy_effect_id) if cf else None
 
         if not player:
             raise ValueError(f"Coupling references missing VirtualPlayer {coupling.player_id!r}")
@@ -396,11 +396,11 @@ class PlayerManager:
             )
         if not cf:
             raise ValueError(
-                f"Coupling references missing Crossfader {coupling.crossfader_id!r}"
+                f"Coupling references missing EnergyProfile {coupling.energy_profile_id!r}"
             )
         if not effect:
             raise ValueError(
-                f"Crossfader references missing Effect {cf.active_scene_id!r}"
+                f"EnergyProfile references missing Effect {cf.high_energy_effect_id!r}"
             )
 
         controller = self.storage.get_controller(zone.controller_id)
@@ -439,9 +439,9 @@ class PlayerManager:
             effect_type=effect.effect_type,
             effect_speed=effect.effect_speed,
             effect_decay=effect.effect_decay,
-            mix_low_threshold=cf.low_threshold,
-            mix_high_threshold=cf.high_threshold,
-            mix_ema_alpha=cf.fade_speed,
+            blend_start=cf.blend_start,
+            blend_end=cf.blend_end,
+            blend_response=cf.blend_response,
             sensitivity=effect.sensitivity,
             brightness_floor=effect.brightness_floor,
             bass_hz=effect.bass_hz,

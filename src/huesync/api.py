@@ -27,8 +27,8 @@ from .models import (
     Controller,
     ControllerType,
     Coupling,
-    Crossfader,
     Effect,
+    EnergyProfile,
     PlayerLatency,
     VirtualPlayer,
     VirtualPlayerType,
@@ -177,23 +177,23 @@ class EffectPatchBody(BaseModel):
     onset_flash_intensity: float | None = None
 
 
-class CrossfaderCreateBody(BaseModel):
-    name: str = "Default Crossfader"
-    active_scene_id: str
-    mellow_scene_id: str = ""
-    low_threshold: float = 0.3
-    high_threshold: float = 0.7
-    fade_speed: float = 0.1
+class EnergyProfileCreateBody(BaseModel):
+    name: str = "Default EnergyProfile"
+    high_energy_effect_id: str
+    low_energy_effect_id: str = ""
+    blend_start: float = 0.3
+    blend_end: float = 0.7
+    blend_response: float = 0.1
 
 
-class CrossfaderPatchBody(BaseModel):
+class EnergyProfilePatchBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str | None = None
-    active_scene_id: str | None = None
-    mellow_scene_id: str | None = None
-    low_threshold: float | None = None
-    high_threshold: float | None = None
-    fade_speed: float | None = None
+    high_energy_effect_id: str | None = None
+    low_energy_effect_id: str | None = None
+    blend_start: float | None = None
+    blend_end: float | None = None
+    blend_response: float | None = None
 
 
 class CouplingCreateBody(BaseModel):
@@ -201,7 +201,7 @@ class CouplingCreateBody(BaseModel):
     player_id: str
     analyser_id: str
     zone_id: str
-    crossfader_id: str
+    energy_profile_id: str
     enabled: bool = True
 
 
@@ -224,7 +224,7 @@ class CouplingPatchBody(BaseModel):
     zone_id: str | None = None
     # FK live update (no deactivate)
     analyser_id: str | None = None
-    crossfader_id: str | None = None
+    energy_profile_id: str | None = None
     # Player inline (deactivate if active)
     lms_host: str | None = None
     lms_port: int | None = None
@@ -270,8 +270,8 @@ _C_DEACTIVATE_FIELDS: frozenset[str] = frozenset({
 # FK fields that do NOT require a full restart — handled via lighter live-update
 # paths in _apply_coupling_action().
 _C_LIVE_FK_FIELDS: frozenset[str] = frozenset({
-    "analyser_id",   # → cava restart + PCM pipeline rebuild
-    "crossfader_id", # → update_render only
+    "analyser_id",        # → cava restart + PCM pipeline rebuild
+    "energy_profile_id",  # → update_render only
 })
 _C_CAVA_FIELDS: frozenset[str] = frozenset({
     "bars", "lower_cutoff_freq", "higher_cutoff_freq",
@@ -282,9 +282,9 @@ _C_PCM_FIELDS: frozenset[str] = frozenset({
 })
 _C_RENDER_FIELDS: frozenset[str] = frozenset({
     "entertainment_area_name", "light_count",
-    # Crossfader patch fields that propagate render changes:
-    "active_scene_id", "mellow_scene_id",
-    "low_threshold", "high_threshold", "fade_speed",
+    # EnergyProfile patch fields that propagate render changes:
+    "high_energy_effect_id", "low_energy_effect_id",
+    "blend_start", "blend_end", "blend_response",
 })
 
 # Which sub-entity owns each inline field in CouplingPatchBody
@@ -301,7 +301,7 @@ _C_EFFECT_INLINE: frozenset[str] = frozenset({
 })
 _C_ZONE_INLINE: frozenset[str] = frozenset({"entertainment_area_name", "light_count"})
 _C_FK_FIELDS: frozenset[str] = frozenset({
-    "player_id", "zone_id", "analyser_id", "crossfader_id",
+    "player_id", "zone_id", "analyser_id", "energy_profile_id",
 })
 # Fields that live directly on Coupling (not on a sub-entity) and are set
 # via setattr(coupling, field, value) in the patch handler.
@@ -354,7 +354,7 @@ async def _apply_coupling_action(
         await manager.deactivate()
         return
     # analyser_id swap: treat as cava + PCM change (new Analyser replaces all
-    # its fields: bars, cutoffs, onset params).  crossfader_id alone falls
+    # its fields: bars, cutoffs, onset params).  energy_profile_id alone falls
     # through to update_render() only.
     if changed & (_C_CAVA_FIELDS | {"analyser_id"}):
         await manager.restart_cava()
@@ -894,14 +894,14 @@ async def patch_scene(scene_id: str, request: Request, body: EffectPatchBody):
         setattr(effect, field, value)
     storage.save_effect(effect)
     # Trigger render/pcm update if the active coupling uses this Effect
-    # (via its crossfader's active_scene_id).
+    # (via its energy_profile's high_energy_effect_id).
     active_id = storage.get_active_coupling_id()
     active_fields = set(updates.keys()) - {"name"}
     if active_fields and active_id:
         coupling = storage.get_coupling(active_id)
-        if coupling and coupling.crossfader_id:
-            cf = storage.get_crossfader(coupling.crossfader_id)
-            if cf and cf.active_scene_id == scene_id:
+        if coupling and coupling.energy_profile_id:
+            cf = storage.get_energy_profile(coupling.energy_profile_id)
+            if cf and cf.high_energy_effect_id == scene_id:
                 await _apply_coupling_action(coupling, storage, manager, active_fields)
     return effect.to_dict()
 
@@ -912,72 +912,72 @@ async def delete_scene(scene_id: str, request: Request):
 
 
 # ---------------------------------------------------------------------------
-# Crossfaders
+# EnergyProfiles (route paths stay /crossfaders — Fase 3)
 # ---------------------------------------------------------------------------
 
 
 @router.get("/crossfaders")
 async def list_crossfaders(request: Request):
-    return [cf.to_dict() for cf in _storage(request).list_crossfaders()]
+    return [ep.to_dict() for ep in _storage(request).list_energy_profiles()]
 
 
 @router.post("/crossfaders", status_code=201)
-async def create_crossfader(request: Request, body: CrossfaderCreateBody):
+async def create_crossfader(request: Request, body: EnergyProfileCreateBody):
     storage = _storage(request)
     _assert_name_unique(
-        body.name, [(x.id, x.name) for x in storage.list_crossfaders()], "Crossfader"
+        body.name, [(x.id, x.name) for x in storage.list_energy_profiles()], "EnergyProfile"
     )
-    cf = Crossfader(
+    ep = EnergyProfile(
         name=body.name,
-        active_scene_id=body.active_scene_id,
-        mellow_scene_id=body.mellow_scene_id,
-        low_threshold=body.low_threshold,
-        high_threshold=body.high_threshold,
-        fade_speed=body.fade_speed,
+        high_energy_effect_id=body.high_energy_effect_id,
+        low_energy_effect_id=body.low_energy_effect_id,
+        blend_start=body.blend_start,
+        blend_end=body.blend_end,
+        blend_response=body.blend_response,
     )
-    storage.save_crossfader(cf)
-    return JSONResponse(content=cf.to_dict(), status_code=201)
+    storage.save_energy_profile(ep)
+    return JSONResponse(content=ep.to_dict(), status_code=201)
 
 
 @router.get("/crossfaders/{cf_id}")
 async def get_crossfader(cf_id: str, request: Request):
-    cf = _storage(request).get_crossfader(cf_id)
-    if cf is None:
-        raise HTTPException(status_code=404, detail="Crossfader not found")
-    return cf.to_dict()
+    ep = _storage(request).get_energy_profile(cf_id)
+    if ep is None:
+        raise HTTPException(status_code=404, detail="EnergyProfile not found")
+    return ep.to_dict()
 
 
 @router.patch("/crossfaders/{cf_id}")
-async def patch_crossfader(cf_id: str, request: Request, body: CrossfaderPatchBody):
+async def patch_crossfader(cf_id: str, request: Request, body: EnergyProfilePatchBody):
     storage = _storage(request)
     manager = _manager(request)
-    cf = storage.get_crossfader(cf_id)
-    if cf is None:
-        raise HTTPException(status_code=404, detail="Crossfader not found")
+    ep = storage.get_energy_profile(cf_id)
+    if ep is None:
+        raise HTTPException(status_code=404, detail="EnergyProfile not found")
     updates = body.model_dump(exclude_unset=True)
     if "name" in updates:
         _assert_name_unique(
             updates["name"],
-            [(x.id, x.name) for x in storage.list_crossfaders()],
-            "Crossfader",
+            [(x.id, x.name) for x in storage.list_energy_profiles()],
+            "EnergyProfile",
             exclude_id=cf_id,
         )
     for field, value in updates.items():
-        setattr(cf, field, value)
-    storage.save_crossfader(cf)
-    # If the active coupling uses this crossfader, trigger update_render.
+        setattr(ep, field, value)
+    storage.save_energy_profile(ep)
+    # If the active coupling uses this EnergyProfile, trigger update_render.
     active_id = storage.get_active_coupling_id()
     active_fields = set(updates.keys()) - {"name"}
     if active_fields and active_id:
         coupling = storage.get_coupling(active_id)
-        if coupling and coupling.crossfader_id == cf_id:
+        if coupling and coupling.energy_profile_id == cf_id:
             await _apply_coupling_action(coupling, storage, manager, active_fields)
-    return cf.to_dict()
+    return ep.to_dict()
 
 
 @router.delete("/crossfaders/{cf_id}", status_code=204)
 async def delete_crossfader(cf_id: str, request: Request):
-    _storage(request).delete_crossfader(cf_id)
+    _storage(request).delete_energy_profile(cf_id)
 
 
 # ---------------------------------------------------------------------------
@@ -1001,7 +1001,7 @@ async def create_coupling(request: Request, body: CouplingCreateBody):
         player_id=body.player_id,
         analyser_id=body.analyser_id,
         zone_id=body.zone_id,
-        crossfader_id=body.crossfader_id,
+        energy_profile_id=body.energy_profile_id,
         enabled=body.enabled,
     )
     storage.save_coupling(coupling)
@@ -1063,9 +1063,9 @@ async def restart_coupling_cava(
             ac.higher_cutoff_freq = body.higher_cutoff_freq
         storage.save_analyser(ac)
 
-        crossfader = storage.get_crossfader(coupling.crossfader_id)
+        crossfader = storage.get_energy_profile(coupling.energy_profile_id)
         if crossfader is not None:
-            effect = storage.get_effect(crossfader.active_scene_id)
+            effect = storage.get_effect(crossfader.high_energy_effect_id)
             if effect is not None:
                 changed_effect = False
                 if body.bass_hz is not None:
@@ -1129,10 +1129,13 @@ async def patch_coupling(coupling_id: str, request: Request, body: CouplingPatch
         if coupling.zone_id
         else None
     )
-    cf_inline = storage.get_crossfader(coupling.crossfader_id) if coupling.crossfader_id else None
+    cf_inline = (
+        storage.get_energy_profile(coupling.energy_profile_id)
+        if coupling.energy_profile_id else None
+    )
     effect_inline = (
-        storage.get_effect(cf_inline.active_scene_id)
-        if cf_inline and cf_inline.active_scene_id
+        storage.get_effect(cf_inline.high_energy_effect_id)
+        if cf_inline and cf_inline.high_energy_effect_id
         else None
     )
 
@@ -1187,7 +1190,7 @@ async def delete_coupling(coupling_id: str, request: Request):
 
 @router.post("/couplings/{coupling_id}/clone", status_code=201)
 async def clone_coupling(coupling_id: str, request: Request):
-    """Deep-clone a Coupling with fresh Analyser, Effect, and Crossfader copies.
+    """Deep-clone a Coupling with fresh Analyser, Effect, and EnergyProfile copies.
 
     The Player and Zone references are shared (not cloned).
     The new Coupling is named "<original name> (copy)".
@@ -1199,8 +1202,8 @@ async def clone_coupling(coupling_id: str, request: Request):
         raise HTTPException(status_code=404, detail="Coupling not found")
 
     ac = storage.get_analyser(coupling.analyser_id)
-    cf = storage.get_crossfader(coupling.crossfader_id)
-    effect = storage.get_effect(cf.active_scene_id) if cf else None
+    cf = storage.get_energy_profile(coupling.energy_profile_id)
+    effect = storage.get_effect(cf.high_energy_effect_id) if cf else None
     if ac is None or cf is None or effect is None:
         raise HTTPException(status_code=422, detail="Coupling has missing sub-entities")
 
@@ -1217,20 +1220,22 @@ async def clone_coupling(coupling_id: str, request: Request):
     new_cf = replace(
         cf,
         id=str(uuid.uuid4()),
-        active_scene_id=new_effect.id,
-        name=_unique_copy_name(cf.name, {x.name.lower() for x in storage.list_crossfaders()}),
+        high_energy_effect_id=new_effect.id,
+        name=_unique_copy_name(
+            cf.name, {x.name.lower() for x in storage.list_energy_profiles()}
+        ),
     )
     new_coupling = replace(
         coupling,
         id=str(uuid.uuid4()),
         name=_unique_copy_name(coupling.name, {c.name.lower() for c in storage.list_couplings()}),
         analyser_id=new_ac.id,
-        crossfader_id=new_cf.id,
+        energy_profile_id=new_cf.id,
     )
 
     storage.save_analyser(new_ac)
     storage.save_effect(new_effect)
-    storage.save_crossfader(new_cf)
+    storage.save_energy_profile(new_cf)
     storage.save_coupling(new_coupling)
 
     return new_coupling.to_dict()

@@ -175,7 +175,7 @@ that was the original source of warmup-state interference in A/B comparisons.
 |---|---|---|
 | deactivate | `player_id`, `zone_id`, `lms_host`, `lms_port`, `player_name`, `alsa_device` | Full deactivate |
 | live FK | `analyser_id` | `restart_cava()` + `update_onset_pipeline()` |
-| live FK | `crossfader_id` | `update_render()` only |
+| live FK | `energy_profile_id` | `update_render()` only |
 | cava | `bars`, `lower_cutoff_freq`, `higher_cutoff_freq` | `restart_cava()` |
 | pcm | `onset_method`, `onset_delta`, `onset_alpha`, `superflux_mu`, `superflux_lag`, `bass_hz`, `mid_hz` | `SyncEngine.update_onset_pipeline()` |
 | render | `sensitivity`, `brightness_floor`, `exertion_clip`, `onset_flash_intensity`, `enabled`, `entertainment_area_name`, `light_count` | `SyncEngine.update_render()` |
@@ -200,8 +200,8 @@ does **not** require a full session restart. It is intentionally live-updateable
 there previously and caused lights to freeze (deactivate called, no re-activate).
 The fix is tested by `test_ac_swap_session_remains_active` in `tests/test_api.py`.
 
-Similarly, `crossfader_id` routes to `update_render()` only (no cava restart,
-no deactivate). Edits to a Scene or Crossfader that is in use by the active
+Similarly, `energy_profile_id` routes to `update_render()` only (no cava restart,
+no deactivate). Edits to an Effect or EnergyProfile that is in use by the active
 Coupling also route to `update_render()` directly, bypassing the Coupling PATCH.
 
 ### Timing: lights run AHEAD of Sonos
@@ -249,7 +249,7 @@ AirPlay 2 input (shairport-sync + nqptp) is a one-time setup step:
 | `src/huesync/hue_output.py` | **Only** file importing `hue_entertainment` for streaming: `HueDriver`, `ChannelInfo`, `get_channel_infos()` |
 | `src/huesync/hue_bridge.py` | Controller pairing and Entertainment Area discovery |
 | `src/huesync/player_manager.py` | Process lifecycle: squeezelite + cava + output driver; `activate_coupling()`, `update_onset_pipeline()`, `update_render()` |
-| `src/huesync/models.py` | Seven-entity model: `Controller`, `VirtualPlayer`, `Zone`, `Analyser`, `Scene`, `Crossfader`, `Coupling`; also `Profile` as an internal engine type |
+| `src/huesync/models.py` | Seven-entity model: `Controller`, `VirtualPlayer`, `Zone`, `Analyser`, `Effect`, `EnergyProfile`, `Coupling`; also `Profile` as an internal engine type |
 | `src/huesync/lms_discovery.py` | UDP broadcast discovery of the LMS server |
 | `src/huesync/app.py` | FastAPI web UI |
 | `src/huesync/storage.py` | JSON config persistence |

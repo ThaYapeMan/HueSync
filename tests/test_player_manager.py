@@ -17,8 +17,8 @@ from huesync.models import (
     Controller,
     ControllerType,
     Coupling,
-    Crossfader,
     Effect,
+    EnergyProfile,
     Profile,
     VirtualPlayer,
     VirtualPlayerType,
@@ -232,17 +232,17 @@ def _make_full_storage(tmp_path: Path) -> tuple[Storage, Coupling]:
     )
     storage.save_effect(effect)
 
-    crossfader = Crossfader(
+    crossfader = EnergyProfile(
         id="cf-1", name="Default CF",
-        active_scene_id="scene-1",
-        low_threshold=0.3, high_threshold=0.7, fade_speed=0.1,
+        high_energy_effect_id="scene-1",
+        blend_start=0.3, blend_end=0.7, blend_response=0.1,
     )
-    storage.save_crossfader(crossfader)
+    storage.save_energy_profile(crossfader)
 
     coupling = Coupling(
         id="coupling-1", name="Living Room",
         player_id="player-1", analyser_id="ac-1",
-        zone_id="zone-1", crossfader_id="cf-1", enabled=True,
+        zone_id="zone-1", energy_profile_id="cf-1", enabled=True,
     )
     storage.save_coupling(coupling)
 
@@ -296,7 +296,7 @@ def test_build_profile_from_coupling_returns_none_on_missing_ac(tmp_path: Path) 
 
 def test_build_profile_from_coupling_returns_none_on_missing_crossfader(tmp_path: Path) -> None:
     storage, coupling = _make_full_storage(tmp_path)
-    storage.delete_crossfader("cf-1")
+    storage.delete_energy_profile("cf-1")
     assert _build_engine_profile(coupling, storage) is None
 
 
@@ -340,10 +340,10 @@ def test_activate_coupling_raises_on_missing_analyser(tmp_path: Path) -> None:
 
 def test_activate_coupling_raises_on_missing_crossfader(tmp_path: Path) -> None:
     storage, coupling = _make_full_storage(tmp_path)
-    storage.delete_crossfader("cf-1")
+    storage.delete_energy_profile("cf-1")
     manager = PlayerManager(storage)
 
-    with pytest.raises(ValueError, match="missing Crossfader"):
+    with pytest.raises(ValueError, match="missing EnergyProfile"):
         asyncio.run(manager.activate_coupling(coupling))
 
 
@@ -594,13 +594,13 @@ def _make_airplay_storage(tmp_path: Path) -> tuple[Storage, Coupling]:
     effect = Effect(id="scene-ap", name="Default", effect_type="spectrum_rgb")
     storage.save_effect(effect)
 
-    crossfader = Crossfader(id="cf-ap", name="Default CF", active_scene_id="scene-ap")
-    storage.save_crossfader(crossfader)
+    crossfader = EnergyProfile(id="cf-ap", name="Default CF", high_energy_effect_id="scene-ap")
+    storage.save_energy_profile(crossfader)
 
     coupling = Coupling(
         id="coupling-ap", name="AirPlay Room",
         player_id="player-ap", analyser_id="ac-ap",
-        zone_id="zone-ap", crossfader_id="cf-ap", enabled=True,
+        zone_id="zone-ap", energy_profile_id="cf-ap", enabled=True,
     )
     storage.save_coupling(coupling)
 

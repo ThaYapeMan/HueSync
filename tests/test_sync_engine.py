@@ -707,15 +707,15 @@ def test_layer_mixer_low_energy_stays_mellow():
 
     active_profile = Profile(
         effect_type="mono_pulse",  # active layer → grey
-        mix_low_threshold=0.3,
-        mix_high_threshold=0.7,
-        mix_ema_alpha=1.0,  # EMA alpha=1 → instantaneous, no lag
+        blend_start=0.3,
+        blend_end=0.7,
+        blend_response=1.0,  # EMA alpha=1 → instantaneous, no lag
     )
     mellow_profile = Profile(
         effect_type="spectrum_rgb",  # mellow layer → colours
-        mix_low_threshold=0.3,
-        mix_high_threshold=0.7,
-        mix_ema_alpha=1.0,
+        blend_start=0.3,
+        blend_end=0.7,
+        blend_response=1.0,
     )
     mixer = LayerMixer(active_profile, mellow_profile)
 
@@ -733,15 +733,15 @@ def test_layer_mixer_high_energy_drives_active():
 
     active_profile = Profile(
         effect_type="mono_pulse",
-        mix_low_threshold=0.3,
-        mix_high_threshold=0.7,
-        mix_ema_alpha=1.0,  # instantaneous
+        blend_start=0.3,
+        blend_end=0.7,
+        blend_response=1.0,  # instantaneous
     )
     mellow_profile = Profile(
         effect_type="spectrum_rgb",
-        mix_low_threshold=0.3,
-        mix_high_threshold=0.7,
-        mix_ema_alpha=1.0,
+        blend_start=0.3,
+        blend_end=0.7,
+        blend_response=1.0,
     )
     mixer = LayerMixer(active_profile, mellow_profile)
 
@@ -759,15 +759,15 @@ def test_layer_mixer_smooth_transition_no_jumps():
 
     active_profile = Profile(
         effect_type="mono_pulse",
-        mix_low_threshold=0.2,
-        mix_high_threshold=0.8,
-        mix_ema_alpha=0.3,
+        blend_start=0.2,
+        blend_end=0.8,
+        blend_response=0.3,
     )
     mellow_profile = Profile(
         effect_type="spectrum_rgb",
-        mix_low_threshold=0.2,
-        mix_high_threshold=0.8,
-        mix_ema_alpha=0.3,
+        blend_start=0.2,
+        blend_end=0.8,
+        blend_response=0.3,
     )
     mixer = LayerMixer(active_profile, mellow_profile)
 
@@ -797,17 +797,17 @@ def test_layer_mixer_output_is_lerp_of_layers():
 
     active_profile = Profile(
         effect_type="mono_pulse",
-        mix_low_threshold=energy,
-        mix_high_threshold=energy,  # smoothstep at exactly lo=hi → 0.5 clamp
-        mix_ema_alpha=1.0,
+        blend_start=energy,
+        blend_end=energy,  # smoothstep at exactly lo=hi → 0.5 clamp
+        blend_response=1.0,
         sensitivity=1.0,
         brightness_floor=0.0,
     )
     mellow_profile = Profile(
         effect_type="spectrum_rgb",
-        mix_low_threshold=energy,
-        mix_high_threshold=energy,
-        mix_ema_alpha=1.0,
+        blend_start=energy,
+        blend_end=energy,
+        blend_response=1.0,
         sensitivity=1.0,
         brightness_floor=0.0,
     )

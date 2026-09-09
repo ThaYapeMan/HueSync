@@ -164,9 +164,9 @@ class Profile:
     effect_type: str = "spectrum_rgb"
     effect_speed: float = 1.0
     effect_decay: float = 0.3
-    mix_low_threshold: float = 0.3
-    mix_high_threshold: float = 0.7
-    mix_ema_alpha: float = 0.1
+    blend_start: float = 0.3
+    blend_end: float = 0.7
+    blend_response: float = 0.1
     sensitivity: float = 1.0  # multiplier applied to bar values before mapping
     brightness_floor: float = 0.15  # minimum brightness so lights never go fully dark
     bars: int = 30  # number of cava bars (more = finer frequency detail)
@@ -241,6 +241,17 @@ class Profile:
         elif "color_mode" in d:
             d.pop("color_mode")
 
+        # Migrate legacy blend-threshold field names (renamed in Fase 2).
+        for old, new in (
+            ("mix_low_threshold", "blend_start"),
+            ("mix_high_threshold", "blend_end"),
+            ("mix_ema_alpha", "blend_response"),
+        ):
+            if old in d and new not in d:
+                d[new] = d.pop(old)
+            elif old in d:
+                d.pop(old)
+
         # Strip keys that are not current Profile fields so that loading a
         # config written by a newer version of HueSync never causes a
         # TypeError, and loading a config with removed fields is harmless.
@@ -254,7 +265,7 @@ _PROFILE_FIELDS = frozenset(f.name for f in fields(Profile))
 
 # ---------------------------------------------------------------------------
 # Phase-2 entities: Controller, Player, Zone, Analyser,
-# Effect, Crossfader, Coupling.
+# Effect, EnergyProfile, Coupling.
 # ---------------------------------------------------------------------------
 
 
@@ -489,43 +500,56 @@ class Effect:
 _EFFECT_FIELDS = frozenset(f.name for f in fields(Effect))
 
 
-_CROSSFADER_FIELDS: frozenset[str] = frozenset()  # filled after class
+_ENERGY_PROFILE_FIELDS: frozenset[str] = frozenset()  # filled after class
 
 
 @dataclass
-class Crossfader:
-    """Links an active Effect and a mellow Effect with crossfade parameters.
+class EnergyProfile:
+    """Links a high-energy Effect and a low-energy Effect with blend parameters.
 
-    The Coupling references one Crossfader. The Crossfader owns the two-layer
+    The Coupling references one EnergyProfile. The EnergyProfile owns the two-layer
     effect selection and all LayerMixer parameters, keeping Coupling focused on
-    routing (player → analysis → zone → crossfader).
+    routing (player → analysis → zone → energy_profile).
     """
 
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
-    name: str = "Default Crossfader"
-    active_scene_id: str = ""   # Effect used in loud passages
-    mellow_scene_id: str = ""   # Effect used in quiet passages (empty = same as active)
-    low_threshold: float = 0.3  # energy below this → pure mellow (mix=0)
-    high_threshold: float = 0.7  # energy above this → pure active (mix=1)
-    fade_speed: float = 0.1     # EMA alpha for mix smoothing (was mix_ema_alpha)
+    name: str = "Default EnergyProfile"
+    high_energy_effect_id: str = ""   # Effect used in loud passages
+    low_energy_effect_id: str = ""    # Effect used in quiet passages (empty = same as high)
+    blend_start: float = 0.3  # energy below this → pure low-energy (mix=0)
+    blend_end: float = 0.7    # energy above this → pure high-energy (mix=1)
+    blend_response: float = 0.1  # EMA alpha for mix smoothing
 
     def to_dict(self) -> dict:
         return {
             "id": self.id,
             "name": self.name,
-            "active_scene_id": self.active_scene_id,
-            "mellow_scene_id": self.mellow_scene_id,
-            "low_threshold": self.low_threshold,
-            "high_threshold": self.high_threshold,
-            "fade_speed": self.fade_speed,
+            "high_energy_effect_id": self.high_energy_effect_id,
+            "low_energy_effect_id": self.low_energy_effect_id,
+            "blend_start": self.blend_start,
+            "blend_end": self.blend_end,
+            "blend_response": self.blend_response,
         }
 
     @classmethod
-    def from_dict(cls, d: dict) -> Crossfader:
-        return cls(**{k: v for k, v in d.items() if k in _CROSSFADER_FIELDS})
+    def from_dict(cls, d: dict) -> EnergyProfile:
+        d = dict(d)
+        # Migrate legacy field names (written before Fase-2 rename).
+        for old, new in (
+            ("active_scene_id", "high_energy_effect_id"),
+            ("mellow_scene_id", "low_energy_effect_id"),
+            ("low_threshold", "blend_start"),
+            ("high_threshold", "blend_end"),
+            ("fade_speed", "blend_response"),
+        ):
+            if old in d and new not in d:
+                d[new] = d.pop(old)
+            elif old in d:
+                d.pop(old)
+        return cls(**{k: v for k, v in d.items() if k in _ENERGY_PROFILE_FIELDS})
 
 
-_CROSSFADER_FIELDS = frozenset(f.name for f in fields(Crossfader))
+_ENERGY_PROFILE_FIELDS = frozenset(f.name for f in fields(EnergyProfile))
 
 
 _COUPLING_FIELDS: frozenset[str] = frozenset()  # filled after class
@@ -533,14 +557,14 @@ _COUPLING_FIELDS: frozenset[str] = frozenset()  # filled after class
 
 @dataclass
 class Coupling:
-    """Links a Player + Analyser + Zone + Crossfader.
+    """Links a Player + Analyser + Zone + EnergyProfile.
 
     Activation happens on a Coupling. The linked entities can be shared
     across multiple Couplings, but each Coupling runs its own cava process.
 
-    The Crossfader owns the active Effect, optional mellow Effect, and all
-    LayerMixer crossfade parameters. Coupling is focused on routing:
-    player → analysis → zone → crossfader.
+    The EnergyProfile owns the active Effect, optional low-energy Effect, and all
+    LayerMixer blend parameters. Coupling is focused on routing:
+    player → analysis → zone → energy_profile.
     """
 
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
@@ -548,7 +572,7 @@ class Coupling:
     player_id: str = ""
     analyser_id: str = ""
     zone_id: str = ""
-    crossfader_id: str = ""
+    energy_profile_id: str = ""
     enabled: bool = True
 
     def to_dict(self) -> dict:
@@ -558,7 +582,7 @@ class Coupling:
             "player_id": self.player_id,
             "analyser_id": self.analyser_id,
             "zone_id": self.zone_id,
-            "crossfader_id": self.crossfader_id,
+            "energy_profile_id": self.energy_profile_id,
             "enabled": self.enabled,
         }
 
@@ -575,8 +599,13 @@ class Coupling:
             d["analyser_id"] = d.pop("analysis_config_id")
         elif "analysis_config_id" in d:
             d.pop("analysis_config_id")
+        # Backward compat: crossfader_id → energy_profile_id
+        if "crossfader_id" in d and "energy_profile_id" not in d:
+            d["energy_profile_id"] = d.pop("crossfader_id")
+        elif "crossfader_id" in d:
+            d.pop("crossfader_id")
         # Old render_config_id and mix fields are dropped here; Storage.migrate()
-        # creates a Crossfader from them before Coupling.from_dict() is called.
+        # creates an EnergyProfile from them before Coupling.from_dict() is called.
         return cls(**{k: v for k, v in d.items() if k in _COUPLING_FIELDS})
 
 

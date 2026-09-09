@@ -8,8 +8,8 @@ from huesync.models import (
     Controller,
     ControllerType,
     Coupling,
-    Crossfader,
     Effect,
+    EnergyProfile,
     VirtualPlayer,
     Zone,
 )
@@ -142,20 +142,20 @@ def test_scene_bad_color_mode_falls_back():
 
 
 # ---------------------------------------------------------------------------
-# Crossfader round-trip
+# EnergyProfile round-trip
 # ---------------------------------------------------------------------------
 
 
 def test_crossfader_roundtrip():
-    cf = Crossfader(name="My CF", active_scene_id="sc-1",
-                    mellow_scene_id="sc-2", low_threshold=0.2,
-                    high_threshold=0.8, fade_speed=0.05)
-    cf2 = Crossfader.from_dict(cf.to_dict())
+    cf = EnergyProfile(name="My CF", high_energy_effect_id="sc-1",
+                    low_energy_effect_id="sc-2", blend_start=0.2,
+                    blend_end=0.8, blend_response=0.05)
+    cf2 = EnergyProfile.from_dict(cf.to_dict())
     assert cf2.id == cf.id
-    assert cf2.active_scene_id == "sc-1"
-    assert cf2.mellow_scene_id == "sc-2"
-    assert cf2.low_threshold == 0.2
-    assert cf2.fade_speed == 0.05
+    assert cf2.high_energy_effect_id == "sc-1"
+    assert cf2.low_energy_effect_id == "sc-2"
+    assert cf2.blend_start == 0.2
+    assert cf2.blend_response == 0.05
 
 
 # ---------------------------------------------------------------------------
@@ -165,13 +165,13 @@ def test_crossfader_roundtrip():
 
 def test_coupling_roundtrip():
     c = Coupling(name="Zone A → Hue", player_id="p1", analyser_id="ac1",
-                 zone_id="z1", crossfader_id="cf1", enabled=False)
+                 zone_id="z1", energy_profile_id="cf1", enabled=False)
     c2 = Coupling.from_dict(c.to_dict())
     assert c2.id == c.id
     assert c2.player_id == "p1"
     assert c2.analyser_id == "ac1"
     assert c2.zone_id == "z1"
-    assert c2.crossfader_id == "cf1"
+    assert c2.energy_profile_id == "cf1"
     assert c2.enabled is False
 
 
@@ -180,7 +180,7 @@ def test_coupling_backward_compat_light_provider_id():
     d = {
         "id": "c-1", "name": "Test", "player_id": "p1",
         "analyser_id": "ac1", "light_provider_id": "lp1",
-        "crossfader_id": "cf1", "enabled": True,
+        "energy_profile_id": "cf1", "enabled": True,
     }
     c = Coupling.from_dict(d)
     assert c.zone_id == "lp1"
@@ -192,7 +192,7 @@ def test_coupling_backward_compat_analysis_config_id():
     d = {
         "id": "c-1", "name": "Test", "player_id": "p1",
         "analysis_config_id": "ac1", "zone_id": "z1",
-        "crossfader_id": "cf1", "enabled": True,
+        "energy_profile_id": "cf1", "enabled": True,
     }
     c = Coupling.from_dict(d)
     assert c.analyser_id == "ac1"
@@ -329,26 +329,26 @@ def test_storage_delete_scene():
 
 
 # ---------------------------------------------------------------------------
-# Storage CRUD — Crossfader
+# Storage CRUD — EnergyProfile
 # ---------------------------------------------------------------------------
 
 
 def test_storage_save_and_get_crossfader():
     s = make_storage()
-    cf = Crossfader(name="CF", active_scene_id="sc-1", low_threshold=0.2)
-    s.save_crossfader(cf)
-    fetched = s.get_crossfader(cf.id)
+    cf = EnergyProfile(name="CF", high_energy_effect_id="sc-1", blend_start=0.2)
+    s.save_energy_profile(cf)
+    fetched = s.get_energy_profile(cf.id)
     assert fetched is not None
-    assert fetched.active_scene_id == "sc-1"
-    assert fetched.low_threshold == 0.2
+    assert fetched.high_energy_effect_id == "sc-1"
+    assert fetched.blend_start == 0.2
 
 
 def test_storage_delete_crossfader():
     s = make_storage()
-    cf = Crossfader()
-    s.save_crossfader(cf)
-    s.delete_crossfader(cf.id)
-    assert s.get_crossfader(cf.id) is None
+    cf = EnergyProfile()
+    s.save_energy_profile(cf)
+    s.delete_energy_profile(cf.id)
+    assert s.get_energy_profile(cf.id) is None
 
 
 # ---------------------------------------------------------------------------
@@ -359,13 +359,13 @@ def test_storage_delete_crossfader():
 def test_storage_save_and_get_coupling():
     s = make_storage()
     c = Coupling(name="Zone A → Hue", player_id="p1", analyser_id="ac1",
-                 zone_id="z1", crossfader_id="cf1")
+                 zone_id="z1", energy_profile_id="cf1")
     s.save_coupling(c)
     fetched = s.get_coupling(c.id)
     assert fetched is not None
     assert fetched.player_id == "p1"
     assert fetched.zone_id == "z1"
-    assert fetched.crossfader_id == "cf1"
+    assert fetched.energy_profile_id == "cf1"
 
 
 def test_storage_delete_coupling_clears_active_id():

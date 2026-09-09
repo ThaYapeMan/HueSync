@@ -1408,17 +1408,17 @@ class LayerMixer:
     mix=0.0 → pure mellow layer (mellow_profile.color_mode).
     mix=1.0 → pure active layer (active_profile.color_mode).
 
-    Mix thresholds come from active_profile.mix_low_threshold etc., since
-    the Coupling owns those parameters.
+    Blend thresholds come from active_profile.blend_start / blend_end / blend_response,
+    read from the EnergyProfile via the active Profile.
     """
 
     def __init__(self, active_profile: Profile, mellow_profile: Profile) -> None:
         self._mellow = ColourModeEffect(mellow_profile)
         self._active = ColourModeEffect(active_profile)
         self._mix: float = 0.0
-        self._ema_alpha: float = active_profile.mix_ema_alpha
-        self._low: float = active_profile.mix_low_threshold
-        self._high: float = active_profile.mix_high_threshold
+        self._ema_alpha: float = active_profile.blend_response
+        self._low: float = active_profile.blend_start
+        self._high: float = active_profile.blend_end
 
     @property
     def mix(self) -> float:

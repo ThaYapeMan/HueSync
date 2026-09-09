@@ -18,8 +18,8 @@ from huesync.app import app
 from huesync.models import (
     Analyser,
     Coupling,
-    Crossfader,
     Effect,
+    EnergyProfile,
     VirtualPlayer,
     Zone,
 )
@@ -417,18 +417,18 @@ def _make_full_coupling(storage: Storage) -> Coupling:
     zone = Zone(name="Z", controller_id="ctrl-1", entertainment_area_id="ea-1")
     ac = Analyser(name="AC")
     effect = Effect(name="SC")
-    crossfader = Crossfader(name="CF", active_scene_id=effect.id)
+    crossfader = EnergyProfile(name="CF", high_energy_effect_id=effect.id)
     storage.save_virtual_player(player)
     storage.save_zone(zone)
     storage.save_analyser(ac)
     storage.save_effect(effect)
-    storage.save_crossfader(crossfader)
+    storage.save_energy_profile(crossfader)
     coupling = Coupling(
         name="Test Coupling",
         player_id=player.id,
         zone_id=zone.id,
         analyser_id=ac.id,
-        crossfader_id=crossfader.id,
+        energy_profile_id=crossfader.id,
     )
     storage.save_coupling(coupling)
     return coupling
@@ -439,19 +439,19 @@ def test_create_coupling(client: TestClient):
     zone = Zone(name="Z", controller_id="c1", entertainment_area_id="ea-1")
     ac = Analyser(name="AC")
     effect = Effect(name="SC")
-    crossfader = Crossfader(name="CF", active_scene_id=effect.id)
+    crossfader = EnergyProfile(name="CF", high_energy_effect_id=effect.id)
     client._storage.save_virtual_player(player)
     client._storage.save_zone(zone)
     client._storage.save_analyser(ac)
     client._storage.save_effect(effect)
-    client._storage.save_crossfader(crossfader)
+    client._storage.save_energy_profile(crossfader)
 
     payload = {
         "name": "My Coupling",
         "player_id": player.id,
         "analyser_id": ac.id,
         "zone_id": zone.id,
-        "crossfader_id": crossfader.id,
+        "energy_profile_id": crossfader.id,
     }
     resp = client.post("/api/couplings", json=payload)
     assert resp.status_code == 201
@@ -472,7 +472,7 @@ def test_activate_coupling_missing_entities(client: TestClient):
         player_id="missing",
         zone_id="missing",
         analyser_id="missing",
-        crossfader_id="missing",
+        energy_profile_id="missing",
     )
     client._storage.save_coupling(coupling)
     client._manager.activate_coupling.side_effect = ValueError("missing Player")
@@ -555,19 +555,19 @@ def test_patch_coupling_analyser_id_restarts_cava_not_deactivate(client: TestCli
 
 
 def test_patch_coupling_crossfader_id_update_render_only(client: TestClient):
-    """Swapping crossfader_id must call update_render only — no cava restart,
+    """Swapping energy_profile_id must call update_render only — no cava restart,
     no deactivate."""
     coupling = _make_full_coupling(client._storage)
     client._storage.set_active_coupling_id(coupling.id)
 
     new_effect = Effect(name="SC2")
     client._storage.save_effect(new_effect)
-    new_cf = Crossfader(name="CF2", active_scene_id=new_effect.id)
-    client._storage.save_crossfader(new_cf)
+    new_cf = EnergyProfile(name="CF2", high_energy_effect_id=new_effect.id)
+    client._storage.save_energy_profile(new_cf)
 
     resp = client.patch(
         f"/api/couplings/{coupling.id}",
-        json={"crossfader_id": new_cf.id},
+        json={"energy_profile_id": new_cf.id},
     )
     assert resp.status_code == 200
     client._manager.deactivate.assert_not_awaited()
@@ -575,7 +575,7 @@ def test_patch_coupling_crossfader_id_update_render_only(client: TestClient):
     client._manager.update_render.assert_called_once()
 
     saved = client._storage.get_coupling(coupling.id)
-    assert saved is not None and saved.crossfader_id == new_cf.id
+    assert saved is not None and saved.energy_profile_id == new_cf.id
 
 
 def test_ac_swap_session_remains_active(client: TestClient):
@@ -644,20 +644,20 @@ def test_clone_coupling_returns_new_id(client: TestClient):
 
 def test_clone_coupling_analysis_and_scene_configs_are_independent(client: TestClient):
     """Cloned Analyser and Effect have new IDs but identical field values.
-    Cloned Crossfader has a new ID and points to the new Effect.
+    Cloned EnergyProfile has a new ID and points to the new Effect.
     """
     coupling = _make_full_coupling(client._storage)
     orig_ac = client._storage.get_analyser(coupling.analyser_id)
-    orig_cf = client._storage.get_crossfader(coupling.crossfader_id)
-    orig_effect = client._storage.get_effect(orig_cf.active_scene_id) if orig_cf else None
+    orig_cf = client._storage.get_energy_profile(coupling.energy_profile_id)
+    orig_effect = client._storage.get_effect(orig_cf.high_energy_effect_id) if orig_cf else None
 
     resp = client.post(f"/api/couplings/{coupling.id}/clone")
     assert resp.status_code == 201
     body = resp.json()
 
     new_ac = client._storage.get_analyser(body["analyser_id"])
-    new_cf = client._storage.get_crossfader(body["crossfader_id"])
-    new_effect = client._storage.get_effect(new_cf.active_scene_id) if new_cf else None
+    new_cf = client._storage.get_energy_profile(body["energy_profile_id"])
+    new_effect = client._storage.get_effect(new_cf.high_energy_effect_id) if new_cf else None
 
     # New IDs — not the same sub-entity objects.
     assert new_ac is not None
