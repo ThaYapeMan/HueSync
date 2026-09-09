@@ -71,8 +71,8 @@ one of each sub-entity and is the thing you activate.
 ```
 Controller ──── Zone
                  │
-VirtualPlayer ──── Coupling ──── Crossfader ──── Scene (active)
-     │                                        └── Scene (mellow)
+VirtualPlayer ──── Coupling ──── EnergyProfile ──── Effect (high-energy)
+     │                                           └── Effect (low-energy)
      └── Analyser
 ```
 
@@ -82,16 +82,16 @@ VirtualPlayer ──── Coupling ──── Crossfader ──── Scene (
 | **Virtual Player** | A virtual squeezelite instance: LMS host, player name, MAC address, ALSA device, follow player MAC. |
 | **Zone** | Links a Controller to one of its Entertainment Areas. Shared across Couplings. |
 | **Analyser** | cava parameters (bars, cutoff freqs), onset detection settings (method, delta, alpha), and optional harmonic/percussive separation (`use_hpss_separation`). |
-| **Scene** | Visual output parameters: effect, sensitivity, brightness floor, band boundaries. |
-| **Crossfader** | Links an Active Scene (loud passages) + Mellow Scene (quiet passages) with crossfade thresholds. |
-| **Coupling** | Binds exactly one Virtual Player + Zone + Analyser + Crossfader. Activate a Coupling to start the light show. |
+| **Effect** | Visual output parameters: effect type, sensitivity, brightness floor, band boundaries. |
+| **EnergyProfile** | An Energy Profile automatically blends between a low-energy and high-energy Effect according to music energy, using configurable blend thresholds and EMA response. |
+| **Coupling** | Binds exactly one Virtual Player + Zone + Analyser + EnergyProfile. Activate a Coupling to start the light show. |
 
 **Why "Zone" and not "Group"?** An LMS sync group is also called a "group".
 Using "Zone" for the Hue Entertainment Area avoids confusion — a Zone is a
 physical room definition, a sync group is an audio routing concept.
 
 A Coupling can be **cloned** (Clone button in the UI) — the new Coupling gets
-independent copies of its Analyser, Scenes, and Crossfader (fresh IDs,
+independent copies of its Analyser, Effects, and EnergyProfile (fresh IDs,
 same values), while sharing the same Virtual Player and Zone. This is the
 recommended way to set up A/B comparisons: clone, change one field on the
 copy, switch between them.
@@ -101,7 +101,7 @@ copy, switch between them.
 - One Virtual Player → many Couplings (same squeezelite process, different analysis
   or visual settings).
 - One Controller → many Zones (one per Entertainment Area).
-- Analysers, Scenes, and Crossfaders can be shared across Couplings — or kept
+- Analysers, Effects, and Energy Profiles can be shared across Couplings — or kept
   exclusive per Coupling (as created by Clone).
 - **One Entertainment Area can stream per bridge at a time** (Hue Bridge
   hardware limit). Activating a Coupling automatically stops whatever was running before.
@@ -110,7 +110,7 @@ copy, switch between them.
 
 ## Effects catalogue
 
-The **effect** field on a Scene controls how the audio spectrum maps to light
+The **effect_type** field on an Effect controls how the audio spectrum maps to light
 colour and motion.
 
 | Effect | Style | Description |
@@ -168,8 +168,8 @@ Both sum to 1.0 via Wiener soft masks.
 
 | Effect type | HPSS source |
 |---|---|
-| Active effects: Pulses, Flashes, Fireworks | Scale with `percussive_energy` |
-| Mellow effects: Swirl, Wave, Solid | Scale with `harmonic_energy` |
+| Transient effects: Pulses, Flashes, Fireworks | Scale with `percussive_energy` |
+| Tonal effects: Swirl, Wave, Solid | Scale with `harmonic_energy` |
 | Spectral / intensity effects: Spectrum RGB, Mono Pulse | Unaffected (no HPSS coupling) |
 
 **Implementation:** pure numpy — no librosa or scipy dependency. Time-axis
@@ -301,7 +301,7 @@ serves the old bundle.
    Enter the LMS host (use *Discover*), a player name, and set **Follow player**
    to the real LMS player you listen on (use *Discover* to see available players).
 4. **Create a Coupling**: go to *Couplings* → *New coupling*. Link the Virtual
-   Player, Zone, and a Crossfader (which references your Scenes). Defaults work
+   Player, Zone, and an Energy Profile (which references your Effects). Defaults work
    out of the box.
 5. Press **Go** (▶) on the Coupling. HueSync registers the virtual player with
    LMS as a standalone player and starts following your real player via LMS's
@@ -313,7 +313,7 @@ Couplings directly without switching tabs.
 
 ### Configuration UI
 
-All Analyser and Scene fields have plain-language descriptions and
+All Analyser and Effect fields have plain-language descriptions and
 context-sensitive hints directly in the editor dialogs — no prior knowledge of
 DSP terminology required. The onset method selector uses the same card-picker
 pattern as the effect selector, with one-line descriptions per option. SuperFlux
@@ -328,7 +328,7 @@ HueSync applies the minimum necessary action depending on which fields changed:
 |---|---|
 | `player_id`, `zone_id`, `lms_host`, `lms_port`, `player_name`, `alsa_device`, `follow_player_mac` | Full deactivate — squeezelite, cava, and the Hue DTLS session are torn down. Reactivate manually (blind: lights off briefly). |
 | `analyser_id` | cava restart + PCM pipeline rebuild — new Analyser applied live, Hue session stays up. |
-| `crossfader_id` | Render update only — new Crossfader applied immediately, nothing restarts. |
+| `energy_profile_id` | Render update only — new EnergyProfile applied immediately, nothing restarts. |
 | `bars`, `lower_cutoff_freq`, `higher_cutoff_freq` | cava-only restart — squeezelite and the Hue session stay up. |
 | `onset_method`, `onset_delta`, `onset_alpha`, `superflux_mu`, `superflux_lag`, `bass_hz`, `mid_hz`, `use_hpss_separation` | PCM pipeline rebuilt live — no process restart, BandNormaliser EMA preserved. |
 | `sensitivity`, `brightness_floor`, `exertion_clip`, `onset_flash_intensity` | Render update only — applied immediately, nothing restarts. |
@@ -336,7 +336,7 @@ HueSync applies the minimum necessary action depending on which fields changed:
 
 Only the most disruptive category in a given edit triggers an action.
 
-Editing a **Scene** or **Crossfader** that is currently referenced by the
+Editing an **Effect** or **EnergyProfile** that is currently referenced by the
 active Coupling also applies live — no Coupling restart needed.
 
 ### Key Analyser fields
@@ -353,26 +353,26 @@ active Coupling also applies live — no Coupling restart needed.
 | `superflux_lag` | 2 | SuperFlux only: compare with frame `lag` steps ago. |
 | `use_hpss_separation` | `false` | Enable harmonic/percussive separation. See HPSS section. Rebuilds PCM pipeline live. |
 
-### Key Scene fields
+### Key Effect fields
 
 | Field | Default | Notes |
 |---|---|---|
-| `effect` | `spectrum_rgb` | Which effect renders to light. See effects catalogue. |
+| `effect_type` | `spectrum_rgb` | Which effect algorithm renders to light. See effects catalogue. |
 | `sensitivity` | 1.0 | Scales bar values after AGC normalisation. |
 | `brightness_floor` | 0.15 | Minimum brightness; prevents lights going fully dark during quiet passages. |
 | `exertion_clip` | 3.0 | Sets "maximally loud" in relative terms. A band at `exertion_clip`× its rolling average clips to full output. |
 | `bass_hz` | 250 | Bass/mid boundary (Hz) for band splitting in the renderer. |
 | `mid_hz` | 2000 | Mid/treble boundary (Hz). |
 
-### Key Crossfader fields
+### Key EnergyProfile fields
 
 | Field | Default | Notes |
 |---|---|---|
-| `active_scene_id` | — | Scene used during loud passages. |
-| `mellow_scene_id` | — | Scene used during quiet passages. Empty = same as active scene. |
-| `low_threshold` | — | Energy level below which the mellow scene is shown at full weight. |
-| `high_threshold` | — | Energy level above which the active scene is shown at full weight. |
-| `fade_speed` | — | How quickly the crossfader tracks energy changes. |
+| `high_energy_effect_id` | — | Effect used during loud passages. |
+| `low_energy_effect_id` | — | Effect used during quiet passages. Empty = same as high-energy effect. |
+| `blend_start` | 0.3 | Energy level below which the low-energy effect is used at full weight. |
+| `blend_end` | 0.7 | Energy level above which the high-energy effect is used at full weight. |
+| `blend_response` | 0.1 | EMA smoothing — how quickly the blend tracks music energy. |
 
 ### Player latency
 
@@ -413,16 +413,20 @@ GET/PATCH/DELETE /api/zones/{id}
 GET/POST         /api/analysers
 GET/PATCH/DELETE /api/analysers/{id}
 
-GET/POST         /api/scenes
-GET/PATCH/DELETE /api/scenes/{id}
+GET/POST         /api/effects
+GET/PATCH/DELETE /api/effects/{id}
+(GET/POST        /api/scenes             deprecated alias for /api/effects)
+(GET/PATCH/DELETE /api/scenes/{id}       deprecated alias for /api/effects/{id})
 
-GET/POST         /api/crossfaders
-GET/PATCH/DELETE /api/crossfaders/{id}
+GET/POST         /api/energy-profiles
+GET/PATCH/DELETE /api/energy-profiles/{id}
+(GET/POST        /api/crossfaders        deprecated alias for /api/energy-profiles)
+(GET/PATCH/DELETE /api/crossfaders/{id}  deprecated alias for /api/energy-profiles/{id})
 
 GET/POST         /api/couplings
 GET/PATCH/DELETE /api/couplings/{id}
 POST             /api/couplings/{id}/activate
-POST             /api/couplings/{id}/clone        deep-clone with fresh Analyser + Scene + Crossfader copies
+POST             /api/couplings/{id}/clone        deep-clone with fresh Analyser + Effect + EnergyProfile copies
 POST             /api/couplings/{id}/restart-cava restart cava for the active coupling
 POST             /api/couplings/deactivate
 ```

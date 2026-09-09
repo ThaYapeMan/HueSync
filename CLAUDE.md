@@ -159,7 +159,7 @@ the coupling being edited is the currently active one (`coupling.id ===
 activeCouplingId`). This signals to the user that changes may affect lights
 immediately.
 
-On the backend, `PATCH /api/scenes/{id}` and `PATCH /api/crossfaders/{id}`
+On the backend, `PATCH /api/effects/{id}` and `PATCH /api/energy-profiles/{id}`
 both detect whether the active coupling references the patched entity and call
 `SyncEngine.update_render()` without a restart. Similarly, swapping
 `analyser_id` on an active Coupling triggers `restart_cava()` +
