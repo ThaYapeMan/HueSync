@@ -4,24 +4,24 @@ import { NowPlaying } from '@/pages/NowPlaying'
 import { Latency } from '@/pages/Latency'
 import { Players } from '@/pages/Players'
 import { Analysers } from '@/pages/Analysers'
-import { Scenes } from '@/pages/Scenes'
-import { Crossfaders } from '@/pages/Crossfaders'
+import { Effects } from '@/pages/Effects'
+import { EnergyProfiles } from '@/pages/EnergyProfiles'
 import { Zones } from '@/pages/Zones'
 import { Couplings } from '@/pages/Couplings'
 import { Badge } from '@/components/ui/badge'
 import { cn } from '@/lib/utils'
 
-type Tab = 'now-playing' | 'players' | 'analysers' | 'scenes' | 'crossfaders' | 'zones' | 'couplings' | 'latency'
+type Tab = 'now-playing' | 'players' | 'analysers' | 'effects' | 'energy-profiles' | 'zones' | 'couplings' | 'latency'
 
 const NAV_ITEMS: { value: Tab; label: string }[] = [
-  { value: 'now-playing',  label: 'Now Playing' },
-  { value: 'couplings',    label: 'Couplings' },
-  { value: 'analysers',    label: 'Analysers' },
-  { value: 'scenes',       label: 'Scenes' },
-  { value: 'crossfaders',  label: 'Crossfaders' },
-  { value: 'zones',        label: 'Zones' },
-  { value: 'players',      label: 'Virtual Players' },
-  { value: 'latency',      label: 'Latency' },
+  { value: 'now-playing',     label: 'Now Playing' },
+  { value: 'couplings',       label: 'Couplings' },
+  { value: 'analysers',       label: 'Analysers' },
+  { value: 'effects',         label: 'Effects' },
+  { value: 'energy-profiles', label: 'Energy Profiles' },
+  { value: 'zones',           label: 'Zones' },
+  { value: 'players',         label: 'Virtual Players' },
+  { value: 'latency',         label: 'Latency' },
 ]
 
 function ConnectionBadge({ connected, attempt }: { connected: boolean; attempt: number }) {
@@ -78,8 +78,8 @@ export default function App() {
             )}
             {activeTab === 'players' && <Players />}
             {activeTab === 'analysers' && <Analysers />}
-            {activeTab === 'scenes' && <Scenes />}
-            {activeTab === 'crossfaders' && <Crossfaders />}
+            {activeTab === 'effects' && <Effects />}
+            {activeTab === 'energy-profiles' && <EnergyProfiles />}
             {activeTab === 'zones' && <Zones />}
             {activeTab === 'couplings' && (
               <Couplings

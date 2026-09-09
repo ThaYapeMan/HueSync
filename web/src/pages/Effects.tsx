@@ -21,16 +21,16 @@ import { ConfirmDialog } from '@/components/ConfirmDialog'
 import { cn } from '@/lib/utils'
 import {
   EFFECTS,
-  type Scene,
-  getScenes,
-  createScene,
-  updateScene,
-  deleteScene,
+  type Effect,
+  getEffects,
+  createEffect,
+  updateEffect,
+  deleteEffect,
 } from '@/lib/api'
 
 interface FormState {
   name: string
-  effect: string
+  effect_type: string
   effect_speed: string
   effect_decay: string
   sensitivity: string
@@ -41,10 +41,10 @@ interface FormState {
   onset_flash_intensity: string
 }
 
-function defaultForm(cfg?: Scene): FormState {
+function defaultForm(cfg?: Effect): FormState {
   return {
     name: cfg?.name ?? '',
-    effect: cfg?.effect ?? 'spectrum_rgb',
+    effect_type: cfg?.effect_type ?? 'spectrum_rgb',
     effect_speed: String(cfg?.effect_speed ?? 1.0),
     effect_decay: String(cfg?.effect_decay ?? 0.3),
     sensitivity: String(cfg?.sensitivity ?? 1.0),
@@ -66,20 +66,20 @@ function FormRow({ label, hint, children }: { label: string; hint?: string; chil
   )
 }
 
-export function Scenes() {
-  const [scenes, setScenes] = useState<Scene[]>([])
+export function Effects() {
+  const [effects, setEffects] = useState<Effect[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [editorOpen, setEditorOpen] = useState(false)
-  const [editingScene, setEditingScene] = useState<Scene | undefined>(undefined)
+  const [editingEffect, setEditingEffect] = useState<Effect | undefined>(undefined)
   const [form, setForm] = useState<FormState>(defaultForm())
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
 
   async function load() {
     try {
-      const data = await getScenes()
-      setScenes(data)
+      const data = await getEffects()
+      setEffects(data)
       setError(null)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to load')
@@ -93,15 +93,15 @@ export function Scenes() {
   }, [])
 
   function openNew() {
-    setEditingScene(undefined)
+    setEditingEffect(undefined)
     setForm(defaultForm())
     setSaveError(null)
     setEditorOpen(true)
   }
 
-  function openEdit(scene: Scene) {
-    setEditingScene(scene)
-    setForm(defaultForm(scene))
+  function openEdit(effect: Effect) {
+    setEditingEffect(effect)
+    setForm(defaultForm(effect))
     setSaveError(null)
     setEditorOpen(true)
   }
@@ -116,7 +116,7 @@ export function Scenes() {
     try {
       const body = {
         name: form.name,
-        effect: form.effect,
+        effect_type: form.effect_type,
         effect_speed: parseFloat(form.effect_speed),
         effect_decay: parseFloat(form.effect_decay),
         sensitivity: parseFloat(form.sensitivity),
@@ -126,10 +126,10 @@ export function Scenes() {
         exertion_clip: parseFloat(form.exertion_clip),
         onset_flash_intensity: parseFloat(form.onset_flash_intensity),
       }
-      if (editingScene) {
-        await updateScene(editingScene.id, body)
+      if (editingEffect) {
+        await updateEffect(editingEffect.id, body)
       } else {
-        await createScene(body)
+        await createEffect(body)
       }
       setEditorOpen(false)
       await load()
@@ -141,7 +141,7 @@ export function Scenes() {
   }
 
   async function handleDelete(id: string) {
-    await deleteScene(id)
+    await deleteEffect(id)
     await load()
   }
 
@@ -153,7 +153,7 @@ export function Scenes() {
     return <p className="text-destructive text-sm">{error}</p>
   }
 
-  const selectedEffect = EFFECTS.find((e) => e.id === form.effect)
+  const selectedEffect = EFFECTS.find((e) => e.id === form.effect_type)
 
   const speedLabel: Record<string, string> = {
     fireworks: 'Burst expansion speed (0.1 = slow, 5 = fast)',
@@ -170,35 +170,35 @@ export function Scenes() {
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <h2 className="text-sm font-semibold">Scenes</h2>
+        <h2 className="text-sm font-semibold">Effects</h2>
         <Button size="sm" onClick={openNew}>
-          New scene
+          New effect
         </Button>
       </div>
 
-      {scenes.length === 0 ? (
-        <p className="text-sm text-muted-foreground">No scenes yet. Create one to get started.</p>
+      {effects.length === 0 ? (
+        <p className="text-sm text-muted-foreground">No effects yet. Create one to get started.</p>
       ) : (
         <Table>
           <TableHeader>
             <TableRow>
               <TableHead>Name</TableHead>
-              <TableHead>Effect</TableHead>
+              <TableHead>Effect Type</TableHead>
               <TableHead>Sensitivity</TableHead>
               <TableHead>Brightness Floor</TableHead>
               <TableHead className="text-right">Actions</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
-            {scenes.map((c) => (
-              <TableRow key={c.id}>
-                <TableCell className="font-medium">{c.name}</TableCell>
-                <TableCell className="text-sm font-mono">{c.effect}</TableCell>
-                <TableCell className="text-sm">{c.sensitivity.toFixed(1)}</TableCell>
-                <TableCell className="text-sm">{c.brightness_floor.toFixed(2)}</TableCell>
+            {effects.map((e) => (
+              <TableRow key={e.id}>
+                <TableCell className="font-medium">{e.name}</TableCell>
+                <TableCell className="text-sm font-mono">{e.effect_type}</TableCell>
+                <TableCell className="text-sm">{e.sensitivity.toFixed(1)}</TableCell>
+                <TableCell className="text-sm">{e.brightness_floor.toFixed(2)}</TableCell>
                 <TableCell className="text-right">
                   <div className="flex items-center justify-end gap-1">
-                    <Button size="sm" variant="ghost" onClick={() => openEdit(c)}>
+                    <Button size="sm" variant="ghost" onClick={() => openEdit(e)}>
                       Edit
                     </Button>
                     <ConfirmDialog
@@ -207,9 +207,9 @@ export function Scenes() {
                           Delete
                         </Button>
                       }
-                      title="Delete scene"
-                      description={`Delete "${c.name}"? This cannot be undone.`}
-                      onConfirm={() => handleDelete(c.id)}
+                      title="Delete effect"
+                      description={`Delete "${e.name}"? This cannot be undone.`}
+                      onConfirm={() => handleDelete(e.id)}
                     />
                   </div>
                 </TableCell>
@@ -222,7 +222,7 @@ export function Scenes() {
       <Dialog open={editorOpen} onOpenChange={(o) => { if (!o) setEditorOpen(false) }}>
         <DialogContent className="max-w-md flex flex-col max-h-[90vh]">
           <DialogHeader>
-            <DialogTitle>{editingScene ? 'Edit scene' : 'New scene'}</DialogTitle>
+            <DialogTitle>{editingEffect ? 'Edit effect' : 'New effect'}</DialogTitle>
           </DialogHeader>
 
           <div className="overflow-y-auto flex-1 pr-1 space-y-4">
@@ -230,19 +230,19 @@ export function Scenes() {
               <Input
                 value={form.name}
                 onChange={(e) => set('name', e.target.value)}
-                placeholder="My scene"
+                placeholder="My effect"
               />
             </FormRow>
-            <FormRow label="Effect">
+            <FormRow label="Effect Type">
               <div className="grid grid-cols-2 gap-1.5">
                 {EFFECTS.map((e) => (
                   <button
                     key={e.id}
                     type="button"
-                    onClick={() => set('effect', e.id)}
+                    onClick={() => set('effect_type', e.id)}
                     className={cn(
                       'text-left rounded border p-2 text-sm transition-colors',
-                      form.effect === e.id
+                      form.effect_type === e.id
                         ? 'border-primary bg-primary/10'
                         : 'border-border hover:border-muted-foreground/60'
                     )}
@@ -254,7 +254,7 @@ export function Scenes() {
               </div>
             </FormRow>
             {selectedEffect?.hasSpeed && (
-              <FormRow label={speedLabel[form.effect] ?? 'Effect speed (0.1 = slow, 5 = fast)'}>
+              <FormRow label={speedLabel[form.effect_type] ?? 'Effect speed (0.1 = slow, 5 = fast)'}>
                 <Input
                   type="number"
                   step={0.1}
@@ -266,7 +266,7 @@ export function Scenes() {
               </FormRow>
             )}
             {selectedEffect?.hasDecay && (
-              <FormRow label={decayLabel[form.effect] ?? 'Effect decay (0.1 = slow, 0.9 = fast)'}>
+              <FormRow label={decayLabel[form.effect_type] ?? 'Effect decay (0.1 = slow, 0.9 = fast)'}>
                 <Input
                   type="number"
                   step={0.05}

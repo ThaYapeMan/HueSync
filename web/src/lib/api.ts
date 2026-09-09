@@ -189,10 +189,10 @@ export interface Analyser {
   use_hpss_separation: boolean
 }
 
-export interface Scene {
+export interface Effect {
   id: string
   name: string
-  effect: string
+  effect_type: string
   effect_speed: number
   effect_decay: number
   sensitivity: number
@@ -203,14 +203,14 @@ export interface Scene {
   onset_flash_intensity: number
 }
 
-export interface Crossfader {
+export interface EnergyProfile {
   id: string
   name: string
-  active_scene_id: string
-  mellow_scene_id: string
-  low_threshold: number
-  high_threshold: number
-  fade_speed: number
+  high_energy_effect_id: string
+  low_energy_effect_id: string
+  blend_start: number
+  blend_end: number
+  blend_response: number
 }
 
 export interface Coupling {
@@ -219,7 +219,7 @@ export interface Coupling {
   player_id: string
   analyser_id: string
   zone_id: string
-  crossfader_id: string
+  energy_profile_id: string
   enabled: boolean
 }
 
@@ -257,23 +257,23 @@ export const updateAnalyser = (id: string, body: Partial<Omit<Analyser, 'id'>>) 
 export const deleteAnalyser = (id: string) =>
   request<void>(`/api/analysers/${id}`, { method: 'DELETE' })
 
-// Scenes
-export const getScenes = () => request<Scene[]>('/api/scenes')
-export const createScene = (body: Omit<Scene, 'id'>) =>
-  request<Scene>('/api/scenes', json('POST', body))
-export const updateScene = (id: string, body: Partial<Omit<Scene, 'id'>>) =>
-  request<Scene>(`/api/scenes/${id}`, json('PATCH', body))
-export const deleteScene = (id: string) =>
-  request<void>(`/api/scenes/${id}`, { method: 'DELETE' })
+// Effects
+export const getEffects = () => request<Effect[]>('/api/effects')
+export const createEffect = (body: Omit<Effect, 'id'>) =>
+  request<Effect>('/api/effects', json('POST', body))
+export const updateEffect = (id: string, body: Partial<Omit<Effect, 'id'>>) =>
+  request<Effect>(`/api/effects/${id}`, json('PATCH', body))
+export const deleteEffect = (id: string) =>
+  request<void>(`/api/effects/${id}`, { method: 'DELETE' })
 
-// Crossfaders
-export const getCrossfaders = () => request<Crossfader[]>('/api/crossfaders')
-export const createCrossfader = (body: Omit<Crossfader, 'id'>) =>
-  request<Crossfader>('/api/crossfaders', json('POST', body))
-export const updateCrossfader = (id: string, body: Partial<Omit<Crossfader, 'id'>>) =>
-  request<Crossfader>(`/api/crossfaders/${id}`, json('PATCH', body))
-export const deleteCrossfader = (id: string) =>
-  request<void>(`/api/crossfaders/${id}`, { method: 'DELETE' })
+// EnergyProfiles
+export const getEnergyProfiles = () => request<EnergyProfile[]>('/api/energy-profiles')
+export const createEnergyProfile = (body: Omit<EnergyProfile, 'id'>) =>
+  request<EnergyProfile>('/api/energy-profiles', json('POST', body))
+export const updateEnergyProfile = (id: string, body: Partial<Omit<EnergyProfile, 'id'>>) =>
+  request<EnergyProfile>(`/api/energy-profiles/${id}`, json('PATCH', body))
+export const deleteEnergyProfile = (id: string) =>
+  request<void>(`/api/energy-profiles/${id}`, { method: 'DELETE' })
 
 // Couplings
 export const getCouplings = () => request<Coupling[]>('/api/couplings')

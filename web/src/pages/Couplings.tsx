@@ -33,8 +33,8 @@ import {
   type VirtualPlayer,
   type Zone,
   type Analyser,
-  type Scene,
-  type Crossfader,
+  type Effect,
+  type EnergyProfile,
   type Controller,
   type EntertainmentArea,
   getCouplings,
@@ -50,10 +50,10 @@ import {
   createZone,
   getAnalysers,
   createAnalyser,
-  getScenes,
-  createScene,
-  getCrossfaders,
-  createCrossfader,
+  getEffects,
+  createEffect,
+  getEnergyProfiles,
+  createEnergyProfile,
   getControllers,
   getControllerAreas,
   getStatus,
@@ -358,17 +358,17 @@ function NewAnalyserDialog({ open, onClose, onCreated }: NewAnalyserDialogProps)
   )
 }
 
-// ---- Inline mini-dialog: New Scene ----
+// ---- Inline mini-dialog: New Effect ----
 
-interface NewSceneDialogProps {
+interface NewEffectDialogProps {
   open: boolean
   onClose: () => void
-  onCreated: (cfg: Scene) => void
+  onCreated: (cfg: Effect) => void
 }
 
-function NewSceneDialog({ open, onClose, onCreated }: NewSceneDialogProps) {
+function NewEffectDialog({ open, onClose, onCreated }: NewEffectDialogProps) {
   const [name, setName] = useState('')
-  const [effect, setEffect] = useState('spectrum_rgb')
+  const [effectType, setEffectType] = useState('spectrum_rgb')
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [nameError, setNameError] = useState<string | null>(null)
@@ -376,7 +376,7 @@ function NewSceneDialog({ open, onClose, onCreated }: NewSceneDialogProps) {
   useEffect(() => {
     if (open) {
       setName('')
-      setEffect('spectrum_rgb')
+      setEffectType('spectrum_rgb')
       setError(null)
       setNameError(null)
     }
@@ -387,9 +387,9 @@ function NewSceneDialog({ open, onClose, onCreated }: NewSceneDialogProps) {
     setError(null)
     setNameError(null)
     try {
-      const cfg = await createScene({
+      const cfg = await createEffect({
         name,
-        effect,
+        effect_type: effectType,
         effect_speed: 1.0,
         effect_decay: 0.3,
         sensitivity: 1.0,
@@ -412,40 +412,27 @@ function NewSceneDialog({ open, onClose, onCreated }: NewSceneDialogProps) {
     }
   }
 
-  const EFFECTS_BASIC = [
-    { id: 'spectrum_rgb', label: 'Spectrum RGB' },
-    { id: 'mono_pulse', label: 'Mono Pulse' },
-    { id: 'pulses', label: 'Pulses' },
-    { id: 'flashes', label: 'Flashes' },
-    { id: 'splotches', label: 'Splotches' },
-    { id: 'fireworks', label: 'Fireworks' },
-    { id: 'swirl', label: 'Swirl' },
-    { id: 'wave', label: 'Wave' },
-    { id: 'solid', label: 'Solid' },
-    { id: 'none', label: 'None' },
-  ]
-
   return (
     <Dialog open={open} onOpenChange={(o) => { if (!o) onClose() }}>
       <DialogContent className="max-w-sm">
         <DialogHeader>
-          <DialogTitle>New scene</DialogTitle>
-          <DialogDescription>Uses sensible defaults — edit in Scenes tab to adjust.</DialogDescription>
+          <DialogTitle>New effect</DialogTitle>
+          <DialogDescription>Uses sensible defaults — edit in Effects tab to adjust.</DialogDescription>
         </DialogHeader>
         <div className="space-y-3">
           <div className="space-y-1">
             <Label className="text-sm">Name</Label>
-            <Input value={name} onChange={(e) => { setName(e.target.value); setNameError(null) }} placeholder="My scene" />
+            <Input value={name} onChange={(e) => { setName(e.target.value); setNameError(null) }} placeholder="My effect" />
             {nameError && <p className="text-xs text-destructive">{nameError}</p>}
           </div>
           <div className="space-y-1">
-            <Label className="text-sm">Effect</Label>
-            <Select value={effect} onValueChange={setEffect}>
+            <Label className="text-sm">Effect type</Label>
+            <Select value={effectType} onValueChange={setEffectType}>
               <SelectTrigger>
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                {EFFECTS_BASIC.map((e) => (
+                {EFFECTS.map((e) => (
                   <SelectItem key={e.id} value={e.id}>{e.label}</SelectItem>
                 ))}
               </SelectContent>
@@ -462,65 +449,65 @@ function NewSceneDialog({ open, onClose, onCreated }: NewSceneDialogProps) {
   )
 }
 
-// ---- Inline mini-dialog: New Crossfader ----
+// ---- Inline mini-dialog: New Energy Profile ----
 
-interface NewCrossfaderDialogProps {
+interface NewEnergyProfileDialogProps {
   open: boolean
   onClose: () => void
-  onCreated: (cf: Crossfader) => void
-  scenes: Scene[]
-  onScenesChanged: (scenes: Scene[]) => void
+  onCreated: (ep: EnergyProfile) => void
+  effects: Effect[]
+  onEffectsChanged: (effects: Effect[]) => void
 }
 
-function NewCrossfaderDialog({ open, onClose, onCreated, scenes, onScenesChanged }: NewCrossfaderDialogProps) {
+function NewEnergyProfileDialog({ open, onClose, onCreated, effects, onEffectsChanged }: NewEnergyProfileDialogProps) {
   const [name, setName] = useState('')
-  const [activeSceneId, setActiveSceneId] = useState('')
-  const [mellowSceneId, setMellowSceneId] = useState('')
+  const [highEnergyEffectId, setHighEnergyEffectId] = useState('')
+  const [lowEnergyEffectId, setLowEnergyEffectId] = useState('')
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [nameError, setNameError] = useState<string | null>(null)
-  const [newSceneOpen, setNewSceneOpen] = useState(false)
-  const [newSceneTarget, setNewSceneTarget] = useState<'active' | 'mellow'>('active')
+  const [newEffectOpen, setNewEffectOpen] = useState(false)
+  const [newEffectTarget, setNewEffectTarget] = useState<'high' | 'low'>('high')
 
   useEffect(() => {
     if (open) {
       setName('')
-      setActiveSceneId('')
-      setMellowSceneId('')
+      setHighEnergyEffectId('')
+      setLowEnergyEffectId('')
       setError(null)
       setNameError(null)
     }
   }, [open])
 
-  async function handleSceneCreated(cfg: Scene) {
-    setNewSceneOpen(false)
-    const updated = await getScenes().catch(() => scenes)
-    onScenesChanged(updated)
-    if (newSceneTarget === 'mellow') {
-      setMellowSceneId(cfg.id)
+  async function handleEffectCreated(cfg: Effect) {
+    setNewEffectOpen(false)
+    const updated = await getEffects().catch(() => effects)
+    onEffectsChanged(updated)
+    if (newEffectTarget === 'low') {
+      setLowEnergyEffectId(cfg.id)
     } else {
-      setActiveSceneId(cfg.id)
+      setHighEnergyEffectId(cfg.id)
     }
   }
 
   async function handleSave() {
-    if (!activeSceneId) {
-      setError('Select an active scene')
+    if (!highEnergyEffectId) {
+      setError('Select a high-energy effect')
       return
     }
     setSaving(true)
     setError(null)
     setNameError(null)
     try {
-      const cf = await createCrossfader({
-        name: name || 'Crossfader',
-        active_scene_id: activeSceneId,
-        mellow_scene_id: mellowSceneId,
-        low_threshold: 0.3,
-        high_threshold: 0.7,
-        fade_speed: 0.1,
+      const ep = await createEnergyProfile({
+        name: name || 'Energy Profile',
+        high_energy_effect_id: highEnergyEffectId,
+        low_energy_effect_id: lowEnergyEffectId,
+        blend_start: 0.3,
+        blend_end: 0.7,
+        blend_response: 0.1,
       })
-      onCreated(cf)
+      onCreated(ep)
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Save failed'
       if ((e as any).status === 409) {
@@ -538,48 +525,48 @@ function NewCrossfaderDialog({ open, onClose, onCreated, scenes, onScenesChanged
       <Dialog open={open} onOpenChange={(o) => { if (!o) onClose() }}>
         <DialogContent className="max-w-sm">
           <DialogHeader>
-            <DialogTitle>New crossfader</DialogTitle>
-            <DialogDescription>Adjust thresholds and fade speed in the Crossfaders tab.</DialogDescription>
+            <DialogTitle>New energy profile</DialogTitle>
+            <DialogDescription>Adjust blend thresholds and response in the Energy Profiles tab.</DialogDescription>
           </DialogHeader>
           <div className="space-y-3">
             <div className="space-y-1">
               <Label className="text-sm">Name</Label>
-              <Input value={name} onChange={(e) => { setName(e.target.value); setNameError(null) }} placeholder="My crossfader" />
+              <Input value={name} onChange={(e) => { setName(e.target.value); setNameError(null) }} placeholder="My energy profile" />
               {nameError && <p className="text-xs text-destructive">{nameError}</p>}
             </div>
             <div className="space-y-1">
-              <Label className="text-sm">Active scene</Label>
+              <Label className="text-sm">High-energy effect (loud passages)</Label>
               <div className="flex gap-1.5">
-                <Select value={activeSceneId} onValueChange={setActiveSceneId}>
+                <Select value={highEnergyEffectId} onValueChange={setHighEnergyEffectId}>
                   <SelectTrigger className="flex-1">
-                    <SelectValue placeholder="Select scene…" />
+                    <SelectValue placeholder="Select effect…" />
                   </SelectTrigger>
                   <SelectContent>
-                    {scenes.map((s) => (
-                      <SelectItem key={s.id} value={s.id}>{s.name}</SelectItem>
+                    {effects.map((e) => (
+                      <SelectItem key={e.id} value={e.id}>{e.name}</SelectItem>
                     ))}
                   </SelectContent>
                 </Select>
-                <Button size="sm" variant="outline" type="button" onClick={() => { setNewSceneTarget('active'); setNewSceneOpen(true) }}>
+                <Button size="sm" variant="outline" type="button" onClick={() => { setNewEffectTarget('high'); setNewEffectOpen(true) }}>
                   + New
                 </Button>
               </div>
             </div>
             <div className="space-y-1">
-              <Label className="text-sm">Mellow scene</Label>
+              <Label className="text-sm">Low-energy effect (quiet passages, optional)</Label>
               <div className="flex gap-1.5">
-                <Select value={mellowSceneId} onValueChange={setMellowSceneId}>
+                <Select value={lowEnergyEffectId} onValueChange={setLowEnergyEffectId}>
                   <SelectTrigger className="flex-1">
-                    <SelectValue placeholder="Same as active" />
+                    <SelectValue placeholder="Same as high-energy" />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="">Same as active</SelectItem>
-                    {scenes.map((s) => (
-                      <SelectItem key={s.id} value={s.id}>{s.name}</SelectItem>
+                    <SelectItem value="">Same as high-energy</SelectItem>
+                    {effects.map((e) => (
+                      <SelectItem key={e.id} value={e.id}>{e.name}</SelectItem>
                     ))}
                   </SelectContent>
                 </Select>
-                <Button size="sm" variant="outline" type="button" onClick={() => { setNewSceneTarget('mellow'); setNewSceneOpen(true) }}>
+                <Button size="sm" variant="outline" type="button" onClick={() => { setNewEffectTarget('low'); setNewEffectOpen(true) }}>
                   + New
                 </Button>
               </div>
@@ -588,14 +575,14 @@ function NewCrossfaderDialog({ open, onClose, onCreated, scenes, onScenesChanged
           {error && <p className="text-destructive text-sm mt-2">{error}</p>}
           <DialogFooter className="mt-4">
             <Button variant="outline" onClick={onClose} disabled={saving}>Cancel</Button>
-            <Button onClick={handleSave} disabled={saving || !activeSceneId}>{saving ? 'Saving…' : 'Create'}</Button>
+            <Button onClick={handleSave} disabled={saving || !highEnergyEffectId}>{saving ? 'Saving…' : 'Create'}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
-      <NewSceneDialog
-        open={newSceneOpen}
-        onClose={() => setNewSceneOpen(false)}
-        onCreated={handleSceneCreated}
+      <NewEffectDialog
+        open={newEffectOpen}
+        onClose={() => setNewEffectOpen(false)}
+        onCreated={handleEffectCreated}
       />
     </>
   )
@@ -609,16 +596,16 @@ interface CouplingEditorProps {
   players: VirtualPlayer[]
   zones: Zone[]
   analysers: Analyser[]
-  scenes: Scene[]
-  crossfaders: Crossfader[]
+  effects: Effect[]
+  energyProfiles: EnergyProfile[]
   activeCouplingId: string | null
   onSave: () => void
   onClose: () => void
   onPlayersChanged: (players: VirtualPlayer[]) => void
   onZonesChanged: (zones: Zone[]) => void
   onAnalysersChanged: (cfgs: Analyser[]) => void
-  onScenesChanged: (scenes: Scene[]) => void
-  onCrossfadersChanged: (crossfaders: Crossfader[]) => void
+  onEffectsChanged: (effects: Effect[]) => void
+  onEnergyProfilesChanged: (eps: EnergyProfile[]) => void
 }
 
 function CouplingEditor({
@@ -627,16 +614,16 @@ function CouplingEditor({
   players,
   zones,
   analysers,
-  scenes,
-  crossfaders,
+  effects,
+  energyProfiles,
   activeCouplingId,
   onSave,
   onClose,
   onPlayersChanged,
   onZonesChanged,
   onAnalysersChanged,
-  onScenesChanged,
-  onCrossfadersChanged,
+  onEffectsChanged,
+  onEnergyProfilesChanged,
 }: CouplingEditorProps) {
   const isEditing = !!coupling
   const isLive = !!(coupling && activeCouplingId && coupling.id === activeCouplingId)
@@ -645,7 +632,7 @@ function CouplingEditor({
   const [playerId, setPlayerId] = useState('')
   const [zoneId, setZoneId] = useState('')
   const [analyserId, setAnalyserId] = useState('')
-  const [crossfaderId, setCrossfaderId] = useState('')
+  const [energyProfileId, setEnergyProfileId] = useState('')
   const [enabled, setEnabled] = useState(true)
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
@@ -655,7 +642,7 @@ function CouplingEditor({
   const [newPlayerOpen, setNewPlayerOpen] = useState(false)
   const [newZoneOpen, setNewZoneOpen] = useState(false)
   const [newAnalyserOpen, setNewAnalyserOpen] = useState(false)
-  const [newCrossfaderOpen, setNewCrossfaderOpen] = useState(false)
+  const [newEnergyProfileOpen, setNewEnergyProfileOpen] = useState(false)
 
   useEffect(() => {
     if (open) {
@@ -663,7 +650,7 @@ function CouplingEditor({
       setPlayerId(coupling?.player_id ?? '')
       setZoneId(coupling?.zone_id ?? '')
       setAnalyserId(coupling?.analyser_id ?? '')
-      setCrossfaderId(coupling?.crossfader_id ?? '')
+      setEnergyProfileId(coupling?.energy_profile_id ?? '')
       setEnabled(coupling?.enabled ?? true)
       setSaveError(null)
       setNameError(null)
@@ -682,7 +669,7 @@ function CouplingEditor({
           player_id: playerId,
           zone_id: zoneId,
           analyser_id: analyserId,
-          crossfader_id: crossfaderId,
+          energy_profile_id: energyProfileId,
         })
       } else {
         await createCoupling({
@@ -690,7 +677,7 @@ function CouplingEditor({
           player_id: playerId,
           zone_id: zoneId,
           analyser_id: analyserId,
-          crossfader_id: crossfaderId,
+          energy_profile_id: energyProfileId,
           enabled,
         })
       }
@@ -728,11 +715,11 @@ function CouplingEditor({
     setAnalyserId(cfg.id)
   }
 
-  async function handleCrossfaderCreated(cf: Crossfader) {
-    setNewCrossfaderOpen(false)
-    const updated = await getCrossfaders().catch(() => crossfaders)
-    onCrossfadersChanged(updated)
-    setCrossfaderId(cf.id)
+  async function handleEnergyProfileCreated(ep: EnergyProfile) {
+    setNewEnergyProfileOpen(false)
+    const updated = await getEnergyProfiles().catch(() => energyProfiles)
+    onEnergyProfilesChanged(updated)
+    setEnergyProfileId(ep.id)
   }
 
   const selectedZone = zones.find((z) => z.id === zoneId)
@@ -822,24 +809,24 @@ function CouplingEditor({
               </div>
             </div>
 
-            {/* Crossfader */}
+            {/* Energy Profile */}
             <div className="space-y-1">
-              <Label className="text-sm">Crossfader</Label>
+              <Label className="text-sm">Energy Profile</Label>
               <p className="text-xs text-muted-foreground">
-                Controls which scenes play and how they blend. Edit details in the Crossfaders tab.
+                Controls which effects play and how they blend with music energy. Edit details in the Energy Profiles tab.
               </p>
               <div className="flex gap-2">
-                <Select value={crossfaderId} onValueChange={setCrossfaderId}>
+                <Select value={energyProfileId} onValueChange={setEnergyProfileId}>
                   <SelectTrigger className="flex-1">
-                    <SelectValue placeholder="Select crossfader" />
+                    <SelectValue placeholder="Select energy profile" />
                   </SelectTrigger>
                   <SelectContent>
-                    {crossfaders.map((cf) => (
-                      <SelectItem key={cf.id} value={cf.id}>{cf.name}</SelectItem>
+                    {energyProfiles.map((ep) => (
+                      <SelectItem key={ep.id} value={ep.id}>{ep.name}</SelectItem>
                     ))}
                   </SelectContent>
                 </Select>
-                <Button size="sm" variant="outline" type="button" onClick={() => setNewCrossfaderOpen(true)}>
+                <Button size="sm" variant="outline" type="button" onClick={() => setNewEnergyProfileOpen(true)}>
                   + New
                 </Button>
               </div>
@@ -884,12 +871,12 @@ function CouplingEditor({
         onClose={() => setNewAnalyserOpen(false)}
         onCreated={handleAnalyserCreated}
       />
-      <NewCrossfaderDialog
-        open={newCrossfaderOpen}
-        onClose={() => setNewCrossfaderOpen(false)}
-        onCreated={handleCrossfaderCreated}
-        scenes={scenes}
-        onScenesChanged={onScenesChanged}
+      <NewEnergyProfileDialog
+        open={newEnergyProfileOpen}
+        onClose={() => setNewEnergyProfileOpen(false)}
+        onCreated={handleEnergyProfileCreated}
+        effects={effects}
+        onEffectsChanged={onEffectsChanged}
       />
     </>
   )
@@ -902,8 +889,8 @@ export function Couplings({ activeCouplingId: activeCouplingIdProp, onActivation
   const [players, setPlayers] = useState<VirtualPlayer[]>([])
   const [zones, setZones] = useState<Zone[]>([])
   const [analysers, setAnalysers] = useState<Analyser[]>([])
-  const [scenes, setScenes] = useState<Scene[]>([])
-  const [crossfaders, setCrossfaders] = useState<Crossfader[]>([])
+  const [effects, setEffects] = useState<Effect[]>([])
+  const [energyProfiles, setEnergyProfiles] = useState<EnergyProfile[]>([])
   const [activeCouplingId, setActiveCouplingId] = useState<string | null>(activeCouplingIdProp)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -913,21 +900,21 @@ export function Couplings({ activeCouplingId: activeCouplingIdProp, onActivation
 
   async function loadAll() {
     try {
-      const [cs, ps, zs, acs, cfs, scs, st] = await Promise.all([
+      const [cs, ps, zs, acs, eps, effs, st] = await Promise.all([
         getCouplings(),
         getVirtualPlayers(),
         getZones(),
         getAnalysers(),
-        getCrossfaders(),
-        getScenes(),
+        getEnergyProfiles(),
+        getEffects(),
         getStatus(),
       ])
       setCouplings(cs)
       setPlayers(ps)
       setZones(zs)
       setAnalysers(acs)
-      setCrossfaders(cfs)
-      setScenes(scs)
+      setEnergyProfiles(eps)
+      setEffects(effs)
       setActiveCouplingId(st.active_coupling_id ?? activeCouplingIdProp)
       setError(null)
     } catch (e) {
@@ -1003,17 +990,17 @@ export function Couplings({ activeCouplingId: activeCouplingIdProp, onActivation
     const zone = zones.find((z) => z.id === zoneId)
     return zone ? zone.name : zoneId
   }
-  function effectLabel(effectId: string) {
-    return EFFECTS.find((e) => e.id === effectId)?.label ?? effectId
+  function effectTypeLabel(effectTypeId: string) {
+    return EFFECTS.find((e) => e.id === effectTypeId)?.label ?? effectTypeId
   }
-  function effectDisplay(cfId: string) {
-    const cf = crossfaders.find((x) => x.id === cfId)
-    if (!cf) return cfId
-    const activeEffect = scenes.find((s) => s.id === cf.active_scene_id)?.effect ?? '—'
-    const active = effectLabel(activeEffect)
-    if (!cf.mellow_scene_id || cf.mellow_scene_id === cf.active_scene_id) return active
-    const mellowEffect = scenes.find((s) => s.id === cf.mellow_scene_id)?.effect ?? '—'
-    return `${active} / ${effectLabel(mellowEffect)}`
+  function effectDisplay(epId: string) {
+    const ep = energyProfiles.find((x) => x.id === epId)
+    if (!ep) return epId
+    const highEffect = effects.find((e) => e.id === ep.high_energy_effect_id)
+    const highLabel = effectTypeLabel(highEffect?.effect_type ?? '—')
+    if (!ep.low_energy_effect_id || ep.low_energy_effect_id === ep.high_energy_effect_id) return highLabel
+    const lowEffect = effects.find((e) => e.id === ep.low_energy_effect_id)
+    return `${highLabel} / ${effectTypeLabel(lowEffect?.effect_type ?? '—')}`
   }
 
   if (loading) {
@@ -1057,7 +1044,7 @@ export function Couplings({ activeCouplingId: activeCouplingIdProp, onActivation
                   <TableCell className="font-medium">{c.name}</TableCell>
                   <TableCell className="text-sm text-muted-foreground">{playerName(c.player_id)}</TableCell>
                   <TableCell className="text-sm text-muted-foreground">{areaName(c.zone_id)}</TableCell>
-                  <TableCell className="text-sm">{effectDisplay(c.crossfader_id)}</TableCell>
+                  <TableCell className="text-sm">{effectDisplay(c.energy_profile_id)}</TableCell>
                   <TableCell>
                     <Badge variant={isActive ? 'default' : 'secondary'}>
                       {isActive ? 'Active' : c.enabled ? 'Inactive' : 'Disabled'}
@@ -1106,16 +1093,16 @@ export function Couplings({ activeCouplingId: activeCouplingIdProp, onActivation
         players={players}
         zones={zones}
         analysers={analysers}
-        scenes={scenes}
-        crossfaders={crossfaders}
+        effects={effects}
+        energyProfiles={energyProfiles}
         activeCouplingId={activeCouplingId}
         onSave={handleSave}
         onClose={() => setEditorOpen(false)}
         onPlayersChanged={setPlayers}
         onZonesChanged={setZones}
         onAnalysersChanged={setAnalysers}
-        onScenesChanged={setScenes}
-        onCrossfadersChanged={setCrossfaders}
+        onEffectsChanged={setEffects}
+        onEnergyProfilesChanged={setEnergyProfiles}
       />
     </div>
   )

@@ -26,60 +26,61 @@ import {
 } from '@/components/ui/select'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
 import {
-  type Crossfader,
-  type Scene,
-  getCrossfaders,
-  createCrossfader,
-  updateCrossfader,
-  deleteCrossfader,
-  getScenes,
+  type EnergyProfile,
+  type Effect,
+  getEnergyProfiles,
+  createEnergyProfile,
+  updateEnergyProfile,
+  deleteEnergyProfile,
+  getEffects,
 } from '@/lib/api'
 
 interface FormState {
   name: string
-  active_scene_id: string
-  mellow_scene_id: string
-  low_threshold: string
-  high_threshold: string
-  fade_speed: string
+  high_energy_effect_id: string
+  low_energy_effect_id: string
+  blend_start: string
+  blend_end: string
+  blend_response: string
 }
 
-function defaultForm(cf?: Crossfader): FormState {
+function defaultForm(ep?: EnergyProfile): FormState {
   return {
-    name: cf?.name ?? '',
-    active_scene_id: cf?.active_scene_id ?? '',
-    mellow_scene_id: cf?.mellow_scene_id ?? '',
-    low_threshold: String(cf?.low_threshold ?? 0.3),
-    high_threshold: String(cf?.high_threshold ?? 0.7),
-    fade_speed: String(cf?.fade_speed ?? 0.1),
+    name: ep?.name ?? '',
+    high_energy_effect_id: ep?.high_energy_effect_id ?? '',
+    low_energy_effect_id: ep?.low_energy_effect_id ?? '',
+    blend_start: String(ep?.blend_start ?? 0.3),
+    blend_end: String(ep?.blend_end ?? 0.7),
+    blend_response: String(ep?.blend_response ?? 0.1),
   }
 }
 
-function FormRow({ label, children }: { label: string; children: React.ReactNode }) {
+function FormRow({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
   return (
     <div className="space-y-1">
       <Label className="text-sm">{label}</Label>
+      {hint && <p className="text-xs text-muted-foreground">{hint}</p>}
       {children}
     </div>
   )
 }
 
-export function Crossfaders() {
-  const [crossfaders, setCrossfaders] = useState<Crossfader[]>([])
-  const [scenes, setScenes] = useState<Scene[]>([])
+export function EnergyProfiles() {
+  const [energyProfiles, setEnergyProfiles] = useState<EnergyProfile[]>([])
+  const [effects, setEffects] = useState<Effect[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [editorOpen, setEditorOpen] = useState(false)
-  const [editingCf, setEditingCf] = useState<Crossfader | undefined>(undefined)
+  const [editingEp, setEditingEp] = useState<EnergyProfile | undefined>(undefined)
   const [form, setForm] = useState<FormState>(defaultForm())
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
 
   async function load() {
     try {
-      const [cfs, scs] = await Promise.all([getCrossfaders(), getScenes()])
-      setCrossfaders(cfs)
-      setScenes(scs)
+      const [eps, effs] = await Promise.all([getEnergyProfiles(), getEffects()])
+      setEnergyProfiles(eps)
+      setEffects(effs)
       setError(null)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to load')
@@ -95,15 +96,15 @@ export function Crossfaders() {
   }
 
   function openNew() {
-    setEditingCf(undefined)
+    setEditingEp(undefined)
     setForm(defaultForm())
     setSaveError(null)
     setEditorOpen(true)
   }
 
-  function openEdit(cf: Crossfader) {
-    setEditingCf(cf)
-    setForm(defaultForm(cf))
+  function openEdit(ep: EnergyProfile) {
+    setEditingEp(ep)
+    setForm(defaultForm(ep))
     setSaveError(null)
     setEditorOpen(true)
   }
@@ -114,16 +115,16 @@ export function Crossfaders() {
     try {
       const body = {
         name: form.name,
-        active_scene_id: form.active_scene_id,
-        mellow_scene_id: form.mellow_scene_id,
-        low_threshold: parseFloat(form.low_threshold),
-        high_threshold: parseFloat(form.high_threshold),
-        fade_speed: parseFloat(form.fade_speed),
+        high_energy_effect_id: form.high_energy_effect_id,
+        low_energy_effect_id: form.low_energy_effect_id,
+        blend_start: parseFloat(form.blend_start),
+        blend_end: parseFloat(form.blend_end),
+        blend_response: parseFloat(form.blend_response),
       }
-      if (editingCf) {
-        await updateCrossfader(editingCf.id, body)
+      if (editingEp) {
+        await updateEnergyProfile(editingEp.id, body)
       } else {
-        await createCrossfader(body)
+        await createEnergyProfile(body)
       }
       setEditorOpen(false)
       await load()
@@ -135,25 +136,25 @@ export function Crossfaders() {
   }
 
   async function handleDelete(id: string) {
-    await deleteCrossfader(id)
+    await deleteEnergyProfile(id)
     await load()
   }
 
   if (loading) return <p className="text-sm text-muted-foreground">Loading…</p>
   if (error) return <p className="text-destructive text-sm">{error}</p>
 
-  const sceneName = (id: string) => scenes.find((s) => s.id === id)?.name ?? (id ? id.slice(0, 8) + '…' : '—')
+  const effectName = (id: string) => effects.find((e) => e.id === id)?.name ?? (id ? id.slice(0, 8) + '…' : '—')
 
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <h2 className="text-sm font-semibold">Crossfaders</h2>
-        <Button size="sm" onClick={openNew}>New crossfader</Button>
+        <h2 className="text-sm font-semibold">Energy Profiles</h2>
+        <Button size="sm" onClick={openNew}>New energy profile</Button>
       </div>
 
-      {crossfaders.length === 0 ? (
+      {energyProfiles.length === 0 ? (
         <p className="text-sm text-muted-foreground">
-          No crossfaders yet. Crossfaders are created automatically when a coupling is made,
+          No energy profiles yet. Energy profiles are created automatically when a coupling is made,
           or create one here to share across couplings.
         </p>
       ) : (
@@ -161,35 +162,35 @@ export function Crossfaders() {
           <TableHeader>
             <TableRow>
               <TableHead>Name</TableHead>
-              <TableHead>Active scene</TableHead>
-              <TableHead>Mellow scene</TableHead>
-              <TableHead>Thresholds</TableHead>
-              <TableHead>Fade speed</TableHead>
+              <TableHead>High-energy effect</TableHead>
+              <TableHead>Low-energy effect</TableHead>
+              <TableHead>Blend range</TableHead>
+              <TableHead>Blend response</TableHead>
               <TableHead className="text-right">Actions</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
-            {crossfaders.map((cf) => (
-              <TableRow key={cf.id}>
-                <TableCell className="font-medium">{cf.name}</TableCell>
-                <TableCell className="text-sm text-muted-foreground">{sceneName(cf.active_scene_id)}</TableCell>
+            {energyProfiles.map((ep) => (
+              <TableRow key={ep.id}>
+                <TableCell className="font-medium">{ep.name}</TableCell>
+                <TableCell className="text-sm text-muted-foreground">{effectName(ep.high_energy_effect_id)}</TableCell>
                 <TableCell className="text-sm text-muted-foreground">
-                  {cf.mellow_scene_id ? sceneName(cf.mellow_scene_id) : '(same as active)'}
+                  {ep.low_energy_effect_id ? effectName(ep.low_energy_effect_id) : '(same as high-energy)'}
                 </TableCell>
-                <TableCell className="text-sm font-mono">{cf.low_threshold}–{cf.high_threshold}</TableCell>
-                <TableCell className="text-sm font-mono">{cf.fade_speed}</TableCell>
+                <TableCell className="text-sm font-mono">{ep.blend_start}–{ep.blend_end}</TableCell>
+                <TableCell className="text-sm font-mono">{ep.blend_response}</TableCell>
                 <TableCell className="text-right">
                   <div className="flex items-center justify-end gap-1">
-                    <Button size="sm" variant="ghost" onClick={() => openEdit(cf)}>Edit</Button>
+                    <Button size="sm" variant="ghost" onClick={() => openEdit(ep)}>Edit</Button>
                     <ConfirmDialog
                       trigger={
                         <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive">
                           Delete
                         </Button>
                       }
-                      title="Delete crossfader"
-                      description={`Delete "${cf.name}"? Any couplings referencing it will lose their scene settings.`}
-                      onConfirm={() => handleDelete(cf.id)}
+                      title="Delete energy profile"
+                      description={`Delete "${ep.name}"? Any couplings referencing it will lose their effect settings.`}
+                      onConfirm={() => handleDelete(ep.id)}
                     />
                   </div>
                 </TableCell>
@@ -202,7 +203,7 @@ export function Crossfaders() {
       <Dialog open={editorOpen} onOpenChange={(o) => { if (!o) setEditorOpen(false) }}>
         <DialogContent className="max-w-sm">
           <DialogHeader>
-            <DialogTitle>{editingCf ? 'Edit crossfader' : 'New crossfader'}</DialogTitle>
+            <DialogTitle>{editingEp ? 'Edit energy profile' : 'New energy profile'}</DialogTitle>
           </DialogHeader>
 
           <div className="space-y-3">
@@ -210,32 +211,32 @@ export function Crossfaders() {
               <Input
                 value={form.name}
                 onChange={(e) => set('name', e.target.value)}
-                placeholder="My crossfader"
+                placeholder="My energy profile"
               />
             </FormRow>
 
-            <FormRow label="Active scene (loud passages)">
-              <Select value={form.active_scene_id} onValueChange={(v) => set('active_scene_id', v)}>
+            <FormRow label="High-energy effect (loud passages)">
+              <Select value={form.high_energy_effect_id} onValueChange={(v) => set('high_energy_effect_id', v)}>
                 <SelectTrigger>
-                  <SelectValue placeholder="Select scene" />
+                  <SelectValue placeholder="Select effect" />
                 </SelectTrigger>
                 <SelectContent>
-                  {scenes.map((s) => (
-                    <SelectItem key={s.id} value={s.id}>{s.name}</SelectItem>
+                  {effects.map((e) => (
+                    <SelectItem key={e.id} value={e.id}>{e.name}</SelectItem>
                   ))}
                 </SelectContent>
               </Select>
             </FormRow>
 
-            <FormRow label="Mellow scene (quiet passages, optional)">
-              <Select value={form.mellow_scene_id} onValueChange={(v) => set('mellow_scene_id', v)}>
+            <FormRow label="Low-energy effect (quiet passages, optional)">
+              <Select value={form.low_energy_effect_id} onValueChange={(v) => set('low_energy_effect_id', v)}>
                 <SelectTrigger>
-                  <SelectValue placeholder="Same as active" />
+                  <SelectValue placeholder="Same as high-energy" />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="">Same as active</SelectItem>
-                  {scenes.map((s) => (
-                    <SelectItem key={s.id} value={s.id}>{s.name}</SelectItem>
+                  <SelectItem value="">Same as high-energy</SelectItem>
+                  {effects.map((e) => (
+                    <SelectItem key={e.id} value={e.id}>{e.name}</SelectItem>
                   ))}
                 </SelectContent>
               </Select>
@@ -243,39 +244,42 @@ export function Crossfaders() {
 
             <div className="border-t pt-3 space-y-3">
               <div>
-                <p className="text-xs text-muted-foreground font-medium uppercase tracking-wide">Crossfade thresholds</p>
+                <p className="text-xs text-muted-foreground font-medium uppercase tracking-wide">Blend thresholds</p>
                 <p className="text-xs text-muted-foreground mt-1">
-                  e.g. 0.3 / 0.7 → soft passages use Mellow, loud refrains use Active, with a gradual blend in between.
+                  e.g. 0.3 / 0.7 → quiet passages use the low-energy effect, loud refrains use the high-energy effect, with a gradual blend in between.
                 </p>
               </div>
-              <FormRow label="Low threshold — energy below this → pure mellow">
+              <FormRow label="Blend start — energy below this → pure low-energy effect">
                 <Input
                   type="number"
                   step={0.05}
                   min={0}
                   max={1}
-                  value={form.low_threshold}
-                  onChange={(e) => set('low_threshold', e.target.value)}
+                  value={form.blend_start}
+                  onChange={(e) => set('blend_start', e.target.value)}
                 />
               </FormRow>
-              <FormRow label="High threshold — energy above this → pure active">
+              <FormRow label="Blend end — energy above this → pure high-energy effect">
                 <Input
                   type="number"
                   step={0.05}
                   min={0}
                   max={1}
-                  value={form.high_threshold}
-                  onChange={(e) => set('high_threshold', e.target.value)}
+                  value={form.blend_end}
+                  onChange={(e) => set('blend_end', e.target.value)}
                 />
               </FormRow>
-              <FormRow label="Fade speed — EMA smoothing (0.01 slow · 0.5 fast)">
+              <FormRow
+                label="Blend response — EMA smoothing (0.01 slow · 0.5 fast)"
+                hint="How quickly the blend tracks the music energy level."
+              >
                 <Input
                   type="number"
                   step={0.01}
                   min={0.01}
                   max={0.5}
-                  value={form.fade_speed}
-                  onChange={(e) => set('fade_speed', e.target.value)}
+                  value={form.blend_response}
+                  onChange={(e) => set('blend_response', e.target.value)}
                 />
               </FormRow>
             </div>
@@ -285,7 +289,7 @@ export function Crossfaders() {
 
           <DialogFooter className="mt-4">
             <Button variant="outline" onClick={() => setEditorOpen(false)} disabled={saving}>Cancel</Button>
-            <Button onClick={handleSave} disabled={saving || !form.active_scene_id}>
+            <Button onClick={handleSave} disabled={saving || !form.high_energy_effect_id}>
               {saving ? 'Saving…' : 'Save'}
             </Button>
           </DialogFooter>
