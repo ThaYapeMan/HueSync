@@ -241,8 +241,8 @@ Verify inside the container with `squeezelite -l` — the Dummy card should appe
 
 ```bash
 apt install -y squeezelite cava python3-venv   # Debian/Ubuntu
-git clone https://github.com/ThaYapeMan/SqueezeHue.git
-cd SqueezeHue
+git clone https://github.com/ThaYapeMan/HueSync.git
+cd HueSync
 python3 -m venv .venv && source .venv/bin/activate
 pip install .
 ```
