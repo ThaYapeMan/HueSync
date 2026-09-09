@@ -15,6 +15,9 @@ import {
 import { ConfirmDialog } from '@/components/ConfirmDialog'
 import { EffectCard } from '@/components/EffectCard'
 import { LightPreview } from '@/components/LightPreview'
+import { EditorPageHeader } from '@/components/editor/EditorPageHeader'
+import { SectionLabel } from '@/components/editor/SectionLabel'
+import { AdvancedSection } from '@/components/editor/AdvancedSection'
 import { usePreviewSocket } from '@/hooks/usePreviewSocket'
 import { calcBlendMix, settleTime, responseToSlider, sliderToResponse } from '@/lib/blend'
 import { cn } from '@/lib/utils'
@@ -59,7 +62,6 @@ export function EnergyProfiles() {
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
   const [simulatedEnergy, setSimulatedEnergy] = useState(0.5)
-  const [advancedOpen, setAdvancedOpen] = useState(false)
 
   const preview = usePreviewSocket()
 
@@ -120,7 +122,6 @@ export function EnergyProfiles() {
     setForm(defaultForm())
     setSaveError(null)
     setSimulatedEnergy(0.5)
-    setAdvancedOpen(false)
   }
 
   function openEdit(ep: EnergyProfile) {
@@ -128,7 +129,6 @@ export function EnergyProfiles() {
     setForm(defaultForm(ep))
     setSaveError(null)
     setSimulatedEnergy(0.5)
-    setAdvancedOpen(false)
   }
 
   function closeEditor() {
@@ -190,37 +190,18 @@ export function EnergyProfiles() {
     return (
       <div className="flex flex-col h-full bg-background">
 
-        {/* Header */}
-        <div className="flex items-center gap-4 px-6 py-3 border-b border-border shrink-0">
-          <input
-            aria-label="Energy Profile name"
-            value={form.name}
-            onChange={(e) => set('name', e.target.value)}
-            placeholder="Energy Profile name…"
-            className="flex-1 bg-transparent text-base font-semibold outline-none placeholder:text-muted-foreground/40 min-w-0"
-          />
-          {isLive && (
-            <span className="flex items-center gap-1.5 text-xs font-medium text-green-400 shrink-0">
-              <span className="w-1.5 h-1.5 rounded-full bg-green-400" />
-              Live
-            </span>
-          )}
-          {saveError && (
-            <span className="text-xs text-destructive shrink-0">{saveError}</span>
-          )}
-          <div className="flex items-center gap-2 shrink-0">
-            <Button variant="ghost" size="sm" onClick={closeEditor} disabled={saving}>
-              Cancel
-            </Button>
-            <Button
-              size="sm"
-              onClick={handleSave}
-              disabled={saving || !form.high_energy_effect_id}
-            >
-              {saving ? 'Saving…' : 'Save'}
-            </Button>
-          </div>
-        </div>
+        <EditorPageHeader
+          aria-label="Energy Profile name"
+          name={form.name}
+          placeholder="Energy Profile name…"
+          onNameChange={(v) => set('name', v)}
+          isLive={isLive}
+          error={saveError}
+          saving={saving}
+          saveDisabled={!form.high_energy_effect_id}
+          onCancel={closeEditor}
+          onSave={handleSave}
+        />
 
         {/* Body: main + inspector */}
         <div className="flex flex-1 overflow-hidden">
@@ -230,9 +211,7 @@ export function EnergyProfiles() {
 
             {/* ── Effect cards ── */}
             <section>
-              <p className="text-xs font-semibold uppercase tracking-widest text-muted-foreground mb-3">
-                Effects
-              </p>
+              <SectionLabel className="mb-3">Effects</SectionLabel>
               <div className="grid grid-cols-2 gap-4">
                 <EffectCard
                   role="low"
@@ -251,9 +230,7 @@ export function EnergyProfiles() {
 
             {/* ── Energy blend zone ── */}
             <section>
-              <p className="text-xs font-semibold uppercase tracking-widest text-muted-foreground mb-4">
-                Energy blend
-              </p>
+              <SectionLabel className="mb-4">Energy blend</SectionLabel>
 
               {/* Zone color bar */}
               <div className="relative h-2.5 rounded-full overflow-hidden mb-4">
@@ -353,9 +330,7 @@ export function EnergyProfiles() {
 
             {/* ── Blend weights ── */}
             <section>
-              <p className="text-xs font-semibold uppercase tracking-widest text-muted-foreground mb-3">
-                Current blend
-              </p>
+              <SectionLabel className="mb-3">Current blend</SectionLabel>
               <div className="flex items-center gap-3">
                 <span className="text-xs text-blue-300 w-32 text-right truncate shrink-0">
                   {(lowEffect ?? highEffect)?.name ?? 'Low energy'}&nbsp;{lowPct}%
@@ -380,9 +355,7 @@ export function EnergyProfiles() {
 
             {/* ── Output preview ── */}
             <section>
-              <p className="text-xs font-semibold uppercase tracking-widest text-muted-foreground mb-2">
-                Output preview
-              </p>
+              <SectionLabel className="mb-2">Output preview</SectionLabel>
               <div className="rounded-xl bg-black/25 border border-border/40">
                 <LightPreview
                   lowEffectType={lowEffectType}
@@ -401,9 +374,7 @@ export function EnergyProfiles() {
 
               {/* Response */}
               <div>
-                <p className="text-xs font-semibold uppercase tracking-widest text-muted-foreground mb-3">
-                  Response
-                </p>
+                <SectionLabel className="mb-3">Response</SectionLabel>
                 <div className="space-y-2">
                   <div className="flex items-center gap-2">
                     <span className="text-xs text-muted-foreground w-12 shrink-0">Smooth</span>
@@ -427,58 +398,44 @@ export function EnergyProfiles() {
               <Separator />
 
               {/* Advanced */}
-              <div>
-                <button
-                  type="button"
-                  className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors w-full"
-                  onClick={() => setAdvancedOpen((o) => !o)}
-                  aria-expanded={advancedOpen}
-                >
-                  <span className="text-[10px]">{advancedOpen ? '▾' : '▸'}</span>
-                  <span className="font-semibold uppercase tracking-widest">Advanced</span>
-                </button>
-
-                {advancedOpen && (
-                  <div className="mt-3 space-y-3 pl-3 border-l border-border">
-                    <div className="space-y-1">
-                      <Label className="text-xs text-muted-foreground">Blend start</Label>
-                      <Input
-                        type="number"
-                        step={0.05}
-                        min={0}
-                        max={1}
-                        value={form.blend_start}
-                        onChange={(e) => set('blend_start', e.target.value)}
-                        className="h-7 text-xs"
-                      />
-                    </div>
-                    <div className="space-y-1">
-                      <Label className="text-xs text-muted-foreground">Blend end</Label>
-                      <Input
-                        type="number"
-                        step={0.05}
-                        min={0}
-                        max={1}
-                        value={form.blend_end}
-                        onChange={(e) => set('blend_end', e.target.value)}
-                        className="h-7 text-xs"
-                      />
-                    </div>
-                    <div className="space-y-1">
-                      <Label className="text-xs text-muted-foreground">Response (exact)</Label>
-                      <Input
-                        type="number"
-                        step={0.01}
-                        min={0.01}
-                        max={0.5}
-                        value={form.blend_response}
-                        onChange={(e) => set('blend_response', e.target.value)}
-                        className="h-7 text-xs"
-                      />
-                    </div>
-                  </div>
-                )}
-              </div>
+              <AdvancedSection>
+                <div className="space-y-1">
+                  <Label className="text-xs text-muted-foreground">Blend start</Label>
+                  <Input
+                    type="number"
+                    step={0.05}
+                    min={0}
+                    max={1}
+                    value={form.blend_start}
+                    onChange={(e) => set('blend_start', e.target.value)}
+                    className="h-7 text-xs"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-xs text-muted-foreground">Blend end</Label>
+                  <Input
+                    type="number"
+                    step={0.05}
+                    min={0}
+                    max={1}
+                    value={form.blend_end}
+                    onChange={(e) => set('blend_end', e.target.value)}
+                    className="h-7 text-xs"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-xs text-muted-foreground">Response (exact)</Label>
+                  <Input
+                    type="number"
+                    step={0.01}
+                    min={0.01}
+                    max={0.5}
+                    value={form.blend_response}
+                    onChange={(e) => set('blend_response', e.target.value)}
+                    className="h-7 text-xs"
+                  />
+                </div>
+              </AdvancedSection>
 
             </div>
           </aside>

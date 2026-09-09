@@ -72,9 +72,11 @@ export default function App() {
         </nav>
 
         <main className="flex-1 overflow-hidden flex flex-col">
-          {/* Energy Profiles manages its own layout (list ↔ full-page workspace) */}
+          {/* Effects and Energy Profiles manage their own layout (list ↔ full-page workspace) */}
           {activeTab === 'energy-profiles' ? (
             <EnergyProfiles />
+          ) : activeTab === 'effects' ? (
+            <Effects />
           ) : (
             <div className="flex-1 overflow-y-auto">
               <div className={cn('mx-auto px-6 py-6', activeTab === 'now-playing' || activeTab === 'couplings' ? 'max-w-5xl' : 'max-w-3xl')}>
@@ -83,7 +85,6 @@ export default function App() {
                 )}
                 {activeTab === 'players' && <Players />}
                 {activeTab === 'analysers' && <Analysers />}
-                {activeTab === 'effects' && <Effects />}
                 {activeTab === 'zones' && <Zones />}
                 {activeTab === 'couplings' && (
                   <Couplings
