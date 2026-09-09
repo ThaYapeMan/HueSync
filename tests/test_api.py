@@ -389,21 +389,32 @@ def test_create_and_get_analyser(client: TestClient):
 
 
 # ---------------------------------------------------------------------------
-# Effects (route /scenes preserved for backward compatibility)
+# Effects  (canonical /effects; deprecated alias /scenes)
 # ---------------------------------------------------------------------------
 
 
-def test_create_and_get_scene(client: TestClient):
+def test_create_and_get_effect(client: TestClient):
     payload = {"name": "Vivid", "effect_type": "spectrum_rgb", "sensitivity": 1.5}
-    resp = client.post("/api/scenes", json=payload)
+    resp = client.post("/api/effects", json=payload)
     assert resp.status_code == 201
     body = resp.json()
-    scene_id = body["id"]
+    effect_id = body["id"]
     assert body["sensitivity"] == 1.5
 
-    resp2 = client.get(f"/api/scenes/{scene_id}")
+    resp2 = client.get(f"/api/effects/{effect_id}")
     assert resp2.status_code == 200
     assert resp2.json()["name"] == "Vivid"
+
+
+def test_scenes_alias_still_works(client: TestClient):
+    """Deprecated /scenes routes must remain functional until Fase 5."""
+    payload = {"name": "Alias", "effect_type": "mono_pulse"}
+    resp = client.post("/api/scenes", json=payload)
+    assert resp.status_code == 201
+    scene_id = resp.json()["id"]
+
+    assert client.get(f"/api/scenes/{scene_id}").status_code == 200
+    assert client.get("/api/scenes").status_code == 200
 
 
 # ---------------------------------------------------------------------------

@@ -830,17 +830,17 @@ async def delete_analyser(ac_id: str, request: Request):
 
 
 # ---------------------------------------------------------------------------
-# Effects (route paths keep /scenes for API backward compatibility — Fase 2+)
+# Effects  (canonical: /effects; deprecated alias: /scenes)
 # ---------------------------------------------------------------------------
 
 
-@router.get("/scenes")
-async def list_scenes(request: Request):
+@router.get("/effects")
+async def list_effects_route(request: Request):
     return [e.to_dict() for e in _storage(request).list_effects()]
 
 
-@router.post("/scenes", status_code=201)
-async def create_scene(request: Request, body: EffectCreateBody):
+@router.post("/effects", status_code=201)
+async def create_effect_route(request: Request, body: EffectCreateBody):
     storage = _storage(request)
     _assert_name_unique(body.name, [(e.id, e.name) for e in storage.list_effects()], "Effect")
     if body.effect_type not in EFFECT_IDS:
@@ -863,19 +863,19 @@ async def create_scene(request: Request, body: EffectCreateBody):
     return JSONResponse(content=effect.to_dict(), status_code=201)
 
 
-@router.get("/scenes/{scene_id}")
-async def get_scene(scene_id: str, request: Request):
-    effect = _storage(request).get_effect(scene_id)
+@router.get("/effects/{effect_id}")
+async def get_effect_route(effect_id: str, request: Request):
+    effect = _storage(request).get_effect(effect_id)
     if effect is None:
         raise HTTPException(status_code=404, detail="Effect not found")
     return effect.to_dict()
 
 
-@router.patch("/scenes/{scene_id}")
-async def patch_scene(scene_id: str, request: Request, body: EffectPatchBody):
+@router.patch("/effects/{effect_id}")
+async def patch_effect_route(effect_id: str, request: Request, body: EffectPatchBody):
     storage = _storage(request)
     manager = _manager(request)
-    effect = storage.get_effect(scene_id)
+    effect = storage.get_effect(effect_id)
     if effect is None:
         raise HTTPException(status_code=404, detail="Effect not found")
     updates = body.model_dump(exclude_unset=True)
@@ -884,7 +884,7 @@ async def patch_scene(scene_id: str, request: Request, body: EffectPatchBody):
             updates["name"],
             [(e.id, e.name) for e in storage.list_effects()],
             "Effect",
-            exclude_id=scene_id,
+            exclude_id=effect_id,
         )
     for field, value in updates.items():
         if field == "effect_type" and value not in EFFECT_IDS:
@@ -901,28 +901,54 @@ async def patch_scene(scene_id: str, request: Request, body: EffectPatchBody):
         coupling = storage.get_coupling(active_id)
         if coupling and coupling.energy_profile_id:
             cf = storage.get_energy_profile(coupling.energy_profile_id)
-            if cf and cf.high_energy_effect_id == scene_id:
+            if cf and cf.high_energy_effect_id == effect_id:
                 await _apply_coupling_action(coupling, storage, manager, active_fields)
     return effect.to_dict()
 
 
-@router.delete("/scenes/{scene_id}", status_code=204)
+@router.delete("/effects/{effect_id}", status_code=204)
+async def delete_effect_route(effect_id: str, request: Request):
+    _storage(request).delete_effect(effect_id)
+
+
+# Deprecated aliases — /scenes kept for backward compatibility; remove in Fase 5.
+@router.get("/scenes", deprecated=True)
+async def list_scenes(request: Request):
+    return await list_effects_route(request)
+
+
+@router.post("/scenes", status_code=201, deprecated=True)
+async def create_scene(request: Request, body: EffectCreateBody):
+    return await create_effect_route(request, body)
+
+
+@router.get("/scenes/{scene_id}", deprecated=True)
+async def get_scene(scene_id: str, request: Request):
+    return await get_effect_route(scene_id, request)
+
+
+@router.patch("/scenes/{scene_id}", deprecated=True)
+async def patch_scene(scene_id: str, request: Request, body: EffectPatchBody):
+    return await patch_effect_route(scene_id, request, body)
+
+
+@router.delete("/scenes/{scene_id}", status_code=204, deprecated=True)
 async def delete_scene(scene_id: str, request: Request):
-    _storage(request).delete_effect(scene_id)
+    return await delete_effect_route(scene_id, request)
 
 
 # ---------------------------------------------------------------------------
-# EnergyProfiles (route paths stay /crossfaders — Fase 3)
+# EnergyProfiles  (canonical: /energy-profiles; deprecated alias: /crossfaders)
 # ---------------------------------------------------------------------------
 
 
-@router.get("/crossfaders")
-async def list_crossfaders(request: Request):
+@router.get("/energy-profiles")
+async def list_energy_profiles_route(request: Request):
     return [ep.to_dict() for ep in _storage(request).list_energy_profiles()]
 
 
-@router.post("/crossfaders", status_code=201)
-async def create_crossfader(request: Request, body: EnergyProfileCreateBody):
+@router.post("/energy-profiles", status_code=201)
+async def create_energy_profile_route(request: Request, body: EnergyProfileCreateBody):
     storage = _storage(request)
     _assert_name_unique(
         body.name, [(x.id, x.name) for x in storage.list_energy_profiles()], "EnergyProfile"
@@ -939,19 +965,19 @@ async def create_crossfader(request: Request, body: EnergyProfileCreateBody):
     return JSONResponse(content=ep.to_dict(), status_code=201)
 
 
-@router.get("/crossfaders/{cf_id}")
-async def get_crossfader(cf_id: str, request: Request):
-    ep = _storage(request).get_energy_profile(cf_id)
+@router.get("/energy-profiles/{ep_id}")
+async def get_energy_profile_route(ep_id: str, request: Request):
+    ep = _storage(request).get_energy_profile(ep_id)
     if ep is None:
         raise HTTPException(status_code=404, detail="EnergyProfile not found")
     return ep.to_dict()
 
 
-@router.patch("/crossfaders/{cf_id}")
-async def patch_crossfader(cf_id: str, request: Request, body: EnergyProfilePatchBody):
+@router.patch("/energy-profiles/{ep_id}")
+async def patch_energy_profile_route(ep_id: str, request: Request, body: EnergyProfilePatchBody):
     storage = _storage(request)
     manager = _manager(request)
-    ep = storage.get_energy_profile(cf_id)
+    ep = storage.get_energy_profile(ep_id)
     if ep is None:
         raise HTTPException(status_code=404, detail="EnergyProfile not found")
     updates = body.model_dump(exclude_unset=True)
@@ -960,7 +986,7 @@ async def patch_crossfader(cf_id: str, request: Request, body: EnergyProfilePatc
             updates["name"],
             [(x.id, x.name) for x in storage.list_energy_profiles()],
             "EnergyProfile",
-            exclude_id=cf_id,
+            exclude_id=ep_id,
         )
     for field, value in updates.items():
         setattr(ep, field, value)
@@ -970,14 +996,40 @@ async def patch_crossfader(cf_id: str, request: Request, body: EnergyProfilePatc
     active_fields = set(updates.keys()) - {"name"}
     if active_fields and active_id:
         coupling = storage.get_coupling(active_id)
-        if coupling and coupling.energy_profile_id == cf_id:
+        if coupling and coupling.energy_profile_id == ep_id:
             await _apply_coupling_action(coupling, storage, manager, active_fields)
     return ep.to_dict()
 
 
-@router.delete("/crossfaders/{cf_id}", status_code=204)
+@router.delete("/energy-profiles/{ep_id}", status_code=204)
+async def delete_energy_profile_route(ep_id: str, request: Request):
+    _storage(request).delete_energy_profile(ep_id)
+
+
+# Deprecated aliases — /crossfaders kept for backward compatibility; remove in Fase 5.
+@router.get("/crossfaders", deprecated=True)
+async def list_crossfaders(request: Request):
+    return await list_energy_profiles_route(request)
+
+
+@router.post("/crossfaders", status_code=201, deprecated=True)
+async def create_crossfader(request: Request, body: EnergyProfileCreateBody):
+    return await create_energy_profile_route(request, body)
+
+
+@router.get("/crossfaders/{cf_id}", deprecated=True)
+async def get_crossfader(cf_id: str, request: Request):
+    return await get_energy_profile_route(cf_id, request)
+
+
+@router.patch("/crossfaders/{cf_id}", deprecated=True)
+async def patch_crossfader(cf_id: str, request: Request, body: EnergyProfilePatchBody):
+    return await patch_energy_profile_route(cf_id, request, body)
+
+
+@router.delete("/crossfaders/{cf_id}", status_code=204, deprecated=True)
 async def delete_crossfader(cf_id: str, request: Request):
-    _storage(request).delete_energy_profile(cf_id)
+    return await delete_energy_profile_route(cf_id, request)
 
 
 # ---------------------------------------------------------------------------
