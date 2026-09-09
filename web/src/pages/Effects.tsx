@@ -112,7 +112,7 @@ function GalleryCard({ effect, onEdit, onDelete }: GalleryCardProps) {
     >
       {/* Visual preview area */}
       <div className="bg-black/20 py-5 px-4 flex flex-col items-center justify-center gap-3 min-h-[96px]">
-        <EffectPreview effectType={effect.effect_type} energy={0.62} count={6} size="md" />
+        <EffectPreview effectType={effect.effect_type} energy={0.80} count={6} size="md" />
         <div className={cn('h-1 w-14 rounded-full opacity-60', swatchClass)} />
       </div>
 
