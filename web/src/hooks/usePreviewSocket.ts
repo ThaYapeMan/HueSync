@@ -6,6 +6,7 @@ export interface SocketStatus {
   active_coupling_name: string | null
   active_player_type: string | null
   active_zone_id: string | null
+  active_energy_profile_id: string | null
   sync_master: string | null
   sync_master_name: string | null
   applied_delay_ms: number
@@ -30,6 +31,7 @@ export interface PreviewState {
   onset_mid: boolean
   onset_treble: boolean
   mix: number
+  energy: number
   bars: number[]
   status: SocketStatus | null
   connected: boolean
@@ -44,6 +46,7 @@ const INITIAL_STATE: PreviewState = {
   onset_mid: false,
   onset_treble: false,
   mix: 0,
+  energy: 0,
   bars: [],
   status: null,
   connected: false,
@@ -104,6 +107,7 @@ export function usePreviewSocket(): PreviewState {
           const onset_mid = (msg.onset_mid as boolean) ?? false
           const onset_treble = (msg.onset_treble as boolean) ?? false
           const mix = (msg.mix as number) ?? 0
+          const energy = (msg.energy as number) ?? 0
 
           setState((s) => ({
             ...s,
@@ -114,6 +118,7 @@ export function usePreviewSocket(): PreviewState {
             onset_mid: onset_mid || s.onset_mid,
             onset_treble: onset_treble || s.onset_treble,
             mix,
+            energy,
           }))
 
           if (onset) {

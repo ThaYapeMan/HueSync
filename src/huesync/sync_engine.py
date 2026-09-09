@@ -1547,6 +1547,7 @@ class SyncEngine:
         self._delay_buffer: deque[Scene | None] = deque()
         self._last_onset: bool = False
         self._last_mix: float = 0.0
+        self._last_energy: float = 0.0
         self._last_bars: list[float] = []
         self._shm_source: PcmSource | None = None
         self._pcm_onset: StftOnsetPipeline | None = None
@@ -1694,6 +1695,11 @@ class SyncEngine:
         return self._last_mix
 
     @property
+    def last_energy(self) -> float:
+        """Raw full-band energy of the last frame (0.0–1.0)."""
+        return self._last_energy
+
+    @property
     def last_pcm_onset(self) -> bool:
         return self._last_pcm_onset
 
@@ -1786,6 +1792,7 @@ class SyncEngine:
                 self._last_bars = features.bars
                 scene: Scene = self._effect.render(features, t)
                 self._last_mix = self._effect.mix
+                self._last_energy = features.full
                 self._delay_buffer.append(scene)
                 self._diag_frame += 1
                 if self._diag_frame % 60 == 0:

@@ -25,6 +25,8 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
+import { EnergyBlendEditor } from '@/components/EnergyBlendEditor'
+import { usePreviewSocket } from '@/hooks/usePreviewSocket'
 import {
   type EnergyProfile,
   type Effect,
@@ -75,6 +77,7 @@ export function EnergyProfiles() {
   const [form, setForm] = useState<FormState>(defaultForm())
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
+  const preview = usePreviewSocket()
 
   async function load() {
     try {
@@ -201,12 +204,12 @@ export function EnergyProfiles() {
       )}
 
       <Dialog open={editorOpen} onOpenChange={(o) => { if (!o) setEditorOpen(false) }}>
-        <DialogContent className="max-w-sm">
+        <DialogContent className="max-w-md flex flex-col max-h-[90vh]">
           <DialogHeader>
             <DialogTitle>{editingEp ? 'Edit energy profile' : 'New energy profile'}</DialogTitle>
           </DialogHeader>
 
-          <div className="space-y-3">
+          <div className="overflow-y-auto flex-1 pr-1 space-y-3">
             <FormRow label="Name">
               <Input
                 value={form.name}
@@ -242,46 +245,21 @@ export function EnergyProfiles() {
               </Select>
             </FormRow>
 
-            <div className="border-t pt-3 space-y-3">
-              <div>
-                <p className="text-xs text-muted-foreground font-medium uppercase tracking-wide">Blend thresholds</p>
-                <p className="text-xs text-muted-foreground mt-1">
-                  e.g. 0.3 / 0.7 → quiet passages use the low-energy effect, loud refrains use the high-energy effect, with a gradual blend in between.
-                </p>
-              </div>
-              <FormRow label="Blend start — energy below this → pure low-energy effect">
-                <Input
-                  type="number"
-                  step={0.05}
-                  min={0}
-                  max={1}
-                  value={form.blend_start}
-                  onChange={(e) => set('blend_start', e.target.value)}
-                />
-              </FormRow>
-              <FormRow label="Blend end — energy above this → pure high-energy effect">
-                <Input
-                  type="number"
-                  step={0.05}
-                  min={0}
-                  max={1}
-                  value={form.blend_end}
-                  onChange={(e) => set('blend_end', e.target.value)}
-                />
-              </FormRow>
-              <FormRow
-                label="Blend response — EMA smoothing (0.01 slow · 0.5 fast)"
-                hint="How quickly the blend tracks the music energy level."
-              >
-                <Input
-                  type="number"
-                  step={0.01}
-                  min={0.01}
-                  max={0.5}
-                  value={form.blend_response}
-                  onChange={(e) => set('blend_response', e.target.value)}
-                />
-              </FormRow>
+            <div className="border-t pt-3">
+              <p className="text-xs text-muted-foreground font-medium uppercase tracking-wide mb-3">Energy blend</p>
+              <EnergyBlendEditor
+                blendStart={parseFloat(form.blend_start)}
+                blendEnd={parseFloat(form.blend_end)}
+                blendResponse={parseFloat(form.blend_response)}
+                onChangeBlendStart={(v) => set('blend_start', String(v))}
+                onChangeBlendEnd={(v) => set('blend_end', String(v))}
+                onChangeBlendResponse={(v) => set('blend_response', String(v))}
+                liveEnergy={
+                  preview.status?.active_energy_profile_id === editingEp?.id
+                    ? preview.energy
+                    : undefined
+                }
+              />
             </div>
           </div>
 

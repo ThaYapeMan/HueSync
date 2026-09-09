@@ -329,6 +329,19 @@ class PlayerManager:
         return 0.0
 
     @property
+    def last_energy(self) -> float:
+        """Raw full-band energy of the last frame (0.0–1.0)."""
+        if self._active and self._active.sync_engine:
+            return self._active.sync_engine.last_energy
+        return 0.0
+
+    @property
+    def active_energy_profile_id(self) -> str | None:
+        if self._active and self._active.coupling:
+            return self._active.coupling.energy_profile_id
+        return None
+
+    @property
     def active_coupling_name(self) -> str | None:
         if self._active and self._active.coupling:
             return self._active.coupling.name

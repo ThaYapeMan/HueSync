@@ -50,10 +50,12 @@ def _make_mock_manager() -> MagicMock:
     type(manager).last_onset_mid = PropertyMock(return_value=False)
     type(manager).last_onset_treble = PropertyMock(return_value=False)
     type(manager).last_mix = PropertyMock(return_value=0.0)
+    type(manager).last_energy = PropertyMock(return_value=0.0)
     # WebSocket status properties
     type(manager).active_coupling_id = PropertyMock(return_value=None)
     type(manager).active_coupling_name = PropertyMock(return_value=None)
     type(manager).active_zone_id = PropertyMock(return_value=None)
+    type(manager).active_energy_profile_id = PropertyMock(return_value=None)
     type(manager).detected_sync_master_name = PropertyMock(return_value=None)
     type(manager).active_color_mode = PropertyMock(return_value=None)
     type(manager).active_effect = PropertyMock(return_value=None)
