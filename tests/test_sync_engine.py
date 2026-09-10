@@ -1,3 +1,4 @@
+import numpy as np
 import pytest
 
 from huesync.models import Profile
@@ -5,6 +6,7 @@ from huesync.sync_engine import (
     BandNormaliser,
     ColourModeEffect,
     OnsetDetector,
+    SustainedEnergyTracker,
     SyncEngine,
     _band_average,
     _band_avg,
@@ -446,6 +448,146 @@ def test_normaliser_frame_rate_consistency():
             assert abs(b - expected) <= 3, (
                 f"At dt={dt:.4f}s: expected byte ≈ {expected} for 2× step, got {b}"
             )
+
+
+# ---------------------------------------------------------------------------
+# SustainedEnergyTracker
+# ---------------------------------------------------------------------------
+
+_SR = 44100  # synthetic sample rate for tests
+
+
+def _rms_frame(rms: float, n: int = 2048) -> np.ndarray:
+    """Return *n* samples whose RMS exactly equals *rms*."""
+    return np.full(n, rms / (n ** 0.5) if n else 0.0, dtype=np.float32)
+
+
+def _silence(n: int = 2048) -> np.ndarray:
+    return np.zeros(n, dtype=np.float32)
+
+
+def _se_after_warmup(
+    rms: float,
+    n_frames: int = 600,
+    dt: float = 1 / 30,
+    tracker: SustainedEnergyTracker | None = None,
+) -> tuple[SustainedEnergyTracker, float | None]:
+    """Feed *n_frames* identical-RMS frames; return (tracker, last_value)."""
+    t = tracker or SustainedEnergyTracker()
+    frame = _rms_frame(rms)
+    val: float | None = None
+    for _ in range(n_frames):
+        val = t.push(frame, dt)
+    return t, val
+
+
+# Test A — uninitialised tracker returns None before first non-silent frame.
+def test_se_returns_none_before_first_non_silent_frame():
+    t = SustainedEnergyTracker()
+    assert t.push(_silence(), 1 / 30) is None
+
+
+# Test B — stable sustained input converges to 0.5 (short_ema == long_ema → 0 dB → 0.5).
+def test_se_stable_input_converges_to_half():
+    _, val = _se_after_warmup(rms=0.1)
+    assert val is not None
+    assert abs(val - 0.5) < 0.02, f"Expected ≈ 0.5 after convergence, got {val:.4f}"
+
+
+# Test C — chorus step: SE rises well above 0.5 and approaches 1.0.
+def test_se_chorus_step_rises_above_blend_end():
+    t, _ = _se_after_warmup(rms=0.05)   # quiet section, long_ema ≈ 0.05
+    # Loud section at 2× RMS (+6 dB): should push SE toward 1.0.
+    loud_frame = _rms_frame(0.10)
+    val: float | None = None
+    for _ in range(90):   # 3 s at 30 Hz
+        val = t.push(loud_frame, 1 / 30)
+    assert val is not None
+    assert val > 0.70, f"After 3 s at 2× RMS, expected SE > 0.70, got {val:.4f}"
+
+
+# Test D — quiet section: SE drops below 0.5.
+def test_se_quiet_section_drops_below_half():
+    t, _ = _se_after_warmup(rms=0.10)   # loud reference
+    # Quiet section at half RMS (−6 dB): should push SE toward 0.0.
+    quiet_frame = _rms_frame(0.05)
+    val: float | None = None
+    for _ in range(90):
+        val = t.push(quiet_frame, 1 / 30)
+    assert val is not None
+    assert val < 0.30, f"After 3 s at 0.5× RMS, expected SE < 0.30, got {val:.4f}"
+
+
+# Test E — scale invariance: SE trajectory identical at L=0.5 and L=1.0.
+def test_se_scale_invariant():
+    def _trajectory(scale: float) -> list[float]:
+        t = SustainedEnergyTracker()
+        vals: list[float] = []
+        for step_rms in [0.05 * scale] * 200 + [0.10 * scale] * 90:
+            v = t.push(_rms_frame(step_rms), 1 / 30)
+            if v is not None:
+                vals.append(v)
+        return vals
+
+    traj_half = _trajectory(0.5)
+    traj_full = _trajectory(1.0)
+    assert len(traj_half) == len(traj_full)
+    for i, (a, b) in enumerate(zip(traj_half, traj_full, strict=True)):
+        assert abs(a - b) < 0.01, (
+            f"Frame {i}: SE differs by {abs(a-b):.4f} between scales — not scale-invariant"
+        )
+
+
+# Test F — long silence does not drain long_ema: no false HIGH on resume.
+def test_se_silence_does_not_cause_false_high_on_resume():
+    t, _ = _se_after_warmup(rms=0.05)
+
+    # 30 s of silence.
+    for _ in range(900):
+        t.push(_silence(), 1 / 30)
+
+    # Resume at the same level — should be near 0.5, NOT near 1.0.
+    resume_frame = _rms_frame(0.05)
+    val: float | None = None
+    for _ in range(10):
+        val = t.push(resume_frame, 1 / 30)
+    assert val is not None
+    assert val < 0.70, (
+        f"After silence + resume at same level, expected SE < 0.70 (no false HIGH), got {val:.4f}"
+    )
+
+
+# Test G — rate independence: same SE result at 30 Hz and 100 Hz after equal wall-clock time.
+def test_se_rate_independent():
+    wall_time_s = 10.0
+
+    def _run(rate_hz: float) -> float:
+        t = SustainedEnergyTracker()
+        dt = 1.0 / rate_hz
+        n = round(wall_time_s / dt)
+        rms_seq = [0.05] * (n // 2) + [0.10] * (n - n // 2)
+        val: float | None = None
+        for rms in rms_seq:
+            val = t.push(_rms_frame(rms), dt)
+        assert val is not None
+        return val
+
+    v30 = _run(30.0)
+    v100 = _run(100.0)
+    assert abs(v30 - v100) < 0.05, (
+        f"SE after 10 s: 30 Hz={v30:.4f}, 100 Hz={v100:.4f} — rate dependence detected"
+    )
+
+
+# Test H — reset() clears state; first post-reset push returns None.
+def test_se_reset_clears_state():
+    t, _ = _se_after_warmup(rms=0.1)
+    assert t.push(_rms_frame(0.1), 1 / 30) is not None   # was initialised
+
+    t.reset()
+    assert t.push(_silence(), 1 / 30) is None, (
+        "After reset(), first silent push must return None (uninitialised)"
+    )
 
 
 # ---------------------------------------------------------------------------

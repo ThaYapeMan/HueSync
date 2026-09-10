@@ -248,6 +248,95 @@ class BandNormaliser:
 
 
 # ---------------------------------------------------------------------------
+# SustainedEnergyTracker — dual-timescale log-ratio on raw PCM RMS
+# ---------------------------------------------------------------------------
+
+
+class SustainedEnergyTracker:
+    """Track sustained musical energy from raw PCM samples.
+
+    Computes the ratio of a short-term EMA (τ ≈ 300 ms, section level) to a
+    long-term EMA (τ ≈ 30 s, programme mean) in dB, then maps ±range_db to
+    [0, 1].  The ratio is scale-invariant: identical trajectories at L=0.5
+    and L=1.0.  This contrasts with features.full (= relative exertion,
+    a transient detector) and is the correct input for EnergyProfile blend.
+
+    Silence handling:
+    - During silence (RMS < _SILENCE_THRESH), neither EMA is updated so the
+      long_ema does not drain toward zero — a long quiet break does not
+      cause a false HIGH on resume.
+    - Until the tracker has seen at least one non-silent frame the state is
+      uninitialised and push() returns None.
+
+    push() is safe to call every SyncEngine tick whether the current path uses
+    cava or the PCM pipeline — the input comes from the raw shm PCM buffer
+    that is already read for onset detection.
+    """
+
+    DEFAULT_TAU_SHORT_S: float = 0.300   # 300 ms — reacts within a musical phrase
+    DEFAULT_TAU_LONG_S: float = 30.0     # 30 s — tracks programme mean
+    DEFAULT_RANGE_DB: float = 6.0        # ±6 dB → full [0, 1] output swing
+    _SILENCE_THRESH: float = 1e-4        # RMS below this → treat as silence
+
+    def __init__(
+        self,
+        tau_short_s: float = DEFAULT_TAU_SHORT_S,
+        tau_long_s: float = DEFAULT_TAU_LONG_S,
+        range_db: float = DEFAULT_RANGE_DB,
+    ) -> None:
+        self._tau_short = tau_short_s
+        self._tau_long = tau_long_s
+        self._range_db = range_db
+        self._short_ema: float | None = None   # None = uninitialised
+        self._long_ema: float | None = None
+
+    def push(self, samples: np.ndarray, dt: float) -> float | None:
+        """Feed raw PCM samples for one pipeline tick; return sustained energy.
+
+        *samples* must be mono float32 in [−1.0, 1.0].  *dt* is the elapsed
+        time in seconds since the last call (rate-independent time constants).
+
+        Returns a value in [0.0, 1.0], or None if the tracker has not yet
+        seen a non-silent frame and cannot produce a meaningful reading.
+        """
+        if len(samples) == 0:
+            return None if self._short_ema is None else self._value()
+
+        rms = float(np.sqrt(np.mean(samples ** 2)))
+
+        if rms < self._SILENCE_THRESH:
+            # Do not drain long_ema during silence — would cause false HIGH on resume.
+            return None if self._short_ema is None else self._value()
+
+        a_s = 1.0 - math.exp(-dt / max(self._tau_short, 1e-9))
+        a_l = 1.0 - math.exp(-dt / max(self._tau_long, 1e-9))
+
+        if self._short_ema is None:
+            # Seed both EMAs to the first observed RMS so startup is not a
+            # false transient (SE = 0.5, the neutral mid-point, immediately).
+            self._short_ema = rms
+            self._long_ema = rms
+        else:
+            assert self._long_ema is not None
+            self._short_ema += a_s * (rms - self._short_ema)
+            self._long_ema += a_l * (rms - self._long_ema)
+
+        return self._value()
+
+    def _value(self) -> float:
+        assert self._short_ema is not None and self._long_ema is not None
+        rel_db = 20.0 * math.log10(
+            max(self._short_ema, 1e-9) / max(self._long_ema, 1e-9)
+        )
+        return max(0.0, min(1.0, (rel_db + self._range_db) / (2.0 * self._range_db)))
+
+    def reset(self) -> None:
+        """Clear all state (call when a new session begins)."""
+        self._short_ema = None
+        self._long_ema = None
+
+
+# ---------------------------------------------------------------------------
 # OnsetDetector — Dixon (2006) three-condition peak-picking
 # ---------------------------------------------------------------------------
 
