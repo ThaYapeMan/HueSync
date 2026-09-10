@@ -72,26 +72,26 @@ export default function App() {
         </nav>
 
         <main className="flex-1 overflow-hidden flex flex-col">
-          {/* Effects and Energy Profiles manage their own layout (list ↔ full-page workspace) */}
+          {/* Effects, Energy Profiles, and Couplings manage their own full-page layout */}
           {activeTab === 'energy-profiles' ? (
             <EnergyProfiles />
           ) : activeTab === 'effects' ? (
             <Effects />
+          ) : activeTab === 'couplings' ? (
+            <Couplings
+              activeCouplingId={status?.active_coupling_id ?? null}
+              onActivationChange={() => {}}
+              onNavigate={(tab) => setActiveTab(tab as Tab)}
+            />
           ) : (
             <div className="flex-1 overflow-y-auto">
-              <div className={cn('mx-auto px-6 py-6', activeTab === 'now-playing' || activeTab === 'couplings' ? 'max-w-5xl' : 'max-w-3xl')}>
+              <div className={cn('mx-auto px-6 py-6', activeTab === 'now-playing' ? 'max-w-5xl' : 'max-w-3xl')}>
                 {activeTab === 'now-playing' && (
                   <NowPlaying colour={colour} channel_colours={channel_colours} onset={onset} onset_bass={onset_bass} onset_mid={onset_mid} onset_treble={onset_treble} mix={mix} bars={bars} status={status} />
                 )}
                 {activeTab === 'players' && <Players />}
                 {activeTab === 'analysers' && <Analysers />}
                 {activeTab === 'zones' && <Zones />}
-                {activeTab === 'couplings' && (
-                  <Couplings
-                    activeCouplingId={status?.active_coupling_id ?? null}
-                    onActivationChange={() => {}}
-                  />
-                )}
                 {activeTab === 'latency' && (
                   <Latency
                     syncMaster={status?.sync_master ?? null}

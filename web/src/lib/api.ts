@@ -296,3 +296,9 @@ export const deactivateCoupling = () =>
   request<{ active_id: null }>('/api/couplings/deactivate', { method: 'POST' })
 export const cloneCoupling = (id: string) =>
   request<Coupling>(`/api/couplings/${id}/clone`, { method: 'POST' })
+export const cloneAnalyser = (id: string) =>
+  request<Analyser>(`/api/analysers/${id}/clone`, { method: 'POST' })
+export const cloneEffect = (id: string) =>
+  request<Effect>(`/api/effects/${id}/clone`, { method: 'POST' })
+export const cloneEnergyProfile = (id: string) =>
+  request<EnergyProfile>(`/api/energy-profiles/${id}/clone`, { method: 'POST' })
