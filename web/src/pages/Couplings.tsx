@@ -1,16 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogDescription,
-  DialogFooter,
-} from '@/components/ui/dialog'
 import {
   Select,
   SelectContent,
@@ -19,19 +9,15 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
-import { SectionLabel } from '@/components/editor/SectionLabel'
-import { LightPreview } from '@/components/LightPreview'
+import { getEffectRgb } from '@/lib/effectColors'
 import { cn } from '@/lib/utils'
 import {
-  EFFECTS,
   type Coupling,
   type VirtualPlayer,
   type Zone,
   type Analyser,
   type Effect,
   type EnergyProfile,
-  type Controller,
-  type EntertainmentArea,
   getCouplings,
   createCoupling,
   updateCoupling,
@@ -40,17 +26,10 @@ import {
   cloneCoupling,
   deactivateCoupling,
   getVirtualPlayers,
-  createVirtualPlayer,
   getZones,
-  createZone,
   getAnalysers,
-  createAnalyser,
   getEffects,
-  createEffect,
   getEnergyProfiles,
-  createEnergyProfile,
-  getControllers,
-  getControllerAreas,
   getStatus,
 } from '@/lib/api'
 
@@ -60,527 +39,183 @@ interface Props {
   onNavigate?: (tab: string) => void
 }
 
-// ---- Mini-dialog: New Player ----
+// ── NodeConnector ─────────────────────────────────────────────────────────────
 
-interface NewPlayerDialogProps {
-  open: boolean
-  onClose: () => void
-  onCreated: (player: VirtualPlayer) => void
-}
-
-function NewPlayerDialog({ open, onClose, onCreated }: NewPlayerDialogProps) {
-  const [lmsHost, setLmsHost] = useState('')
-  const [playerName, setPlayerName] = useState('HueSync')
-  const [alsaDevice, setAlsaDevice] = useState('')
-  const [saving, setSaving] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-
-  useEffect(() => {
-    if (open) { setLmsHost(''); setPlayerName('HueSync'); setAlsaDevice(''); setError(null) }
-  }, [open])
-
-  async function handleSave() {
-    setSaving(true)
-    setError(null)
-    try {
-      const player = await createVirtualPlayer({
-        type: 'LMS', lms_host: lmsHost, lms_port: 9000,
-        player_name: playerName, display_name: '', alsa_device: alsaDevice, follow_player_mac: '',
-      })
-      onCreated(player)
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Save failed')
-    } finally {
-      setSaving(false)
-    }
-  }
-
+function NodeConnector() {
   return (
-    <Dialog open={open} onOpenChange={(o) => { if (!o) onClose() }}>
-      <DialogContent className="max-w-sm">
-        <DialogHeader>
-          <DialogTitle>New virtual player</DialogTitle>
-          <DialogDescription>Create a new virtual player.</DialogDescription>
-        </DialogHeader>
-        <div className="space-y-3">
-          <div className="space-y-1">
-            <Label className="text-sm">LMS host</Label>
-            <Input value={lmsHost} onChange={(e) => setLmsHost(e.target.value)} placeholder="192.168.x.x" />
-          </div>
-          <div className="space-y-1">
-            <Label className="text-sm">Player name</Label>
-            <Input value={playerName} onChange={(e) => setPlayerName(e.target.value)} />
-          </div>
-          <div className="space-y-1">
-            <Label className="text-sm">ALSA device</Label>
-            <Input value={alsaDevice} onChange={(e) => setAlsaDevice(e.target.value)} placeholder="hw:CARD=Dummy,DEV=0" />
-          </div>
-        </div>
-        {error && <p className="text-destructive text-sm mt-2">{error}</p>}
-        <DialogFooter className="mt-4">
-          <Button variant="outline" onClick={onClose} disabled={saving}>Cancel</Button>
-          <Button onClick={handleSave} disabled={saving}>{saving ? 'Saving…' : 'Create'}</Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  )
-}
-
-// ---- Mini-dialog: New Zone ----
-
-interface NewZoneDialogProps {
-  open: boolean
-  onClose: () => void
-  onCreated: (zone: Zone) => void
-}
-
-function NewZoneDialog({ open, onClose, onCreated }: NewZoneDialogProps) {
-  const [controllers, setControllers] = useState<Controller[]>([])
-  const [selectedControllerId, setSelectedControllerId] = useState('')
-  const [areas, setAreas] = useState<EntertainmentArea[]>([])
-  const [selectedAreaId, setSelectedAreaId] = useState('')
-  const [name, setName] = useState('')
-  const [loadingControllers, setLoadingControllers] = useState(false)
-  const [loadingAreas, setLoadingAreas] = useState(false)
-  const [saving, setSaving] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const [nameError, setNameError] = useState<string | null>(null)
-
-  useEffect(() => {
-    if (open) {
-      setSelectedControllerId(''); setAreas([]); setSelectedAreaId(''); setName('')
-      setError(null); setNameError(null); setLoadingControllers(true)
-      getControllers().then(setControllers).catch(() => setControllers([])).finally(() => setLoadingControllers(false))
-    }
-  }, [open])
-
-  useEffect(() => {
-    if (!selectedControllerId) { setAreas([]); setSelectedAreaId(''); setName(''); return }
-    setLoadingAreas(true)
-    getControllerAreas(selectedControllerId).then(setAreas).catch(() => setAreas([])).finally(() => setLoadingAreas(false))
-  }, [selectedControllerId])
-
-  function handleAreaChange(areaId: string) {
-    setSelectedAreaId(areaId)
-    const area = areas.find((a) => a.id === areaId)
-    if (area) setName(area.name)
-  }
-
-  async function handleSave() {
-    setSaving(true); setError(null); setNameError(null)
-    try {
-      const area = areas.find((a) => a.id === selectedAreaId)
-      const zone = await createZone({
-        name, controller_id: selectedControllerId,
-        entertainment_area_id: selectedAreaId,
-        entertainment_area_name: area?.name ?? '',
-        light_count: area?.light_count ?? 0,
-      })
-      onCreated(zone)
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : 'Save failed'
-      if ((e as any).status === 409) setNameError(msg)
-      else setError(msg)
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  return (
-    <Dialog open={open} onOpenChange={(o) => { if (!o) onClose() }}>
-      <DialogContent className="max-w-sm">
-        <DialogHeader>
-          <DialogTitle>New zone</DialogTitle>
-          <DialogDescription>Link a Hue entertainment area as a zone.</DialogDescription>
-        </DialogHeader>
-        <div className="space-y-3">
-          <div className="space-y-1">
-            <Label className="text-sm">Controller</Label>
-            {loadingControllers ? <p className="text-sm text-muted-foreground">Loading…</p> : (
-              <Select value={selectedControllerId} onValueChange={setSelectedControllerId}>
-                <SelectTrigger><SelectValue placeholder="Select controller" /></SelectTrigger>
-                <SelectContent>
-                  {controllers.map((c) => <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>)}
-                </SelectContent>
-              </Select>
-            )}
-          </div>
-          {selectedControllerId && (
-            <div className="space-y-1">
-              <Label className="text-sm">Entertainment area</Label>
-              {loadingAreas ? <p className="text-sm text-muted-foreground">Loading areas…</p> : (
-                <Select value={selectedAreaId} onValueChange={handleAreaChange}>
-                  <SelectTrigger><SelectValue placeholder="Select area" /></SelectTrigger>
-                  <SelectContent>
-                    {areas.map((a) => <SelectItem key={a.id} value={a.id}>{a.name} ({a.light_count} lights)</SelectItem>)}
-                  </SelectContent>
-                </Select>
-              )}
-            </div>
-          )}
-          {selectedAreaId && (
-            <div className="space-y-1">
-              <Label className="text-sm">Name</Label>
-              <Input value={name} onChange={(e) => { setName(e.target.value); setNameError(null) }} />
-              {nameError && <p className="text-xs text-destructive">{nameError}</p>}
-            </div>
-          )}
-        </div>
-        {error && <p className="text-destructive text-sm mt-2">{error}</p>}
-        <DialogFooter className="mt-4">
-          <Button variant="outline" onClick={onClose} disabled={saving}>Cancel</Button>
-          <Button onClick={handleSave} disabled={saving || !selectedAreaId}>{saving ? 'Saving…' : 'Create'}</Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  )
-}
-
-// ---- Mini-dialog: New Analyser ----
-
-interface NewAnalyserDialogProps {
-  open: boolean
-  onClose: () => void
-  onCreated: (cfg: Analyser) => void
-}
-
-function NewAnalyserDialog({ open, onClose, onCreated }: NewAnalyserDialogProps) {
-  const [name, setName] = useState('')
-  const [saving, setSaving] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const [nameError, setNameError] = useState<string | null>(null)
-
-  useEffect(() => { if (open) { setName(''); setError(null); setNameError(null) } }, [open])
-
-  async function handleSave() {
-    setSaving(true); setError(null); setNameError(null)
-    try {
-      const cfg = await createAnalyser({
-        name, bars_source: 'cava', onset_method: 'combined', bars: 30,
-        lower_cutoff_freq: 50, higher_cutoff_freq: 12000,
-        onset_delta: 0.1, onset_alpha: 0.9, superflux_mu: 3, superflux_lag: 2,
-        use_hpss_separation: false,
-      })
-      onCreated(cfg)
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : 'Save failed'
-      if ((e as any).status === 409) setNameError(msg)
-      else setError(msg)
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  return (
-    <Dialog open={open} onOpenChange={(o) => { if (!o) onClose() }}>
-      <DialogContent className="max-w-sm">
-        <DialogHeader>
-          <DialogTitle>New analyser</DialogTitle>
-          <DialogDescription>Uses sensible defaults — edit in Analysers tab to adjust.</DialogDescription>
-        </DialogHeader>
-        <div className="space-y-1">
-          <Label className="text-sm">Name</Label>
-          <Input value={name} onChange={(e) => { setName(e.target.value); setNameError(null) }} placeholder="My analyser" />
-          {nameError && <p className="text-xs text-destructive">{nameError}</p>}
-        </div>
-        {error && <p className="text-destructive text-sm mt-2">{error}</p>}
-        <DialogFooter className="mt-4">
-          <Button variant="outline" onClick={onClose} disabled={saving}>Cancel</Button>
-          <Button onClick={handleSave} disabled={saving}>{saving ? 'Saving…' : 'Create'}</Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  )
-}
-
-// ---- Mini-dialog: New Effect ----
-
-interface NewEffectDialogProps {
-  open: boolean
-  onClose: () => void
-  onCreated: (cfg: Effect) => void
-}
-
-function NewEffectDialog({ open, onClose, onCreated }: NewEffectDialogProps) {
-  const [name, setName] = useState('')
-  const [effectType, setEffectType] = useState('spectrum_rgb')
-  const [saving, setSaving] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const [nameError, setNameError] = useState<string | null>(null)
-
-  useEffect(() => { if (open) { setName(''); setEffectType('spectrum_rgb'); setError(null); setNameError(null) } }, [open])
-
-  async function handleSave() {
-    setSaving(true); setError(null); setNameError(null)
-    try {
-      const cfg = await createEffect({
-        name, effect_type: effectType, effect_speed: 1.0, effect_decay: 0.3,
-        sensitivity: 1.0, brightness_floor: 0.15, bass_hz: 250, mid_hz: 2000,
-        exertion_clip: 3.0, onset_flash_intensity: 0.0,
-      })
-      onCreated(cfg)
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : 'Save failed'
-      if ((e as any).status === 409) setNameError(msg)
-      else setError(msg)
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  return (
-    <Dialog open={open} onOpenChange={(o) => { if (!o) onClose() }}>
-      <DialogContent className="max-w-sm">
-        <DialogHeader>
-          <DialogTitle>New effect</DialogTitle>
-          <DialogDescription>Uses sensible defaults — edit in Effects tab to adjust.</DialogDescription>
-        </DialogHeader>
-        <div className="space-y-3">
-          <div className="space-y-1">
-            <Label className="text-sm">Name</Label>
-            <Input value={name} onChange={(e) => { setName(e.target.value); setNameError(null) }} placeholder="My effect" />
-            {nameError && <p className="text-xs text-destructive">{nameError}</p>}
-          </div>
-          <div className="space-y-1">
-            <Label className="text-sm">Effect type</Label>
-            <Select value={effectType} onValueChange={setEffectType}>
-              <SelectTrigger><SelectValue /></SelectTrigger>
-              <SelectContent>
-                {EFFECTS.map((e) => <SelectItem key={e.id} value={e.id}>{e.label}</SelectItem>)}
-              </SelectContent>
-            </Select>
-          </div>
-        </div>
-        {error && <p className="text-destructive text-sm mt-2">{error}</p>}
-        <DialogFooter className="mt-4">
-          <Button variant="outline" onClick={onClose} disabled={saving}>Cancel</Button>
-          <Button onClick={handleSave} disabled={saving}>{saving ? 'Saving…' : 'Create'}</Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  )
-}
-
-// ---- Mini-dialog: New Energy Profile ----
-
-interface NewEnergyProfileDialogProps {
-  open: boolean
-  onClose: () => void
-  onCreated: (ep: EnergyProfile) => void
-  effects: Effect[]
-  onEffectsChanged: (effects: Effect[]) => void
-}
-
-function NewEnergyProfileDialog({ open, onClose, onCreated, effects, onEffectsChanged }: NewEnergyProfileDialogProps) {
-  const [name, setName] = useState('')
-  const [highEnergyEffectId, setHighEnergyEffectId] = useState('')
-  const [lowEnergyEffectId, setLowEnergyEffectId] = useState('')
-  const [saving, setSaving] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const [nameError, setNameError] = useState<string | null>(null)
-  const [newEffectOpen, setNewEffectOpen] = useState(false)
-  const [newEffectTarget, setNewEffectTarget] = useState<'high' | 'low'>('high')
-
-  useEffect(() => {
-    if (open) { setName(''); setHighEnergyEffectId(''); setLowEnergyEffectId(''); setError(null); setNameError(null) }
-  }, [open])
-
-  async function handleEffectCreated(cfg: Effect) {
-    setNewEffectOpen(false)
-    const updated = await getEffects().catch(() => effects)
-    onEffectsChanged(updated)
-    if (newEffectTarget === 'low') setLowEnergyEffectId(cfg.id)
-    else setHighEnergyEffectId(cfg.id)
-  }
-
-  async function handleSave() {
-    if (!highEnergyEffectId) { setError('Select a high-energy effect'); return }
-    setSaving(true); setError(null); setNameError(null)
-    try {
-      const ep = await createEnergyProfile({
-        name: name || 'Energy Profile',
-        high_energy_effect_id: highEnergyEffectId,
-        low_energy_effect_id: lowEnergyEffectId,
-        blend_start: 0.3, blend_end: 0.7, blend_response: 0.1,
-      })
-      onCreated(ep)
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : 'Save failed'
-      if ((e as any).status === 409) setNameError(msg)
-      else setError(msg)
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  return (
-    <>
-      <Dialog open={open} onOpenChange={(o) => { if (!o) onClose() }}>
-        <DialogContent className="max-w-sm">
-          <DialogHeader>
-            <DialogTitle>New energy profile</DialogTitle>
-            <DialogDescription>Adjust blend thresholds in the Energy Profiles tab.</DialogDescription>
-          </DialogHeader>
-          <div className="space-y-3">
-            <div className="space-y-1">
-              <Label className="text-sm">Name</Label>
-              <Input value={name} onChange={(e) => { setName(e.target.value); setNameError(null) }} placeholder="My energy profile" />
-              {nameError && <p className="text-xs text-destructive">{nameError}</p>}
-            </div>
-            <div className="space-y-1">
-              <Label className="text-sm">High-energy effect (loud passages)</Label>
-              <div className="flex gap-1.5">
-                <Select value={highEnergyEffectId} onValueChange={setHighEnergyEffectId}>
-                  <SelectTrigger className="flex-1"><SelectValue placeholder="Select effect…" /></SelectTrigger>
-                  <SelectContent>
-                    {effects.map((e) => <SelectItem key={e.id} value={e.id}>{e.name}</SelectItem>)}
-                  </SelectContent>
-                </Select>
-                <Button size="sm" variant="outline" type="button"
-                  onClick={() => { setNewEffectTarget('high'); setNewEffectOpen(true) }}>
-                  + New
-                </Button>
-              </div>
-            </div>
-            <div className="space-y-1">
-              <Label className="text-sm">Low-energy effect (quiet passages, optional)</Label>
-              <div className="flex gap-1.5">
-                <Select value={lowEnergyEffectId} onValueChange={setLowEnergyEffectId}>
-                  <SelectTrigger className="flex-1"><SelectValue placeholder="Same as high-energy" /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="">Same as high-energy</SelectItem>
-                    {effects.map((e) => <SelectItem key={e.id} value={e.id}>{e.name}</SelectItem>)}
-                  </SelectContent>
-                </Select>
-                <Button size="sm" variant="outline" type="button"
-                  onClick={() => { setNewEffectTarget('low'); setNewEffectOpen(true) }}>
-                  + New
-                </Button>
-              </div>
-            </div>
-          </div>
-          {error && <p className="text-destructive text-sm mt-2">{error}</p>}
-          <DialogFooter className="mt-4">
-            <Button variant="outline" onClick={onClose} disabled={saving}>Cancel</Button>
-            <Button onClick={handleSave} disabled={saving || !highEnergyEffectId}>{saving ? 'Saving…' : 'Create'}</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-      <NewEffectDialog open={newEffectOpen} onClose={() => setNewEffectOpen(false)} onCreated={handleEffectCreated} />
-    </>
-  )
-}
-
-// ---- Coupling Card ----
-
-interface CardProps {
-  coupling: Coupling
-  player: VirtualPlayer | undefined
-  zone: Zone | undefined
-  ep: EnergyProfile | undefined
-  effects: Effect[]
-  isActive: boolean
-  isSelected: boolean
-  onSelect: () => void
-  onActivate: () => void
-  onDeactivate: () => void
-}
-
-function CouplingCard({ coupling, player, zone, ep, effects, isActive, isSelected, onSelect, onActivate, onDeactivate }: CardProps) {
-  const highEffect = effects.find(e => e.id === ep?.high_energy_effect_id)
-  const lowEffect = effects.find(e => e.id === ep?.low_energy_effect_id) ?? highEffect
-
-  return (
-    <div
-      className={cn(
-        'border rounded-lg cursor-pointer transition-colors overflow-hidden',
-        isSelected
-          ? 'border-primary/60 bg-muted/30'
-          : 'border-border hover:border-muted-foreground/30 bg-card',
-      )}
-      onClick={onSelect}
-    >
-      <div className="bg-black/25">
-        {highEffect ? (
-          <LightPreview
-            lowEffectType={lowEffect?.effect_type ?? highEffect.effect_type}
-            highEffectType={highEffect.effect_type}
-            mix={0.5}
-            energy={isActive ? 0.65 : 0.28}
-          />
-        ) : (
-          <div className="h-[60px] flex items-center justify-center">
-            <span className="text-xs text-muted-foreground/40">No energy profile</span>
-          </div>
-        )}
-      </div>
-
-      <div className="px-3 py-2.5 space-y-1.5">
-        <div className="flex items-start justify-between gap-2">
-          <span className="font-medium text-sm leading-tight">{coupling.name}</span>
-          <Badge
-            variant={isActive ? 'default' : 'secondary'}
-            className={cn('shrink-0 text-xs', !coupling.enabled && !isActive && 'opacity-50')}
-          >
-            {isActive ? '● Active' : coupling.enabled ? 'Ready' : 'Disabled'}
-          </Badge>
-        </div>
-
-        <div className="text-xs text-muted-foreground flex items-center gap-1.5">
-          <span className={cn(!player && 'text-destructive/60')}>
-            {player ? (player.display_name || player.player_name || player.type) : '(no player)'}
-          </span>
-          <span className="opacity-40">→</span>
-          <span className={cn(!zone && 'text-destructive/60')}>
-            {zone ? zone.name : '(no zone)'}
-          </span>
-        </div>
-
-        <div className="flex justify-end" onClick={e => e.stopPropagation()}>
-          {isActive ? (
-            <Button size="sm" variant="outline" className="h-6 px-2.5 text-xs" onClick={onDeactivate}>
-              Stop
-            </Button>
-          ) : (
-            <Button
-              size="sm"
-              variant="outline"
-              className="h-6 px-2.5 text-xs"
-              disabled={!coupling.enabled}
-              onClick={onActivate}
-            >
-              Go
-            </Button>
-          )}
-        </div>
+    <div className="flex justify-center py-1">
+      <div className="flex flex-col items-center">
+        <div className="w-px h-5 bg-border/50" />
+        <div
+          className="w-0 h-0"
+          style={{
+            borderLeft: '5px solid transparent',
+            borderRight: '5px solid transparent',
+            borderTop: '5px solid hsl(var(--border) / 0.5)',
+          }}
+        />
       </div>
     </div>
   )
 }
 
-// ---- Coupling Inspector ----
+// ── RoutingNode (view mode) ───────────────────────────────────────────────────
 
-interface InspectorForm {
-  name: string
-  playerId: string
-  zoneId: string
-  analyserId: string
-  energyProfileId: string
-  enabled: boolean
+function RoutingNode({ label, name, context, onOpen, children }: {
+  label: string
+  name?: string
+  context?: string
+  onOpen?: () => void
+  children?: React.ReactNode
+}) {
+  return (
+    <div className="border border-border rounded-lg overflow-hidden bg-card">
+      <div className="flex items-center justify-between px-3 py-1.5 bg-muted/40 border-b border-border/40">
+        <span className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">
+          {label}
+        </span>
+        {name && onOpen && (
+          <button
+            className="text-[11px] text-muted-foreground/50 hover:text-primary transition-colors"
+            onClick={onOpen}
+          >
+            Open →
+          </button>
+        )}
+      </div>
+      <div className="px-4 py-3">
+        {name ? (
+          <>
+            <p className="font-medium text-sm">{name}</p>
+            {context && <p className="text-xs text-muted-foreground mt-0.5">{context}</p>}
+            {children}
+          </>
+        ) : (
+          <p className="text-sm text-muted-foreground/40 italic">Not configured</p>
+        )}
+      </div>
+    </div>
+  )
 }
 
-function inspectorFormFrom(c: Coupling | null): InspectorForm {
-  return {
-    name: c?.name ?? '',
-    playerId: c?.player_id ?? '',
-    zoneId: c?.zone_id ?? '',
-    analyserId: c?.analyser_id ?? '',
-    energyProfileId: c?.energy_profile_id ?? '',
-    enabled: c?.enabled ?? true,
-  }
+// ── RoutingEditorNode (edit mode) ─────────────────────────────────────────────
+
+function RoutingEditorNode({ label, options, value, onChange, placeholder, onNavigateCreate }: {
+  label: string
+  options: { id: string; label: string }[]
+  value: string
+  onChange: (v: string) => void
+  placeholder: string
+  onNavigateCreate?: () => void
+}) {
+  return (
+    <div className="border border-border rounded-lg overflow-hidden bg-card">
+      <div className="px-3 py-1.5 bg-muted/40 border-b border-border/40">
+        <span className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">
+          {label}
+        </span>
+      </div>
+      <div className="px-3 py-2.5">
+        {options.length === 0 ? (
+          <div className="flex items-center justify-between gap-2">
+            <p className="text-xs text-muted-foreground/50 italic">No {label.toLowerCase()}s available</p>
+            {onNavigateCreate && (
+              <button
+                className="text-xs text-primary/70 hover:text-primary transition-colors shrink-0"
+                onClick={onNavigateCreate}
+              >
+                Create →
+              </button>
+            )}
+          </div>
+        ) : (
+          <Select value={value} onValueChange={onChange}>
+            <SelectTrigger className="h-8 text-sm">
+              <SelectValue placeholder={placeholder} />
+            </SelectTrigger>
+            <SelectContent>
+              {options.map(o => (
+                <SelectItem key={o.id} value={o.id} className="text-sm">
+                  {o.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        )}
+      </div>
+    </div>
+  )
 }
 
-interface InspectorProps {
+// ── MiniLightPreview (Energy Profile node only) ───────────────────────────────
+
+function MiniLightPreview({ lowEffectType, highEffectType }: {
+  lowEffectType: string
+  highEffectType: string
+}) {
+  const lo = getEffectRgb(lowEffectType)
+  const hi = getEffectRgb(highEffectType)
+  const energy = 0.65
+  return (
+    <div className="flex items-center justify-center gap-1.5 mt-3 pt-2.5 border-t border-border/30">
+      {Array.from({ length: 6 }).map((_, i) => {
+        const mix = i / 5
+        const r = Math.round(lo[0] * (1 - mix) + hi[0] * mix)
+        const g = Math.round(lo[1] * (1 - mix) + hi[1] * mix)
+        const b = Math.round(lo[2] * (1 - mix) + hi[2] * mix)
+        return (
+          <div
+            key={i}
+            className="rounded-full w-5 h-5 shrink-0"
+            style={{
+              backgroundColor: `rgb(${r},${g},${b})`,
+              opacity: energy,
+              boxShadow: `0 0 ${Math.round(energy * 10)}px rgba(${r},${g},${b},0.5)`,
+            }}
+          />
+        )
+      })}
+    </div>
+  )
+}
+
+// ── CouplingListItem ──────────────────────────────────────────────────────────
+
+function CouplingListItem({ coupling, playerLabel, zoneLabel, isActive, isSelected, onSelect }: {
+  coupling: Coupling
+  playerLabel: string
+  zoneLabel: string
+  isActive: boolean
+  isSelected: boolean
+  onSelect: () => void
+}) {
+  return (
+    <button
+      className={cn(
+        'w-full text-left px-3 py-2.5 rounded-md transition-colors',
+        isSelected
+          ? 'bg-muted text-foreground'
+          : 'text-muted-foreground hover:text-foreground hover:bg-muted/50',
+      )}
+      onClick={onSelect}
+    >
+      <div className="flex items-center gap-2 mb-0.5">
+        <span className="text-sm font-medium truncate flex-1">{coupling.name}</span>
+        {isActive && <span className="shrink-0 text-[10px] text-green-400">●</span>}
+        {!isActive && !coupling.enabled && (
+          <span className="shrink-0 w-1.5 h-1.5 rounded-full bg-muted-foreground/30" />
+        )}
+      </div>
+      <p className="text-xs text-muted-foreground/60 truncate">
+        {playerLabel} → {zoneLabel}
+      </p>
+    </button>
+  )
+}
+
+// ── CouplingWorkspace ─────────────────────────────────────────────────────────
+
+interface WorkspaceProps {
   coupling: Coupling | null
   players: VirtualPlayer[]
   zones: Zone[]
@@ -592,339 +227,319 @@ interface InspectorProps {
   onDeleted: (id: string) => void
   onCloned: (id: string) => void
   onCancelCreate: () => void
+  onActivate: (id: string) => void
+  onDeactivate: () => void
   onNavigate?: (tab: string) => void
-  onPlayersChanged: (ps: VirtualPlayer[]) => void
-  onZonesChanged: (zs: Zone[]) => void
-  onAnalysersChanged: (as: Analyser[]) => void
-  onEffectsChanged: (es: Effect[]) => void
-  onEnergyProfilesChanged: (eps: EnergyProfile[]) => void
 }
 
-function CouplingInspector({
+function CouplingWorkspace({
   coupling,
-  players,
-  zones,
-  analysers,
-  effects,
-  energyProfiles,
+  players, zones, analysers, effects, energyProfiles,
   activeCouplingId,
-  onSaved,
-  onDeleted,
-  onCloned,
-  onCancelCreate,
-  onNavigate,
-  onPlayersChanged,
-  onZonesChanged,
-  onAnalysersChanged,
-  onEffectsChanged,
-  onEnergyProfilesChanged,
-}: InspectorProps) {
+  onSaved, onDeleted, onCloned, onCancelCreate,
+  onActivate, onDeactivate, onNavigate,
+}: WorkspaceProps) {
   const isCreating = coupling === null
-  const isLive = !isCreating && coupling?.id === activeCouplingId
+  const isActive = !isCreating && coupling?.id === activeCouplingId
 
-  const [form, setForm] = useState<InspectorForm>(() => inspectorFormFrom(coupling))
-  const [saving, setSaving] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const [name, setName] = useState(coupling?.name ?? '')
   const [nameError, setNameError] = useState<string | null>(null)
+  const [enabled, setEnabled] = useState(coupling?.enabled ?? true)
 
-  const [newPlayerOpen, setNewPlayerOpen] = useState(false)
-  const [newZoneOpen, setNewZoneOpen] = useState(false)
-  const [newAnalyserOpen, setNewAnalyserOpen] = useState(false)
-  const [newEnergyProfileOpen, setNewEnergyProfileOpen] = useState(false)
+  const [isEditingRouting, setIsEditingRouting] = useState(isCreating)
+  const [draft, setDraft] = useState({
+    playerId: coupling?.player_id ?? '',
+    zoneId: coupling?.zone_id ?? '',
+    analyserId: coupling?.analyser_id ?? '',
+    energyProfileId: coupling?.energy_profile_id ?? '',
+  })
+  const [savingRouting, setSavingRouting] = useState(false)
+  const [routingError, setRoutingError] = useState<string | null>(null)
 
-  function patch(p: Partial<InspectorForm>) {
-    setForm(f => ({ ...f, ...p }))
-    if (p.name !== undefined) setNameError(null)
-    setError(null)
-  }
-
-  async function handleSave() {
-    setSaving(true); setError(null); setNameError(null)
+  async function handleSaveName() {
+    if (!coupling || name.trim() === coupling.name) return
+    setNameError(null)
     try {
-      const body = {
-        name: form.name,
-        player_id: form.playerId,
-        zone_id: form.zoneId,
-        analyser_id: form.analyserId,
-        energy_profile_id: form.energyProfileId,
-        enabled: form.enabled,
-      }
-      const saved = isCreating
-        ? await createCoupling(body)
-        : await updateCoupling(coupling.id, body)
+      const saved = await updateCoupling(coupling.id, { name: name.trim() })
       onSaved(saved)
     } catch (e) {
-      const msg = e instanceof Error ? e.message : 'Save failed'
-      if ((e as any).status === 409) setNameError(msg)
-      else setError(msg)
-    } finally {
-      setSaving(false)
+      setNameError(e instanceof Error ? e.message : 'Save failed')
     }
   }
 
-  async function handlePlayerCreated(player: VirtualPlayer) {
-    setNewPlayerOpen(false)
-    const updated = await getVirtualPlayers().catch(() => players)
-    onPlayersChanged(updated)
-    patch({ playerId: player.id })
+  async function handleToggleEnabled(v: boolean) {
+    setEnabled(v)
+    if (coupling) {
+      try {
+        const saved = await updateCoupling(coupling.id, { enabled: v })
+        onSaved(saved)
+      } catch {
+        setEnabled(!v)
+      }
+    }
   }
 
-  async function handleZoneCreated(zone: Zone) {
-    setNewZoneOpen(false)
-    const updated = await getZones().catch(() => zones)
-    onZonesChanged(updated)
-    patch({ zoneId: zone.id })
+  async function handleSaveRouting() {
+    setSavingRouting(true)
+    setRoutingError(null)
+    try {
+      const body = {
+        player_id: draft.playerId,
+        zone_id: draft.zoneId,
+        analyser_id: draft.analyserId,
+        energy_profile_id: draft.energyProfileId,
+      }
+      const saved = isCreating
+        ? await createCoupling({ name: name.trim() || 'New coupling', enabled, ...body })
+        : await updateCoupling(coupling!.id, body)
+      setIsEditingRouting(false)
+      onSaved(saved)
+    } catch (e) {
+      setRoutingError(e instanceof Error ? e.message : 'Save failed')
+    } finally {
+      setSavingRouting(false)
+    }
   }
 
-  async function handleAnalyserCreated(a: Analyser) {
-    setNewAnalyserOpen(false)
-    const updated = await getAnalysers().catch(() => analysers)
-    onAnalysersChanged(updated)
-    patch({ analyserId: a.id })
+  function handleCancelRouting() {
+    if (isCreating) {
+      onCancelCreate()
+      return
+    }
+    setDraft({
+      playerId: coupling!.player_id,
+      zoneId: coupling!.zone_id,
+      analyserId: coupling!.analyser_id,
+      energyProfileId: coupling!.energy_profile_id,
+    })
+    setRoutingError(null)
+    setIsEditingRouting(false)
   }
 
-  async function handleEnergyProfileCreated(ep: EnergyProfile) {
-    setNewEnergyProfileOpen(false)
-    const updated = await getEnergyProfiles().catch(() => energyProfiles)
-    onEnergyProfilesChanged(updated)
-    patch({ energyProfileId: ep.id })
-  }
+  // View-mode entity lookups
+  const player = players.find(p => p.id === coupling?.player_id)
+  const zone = zones.find(z => z.id === coupling?.zone_id)
+  const analyser = analysers.find(a => a.id === coupling?.analyser_id)
+  const ep = energyProfiles.find(e => e.id === coupling?.energy_profile_id)
+  const highEffect = effects.find(e => e.id === ep?.high_energy_effect_id)
+  const lowEffect = effects.find(e => e.id === ep?.low_energy_effect_id) ?? highEffect
 
-  const selectedEp = energyProfiles.find(e => e.id === form.energyProfileId)
-  const highEffect = effects.find(e => e.id === selectedEp?.high_energy_effect_id)
-  const lowEffect = effects.find(e => e.id === selectedEp?.low_energy_effect_id) ?? highEffect
-  const selectedZone = zones.find(z => z.id === form.zoneId)
+  const playerName = player
+    ? (player.display_name || player.player_name || player.type)
+    : undefined
+  const playerContext = player
+    ? (player.type === 'LMS' && player.lms_host ? `LMS · ${player.lms_host}` : player.type)
+    : undefined
+  const analyserContext = analyser
+    ? `${analyser.bars} bars · ${analyser.onset_method} · ${analyser.bars_source === 'pcm_pipeline' ? 'PCM' : 'cava'}`
+    : undefined
+  const zoneContext = zone
+    ? `${zone.light_count} light${zone.light_count === 1 ? '' : 's'}`
+    : undefined
+
+  // Edit-mode option lists
+  const playerOptions = players.map(p => ({
+    id: p.id,
+    label: p.display_name || p.player_name || p.type,
+  }))
+  const analyserOptions = analysers.map(a => ({
+    id: a.id,
+    label: `${a.name} — ${a.bars} bars`,
+  }))
+  const epOptions = energyProfiles.map(e => ({ id: e.id, label: e.name }))
+  const zoneOptions = zones.map(z => ({
+    id: z.id,
+    label: `${z.name} — ${z.light_count} lights`,
+  }))
 
   return (
-    <>
-      <div className="flex flex-col h-full">
-        {/* Header */}
-        <div className="px-4 pt-4 pb-3 border-b border-border shrink-0">
-          <div className="flex items-center gap-2 mb-2">
-            <SectionLabel className="flex-1">{isCreating ? 'New coupling' : 'Coupling'}</SectionLabel>
-            {isLive && (
-              <span className="flex items-center gap-1 text-xs text-green-400 font-medium">
-                <span className="w-1.5 h-1.5 rounded-full bg-green-400" />
-                Live
-              </span>
-            )}
-          </div>
+    <div className="flex-1 overflow-hidden flex flex-col">
+      {/* Header: name + status */}
+      <div className="px-5 py-3.5 border-b border-border shrink-0">
+        <div className="flex items-center gap-3">
           <input
-            value={form.name}
-            onChange={e => patch({ name: e.target.value })}
-            placeholder="Coupling name…"
-            className="w-full bg-transparent text-base font-semibold outline-none placeholder:text-muted-foreground/40 border-b border-transparent focus:border-border pb-0.5 transition-colors"
+            value={name}
+            onChange={e => { setName(e.target.value); setNameError(null) }}
+            onBlur={handleSaveName}
+            placeholder={isCreating ? 'Coupling name…' : 'Name…'}
+            className="flex-1 min-w-0 bg-transparent text-lg font-semibold outline-none placeholder:text-muted-foreground/40 border-b border-transparent focus:border-border pb-0.5 transition-colors"
           />
-          {nameError && <p className="text-xs text-destructive mt-1">{nameError}</p>}
+          {!isCreating && (
+            <Badge
+              variant={isActive ? 'default' : 'secondary'}
+              className={cn('shrink-0 text-xs', !enabled && !isActive && 'opacity-50')}
+            >
+              {isActive ? '● Active' : enabled ? 'Ready' : 'Disabled'}
+            </Badge>
+          )}
         </div>
+        {nameError && <p className="text-xs text-destructive mt-1">{nameError}</p>}
+      </div>
 
-        {/* Scrollable body */}
-        <div className="flex-1 overflow-y-auto px-4 py-4 space-y-5">
-          {/* Enabled */}
-          <div className="flex items-center gap-2">
-            <input
-              id="insp-enabled"
-              type="checkbox"
-              checked={form.enabled}
-              onChange={e => patch({ enabled: e.target.checked })}
-              className="h-4 w-4 cursor-pointer"
-            />
-            <Label htmlFor="insp-enabled" className="text-sm cursor-pointer">Enabled</Label>
-          </div>
-
-          {/* References */}
-          <div className="space-y-3">
-            <SectionLabel>References</SectionLabel>
-
-            {/* Player */}
-            <div className="space-y-1">
-              <div className="flex items-center justify-between">
-                <Label className="text-xs text-muted-foreground">Virtual Player</Label>
-                {form.playerId && onNavigate && (
-                  <button
-                    className="text-xs text-primary/70 hover:text-primary transition-colors"
-                    onClick={() => onNavigate('players')}
-                  >
-                    Open →
-                  </button>
-                )}
-              </div>
-              <div className="flex gap-1.5">
-                <Select value={form.playerId} onValueChange={v => patch({ playerId: v })}>
-                  <SelectTrigger className="flex-1 h-8 text-xs">
-                    <SelectValue placeholder="Select player…" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {players.map(p => (
-                      <SelectItem key={p.id} value={p.id} className="text-xs">
-                        {p.display_name || p.player_name || p.type}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <Button size="sm" variant="outline" className="h-8 px-2 text-xs shrink-0"
-                  onClick={() => setNewPlayerOpen(true)}>+ New</Button>
-              </div>
-            </div>
-
-            {/* Zone */}
-            <div className="space-y-1">
-              <div className="flex items-center justify-between">
-                <Label className="text-xs text-muted-foreground">Zone</Label>
-                {form.zoneId && onNavigate && (
-                  <button
-                    className="text-xs text-primary/70 hover:text-primary transition-colors"
-                    onClick={() => onNavigate('zones')}
-                  >
-                    Open →
-                  </button>
-                )}
-              </div>
-              <div className="flex gap-1.5">
-                <Select value={form.zoneId} onValueChange={v => patch({ zoneId: v })}>
-                  <SelectTrigger className="flex-1 h-8 text-xs">
-                    <SelectValue placeholder="Select zone…" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {zones.map(z => (
-                      <SelectItem key={z.id} value={z.id} className="text-xs">{z.name}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <Button size="sm" variant="outline" className="h-8 px-2 text-xs shrink-0"
-                  onClick={() => setNewZoneOpen(true)}>+ New</Button>
-              </div>
-              {selectedZone && (
-                <p className="text-xs text-muted-foreground">
-                  {selectedZone.entertainment_area_name} — {selectedZone.light_count} lights
-                </p>
+      {/* Routing graph */}
+      <div className="flex-1 overflow-y-auto">
+        <div className="max-w-sm mx-auto px-4 py-5">
+          {isEditingRouting ? (
+            <>
+              <RoutingEditorNode
+                label="Virtual Player"
+                options={playerOptions}
+                value={draft.playerId}
+                onChange={v => setDraft(d => ({ ...d, playerId: v }))}
+                placeholder="Select virtual player…"
+                onNavigateCreate={onNavigate ? () => onNavigate('players') : undefined}
+              />
+              <NodeConnector />
+              <RoutingEditorNode
+                label="Analyser"
+                options={analyserOptions}
+                value={draft.analyserId}
+                onChange={v => setDraft(d => ({ ...d, analyserId: v }))}
+                placeholder="Select analyser…"
+                onNavigateCreate={onNavigate ? () => onNavigate('analysers') : undefined}
+              />
+              <NodeConnector />
+              <RoutingEditorNode
+                label="Energy Profile"
+                options={epOptions}
+                value={draft.energyProfileId}
+                onChange={v => setDraft(d => ({ ...d, energyProfileId: v }))}
+                placeholder="Select energy profile…"
+                onNavigateCreate={onNavigate ? () => onNavigate('energy-profiles') : undefined}
+              />
+              <NodeConnector />
+              <RoutingEditorNode
+                label="Zone"
+                options={zoneOptions}
+                value={draft.zoneId}
+                onChange={v => setDraft(d => ({ ...d, zoneId: v }))}
+                placeholder="Select zone…"
+                onNavigateCreate={onNavigate ? () => onNavigate('zones') : undefined}
+              />
+              {routingError && (
+                <p className="text-sm text-destructive mt-4">{routingError}</p>
               )}
-            </div>
-
-            {/* Analyser */}
-            <div className="space-y-1">
-              <div className="flex items-center justify-between">
-                <Label className="text-xs text-muted-foreground">Analyser</Label>
-                {form.analyserId && onNavigate && (
-                  <button
-                    className="text-xs text-primary/70 hover:text-primary transition-colors"
-                    onClick={() => onNavigate('analysers')}
-                  >
-                    Open →
-                  </button>
-                )}
+              <div className="flex gap-2 mt-5">
+                <Button
+                  size="sm"
+                  onClick={handleSaveRouting}
+                  disabled={savingRouting}
+                  className="flex-1"
+                >
+                  {savingRouting ? 'Saving…' : isCreating ? 'Create coupling' : 'Save routing'}
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={handleCancelRouting}
+                  disabled={savingRouting}
+                >
+                  Cancel
+                </Button>
               </div>
-              <div className="flex gap-1.5">
-                <Select value={form.analyserId} onValueChange={v => patch({ analyserId: v })}>
-                  <SelectTrigger className="flex-1 h-8 text-xs">
-                    <SelectValue placeholder="Select analyser…" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {analysers.map(a => (
-                      <SelectItem key={a.id} value={a.id} className="text-xs">{a.name}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <Button size="sm" variant="outline" className="h-8 px-2 text-xs shrink-0"
-                  onClick={() => setNewAnalyserOpen(true)}>+ New</Button>
-              </div>
-            </div>
-
-            {/* Energy Profile */}
-            <div className="space-y-1">
-              <div className="flex items-center justify-between">
-                <Label className="text-xs text-muted-foreground">Energy Profile</Label>
-                {form.energyProfileId && onNavigate && (
-                  <button
-                    className="text-xs text-primary/70 hover:text-primary transition-colors"
-                    onClick={() => onNavigate('energy-profiles')}
-                  >
-                    Open →
-                  </button>
-                )}
-              </div>
-              <div className="flex gap-1.5">
-                <Select value={form.energyProfileId} onValueChange={v => patch({ energyProfileId: v })}>
-                  <SelectTrigger className="flex-1 h-8 text-xs">
-                    <SelectValue placeholder="Select energy profile…" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {energyProfiles.map(ep => (
-                      <SelectItem key={ep.id} value={ep.id} className="text-xs">{ep.name}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <Button size="sm" variant="outline" className="h-8 px-2 text-xs shrink-0"
-                  onClick={() => setNewEnergyProfileOpen(true)}>+ New</Button>
-              </div>
-
-              {highEffect && (
-                <div className="rounded-md border border-border/50 bg-black/20 mt-2 overflow-hidden">
-                  <LightPreview
+            </>
+          ) : (
+            <>
+              <RoutingNode
+                label="Virtual Player"
+                name={playerName}
+                context={playerContext}
+                onOpen={onNavigate ? () => onNavigate('players') : undefined}
+              />
+              <NodeConnector />
+              <RoutingNode
+                label="Analyser"
+                name={analyser?.name}
+                context={analyserContext}
+                onOpen={onNavigate ? () => onNavigate('analysers') : undefined}
+              />
+              <NodeConnector />
+              <RoutingNode
+                label="Energy Profile"
+                name={ep?.name}
+                onOpen={onNavigate ? () => onNavigate('energy-profiles') : undefined}
+              >
+                {highEffect && (
+                  <MiniLightPreview
                     lowEffectType={lowEffect?.effect_type ?? highEffect.effect_type}
                     highEffectType={highEffect.effect_type}
-                    mix={0.5}
-                    energy={0.60}
                   />
-                  {selectedEp && (
-                    <p className="text-xs text-muted-foreground text-center pb-2">{selectedEp.name}</p>
-                  )}
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
-
-        {/* Footer */}
-        <div className="px-4 py-3 border-t border-border shrink-0 space-y-2">
-          {error && <p className="text-xs text-destructive">{error}</p>}
-          <Button onClick={handleSave} disabled={saving} className="w-full" size="sm">
-            {saving ? 'Saving…' : isCreating ? 'Create coupling' : 'Save changes'}
-          </Button>
-          {isCreating ? (
-            <Button variant="outline" size="sm" className="w-full" onClick={onCancelCreate}>
-              Cancel
-            </Button>
-          ) : (
-            <div className="flex gap-2">
-              <Button
-                variant="outline"
-                size="sm"
-                className="flex-1"
-                onClick={() => onCloned(coupling!.id)}
-              >
-                Clone
-              </Button>
-              <ConfirmDialog
-                trigger={
-                  <Button variant="outline" size="sm" className="flex-1 text-destructive hover:text-destructive">
-                    Delete
-                  </Button>
-                }
-                title="Delete coupling"
-                description={`Delete "${coupling!.name}"? This cannot be undone.`}
-                onConfirm={() => onDeleted(coupling!.id)}
+                )}
+              </RoutingNode>
+              <NodeConnector />
+              <RoutingNode
+                label="Zone"
+                name={zone?.name}
+                context={zoneContext}
+                onOpen={onNavigate ? () => onNavigate('zones') : undefined}
               />
-            </div>
+            </>
           )}
         </div>
       </div>
 
-      <NewPlayerDialog open={newPlayerOpen} onClose={() => setNewPlayerOpen(false)} onCreated={handlePlayerCreated} />
-      <NewZoneDialog open={newZoneOpen} onClose={() => setNewZoneOpen(false)} onCreated={handleZoneCreated} />
-      <NewAnalyserDialog open={newAnalyserOpen} onClose={() => setNewAnalyserOpen(false)} onCreated={handleAnalyserCreated} />
-      <NewEnergyProfileDialog
-        open={newEnergyProfileOpen}
-        onClose={() => setNewEnergyProfileOpen(false)}
-        onCreated={handleEnergyProfileCreated}
-        effects={effects}
-        onEffectsChanged={onEffectsChanged}
-      />
-    </>
+      {/* Action bar — view mode only */}
+      {!isEditingRouting && !isCreating && (
+        <div className="px-4 py-2.5 border-t border-border shrink-0 flex items-center gap-2">
+          <label className="flex items-center gap-1.5 text-xs cursor-pointer select-none text-muted-foreground hover:text-foreground transition-colors">
+            <input
+              type="checkbox"
+              checked={enabled}
+              onChange={e => handleToggleEnabled(e.target.checked)}
+              className="h-3.5 w-3.5 cursor-pointer"
+            />
+            Enabled
+          </label>
+          <span className="h-3.5 w-px bg-border mx-0.5" />
+          {isActive ? (
+            <Button size="sm" variant="outline" className="h-7 text-xs" onClick={onDeactivate}>
+              Stop
+            </Button>
+          ) : (
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-7 text-xs"
+              disabled={!enabled}
+              onClick={() => onActivate(coupling!.id)}
+            >
+              Go
+            </Button>
+          )}
+          <span className="flex-1" />
+          <Button
+            size="sm"
+            variant="ghost"
+            className="h-7 text-xs text-muted-foreground hover:text-foreground"
+            onClick={() => setIsEditingRouting(true)}
+          >
+            Edit routing
+          </Button>
+          <Button
+            size="sm"
+            variant="ghost"
+            className="h-7 text-xs text-muted-foreground hover:text-foreground"
+            onClick={() => onCloned(coupling!.id)}
+          >
+            Clone
+          </Button>
+          <ConfirmDialog
+            trigger={
+              <Button size="sm" variant="ghost" className="h-7 text-xs text-destructive/70 hover:text-destructive">
+                Delete
+              </Button>
+            }
+            title="Delete coupling"
+            description={`Delete "${coupling!.name}"? This cannot be undone.`}
+            onConfirm={() => onDeleted(coupling!.id)}
+          />
+        </div>
+      )}
+    </div>
   )
 }
 
-// ---- Couplings (main) ----
+// ── Couplings (main) ──────────────────────────────────────────────────────────
 
 export function Couplings({ activeCouplingId: activeCouplingIdProp, onActivationChange, onNavigate }: Props) {
   const [couplings, setCouplings] = useState<Coupling[]>([])
@@ -1013,65 +628,65 @@ export function Couplings({ activeCouplingId: activeCouplingIdProp, onActivation
     loadAll()
   }
 
-  const inspectorKey = isCreating ? '__new__' : (selectedId ?? '__none__')
-  const selectedCoupling = isCreating ? null : (couplings.find(c => c.id === selectedId) ?? null)
-  const showInspector = isCreating || selectedId !== null
+  const workspaceKey = isCreating ? '__new__' : (selectedId ?? '__none__')
+  const selectedCoupling = isCreating
+    ? null
+    : (couplings.find(c => c.id === selectedId) ?? null)
+  const showWorkspace = isCreating || selectedId !== null
 
   return (
     <div className="flex-1 overflow-hidden flex flex-col">
       {/* Toolbar */}
-      <div className="flex items-center justify-between px-5 py-3 border-b border-border shrink-0">
-        <SectionLabel>Couplings</SectionLabel>
+      <div className="flex items-center justify-between px-4 py-2.5 border-b border-border shrink-0">
+        <span className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">
+          Couplings
+        </span>
         <Button size="sm" onClick={() => { setIsCreating(true); setSelectedId(null) }}>
           New coupling
         </Button>
       </div>
 
       {actionError && (
-        <div className="px-5 py-2 text-xs text-destructive border-b border-border bg-destructive/5 shrink-0">
+        <div className="px-4 py-1.5 text-xs text-destructive border-b border-border bg-destructive/5 shrink-0">
           {actionError}
         </div>
       )}
 
-      {/* Main workspace: card list + inspector */}
       <div className="flex-1 overflow-hidden flex">
-        {/* Card list */}
-        <div className="flex-1 overflow-y-auto p-4">
+        {/* Compact coupling list */}
+        <div className="w-52 shrink-0 border-r border-border overflow-y-auto py-2 px-2">
           {loading ? (
-            <p className="text-sm text-muted-foreground">Loading…</p>
+            <p className="text-xs text-muted-foreground px-1 py-2">Loading…</p>
           ) : error ? (
-            <p className="text-sm text-destructive">{error}</p>
+            <p className="text-xs text-destructive px-1 py-2">{error}</p>
           ) : couplings.length === 0 ? (
-            <div className="flex flex-col items-center justify-center py-16 text-center gap-2">
-              <p className="text-sm text-muted-foreground">No couplings yet.</p>
-              <p className="text-xs text-muted-foreground/60">Create one to connect a player to a zone.</p>
-            </div>
+            <p className="text-xs text-muted-foreground/50 px-1 py-2 leading-relaxed">
+              No couplings yet.
+            </p>
           ) : (
-            <div className="max-w-xs space-y-3">
-              {couplings.map(c => (
-                <CouplingCard
+            couplings.map(c => {
+              const p = players.find(pl => pl.id === c.player_id)
+              const z = zones.find(zn => zn.id === c.zone_id)
+              return (
+                <CouplingListItem
                   key={c.id}
                   coupling={c}
-                  player={players.find(p => p.id === c.player_id)}
-                  zone={zones.find(z => z.id === c.zone_id)}
-                  ep={energyProfiles.find(e => e.id === c.energy_profile_id)}
-                  effects={effects}
+                  playerLabel={p ? (p.display_name || p.player_name || p.type) : '—'}
+                  zoneLabel={z?.name ?? '—'}
                   isActive={c.id === activeCouplingId}
                   isSelected={!isCreating && c.id === selectedId}
                   onSelect={() => { setSelectedId(c.id); setIsCreating(false) }}
-                  onActivate={() => handleActivate(c.id)}
-                  onDeactivate={handleDeactivate}
                 />
-              ))}
-            </div>
+              )
+            })
           )}
         </div>
 
-        {/* Inspector panel */}
-        <div className="w-80 border-l border-border flex flex-col shrink-0">
-          {showInspector ? (
-            <CouplingInspector
-              key={inspectorKey}
+        {/* Workspace */}
+        <div className="flex-1 overflow-hidden flex">
+          {showWorkspace ? (
+            <CouplingWorkspace
+              key={workspaceKey}
               coupling={selectedCoupling}
               players={players}
               zones={zones}
@@ -1083,16 +698,15 @@ export function Couplings({ activeCouplingId: activeCouplingIdProp, onActivation
               onDeleted={handleDelete}
               onCloned={handleClone}
               onCancelCreate={() => { setIsCreating(false); setSelectedId(null) }}
+              onActivate={handleActivate}
+              onDeactivate={handleDeactivate}
               onNavigate={onNavigate}
-              onPlayersChanged={setPlayers}
-              onZonesChanged={setZones}
-              onAnalysersChanged={setAnalysers}
-              onEffectsChanged={setEffects}
-              onEnergyProfilesChanged={setEnergyProfiles}
             />
           ) : (
-            <div className="flex items-center justify-center h-full text-xs text-muted-foreground/40 p-8 text-center">
-              Select a coupling to edit, or create a new one.
+            <div className="flex-1 flex items-center justify-center">
+              <p className="text-sm text-muted-foreground/35">
+                Select a coupling to view its routing
+              </p>
             </div>
           )}
         </div>
