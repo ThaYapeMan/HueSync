@@ -218,19 +218,28 @@ class BandNormaliser:
         alpha_rise = 1.0 - math.exp(-dt / self.attack_tau_s)
         alpha_fall = 1.0 - math.exp(-dt / self.release_tau_s)
 
+        # Capture old EMA before updating — exertion must be measured against
+        # the baseline that was established *before* this frame arrived.
+        # Updating first and reading back self._ema caused exertion to be
+        # computed against a baseline already partially shifted toward the
+        # current value, capping rising transients at ≈ 1/alpha_rise ≈ 1.0013×
+        # (byte 85, = 0.333 after /255) instead of the true exertion.
+        old_ema = self._ema
+
         new_ema: list[float] = []
-        for ema, v in zip(self._ema, frame, strict=True):
+        for ema, v in zip(old_ema, frame, strict=True):
             a = alpha_rise if v > ema else alpha_fall
             new_ema.append(ema + a * (v - ema))
         self._ema = new_ema
 
         # Silence gate: if the mean raw bar is negligible, keep the lights
         # dark rather than amplifying noise into meaningless colour flashes.
+        # EMA is still updated above so the baseline decays during pauses.
         if sum(frame) / n < self.gate:
             return bytes(n)
 
         result = bytearray(n)
-        for i, (v, ema) in enumerate(zip(frame, self._ema, strict=True)):
+        for i, (v, ema) in enumerate(zip(frame, old_ema, strict=True)):
             # Guard against a zero EMA (e.g. a bar that has been silent for
             # the entire session so far).
             exertion = v / max(ema, 1.0)

@@ -77,7 +77,10 @@ async def _capture(
     port: int,
     duration: float,
 ) -> tuple[list[tuple[float, float, float]], float, float, str | None]:
-    """Connect, collect frames for *duration* seconds, return (samples, blend_start, blend_end, ep_id)."""
+    """Connect, collect frames for *duration* seconds.
+
+    Returns (samples, blend_start, blend_end, ep_id).
+    """
     url = f"ws://{host}:{port}/ws/preview"
     api_base = f"http://{host}:{port}/api"
 
@@ -105,7 +108,7 @@ async def _capture(
                     break
                 try:
                     raw = await asyncio.wait_for(ws.recv(), timeout=min(remaining + 0.1, 2.0))
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     break
 
                 try:
@@ -164,7 +167,7 @@ def _report(
     # CSV
     rows = [["timestamp_s", "energy", "mix", "high_weight"]] + [
         [f"{ts:.3f}", f"{energy:.4f}", f"{mix:.4f}", f"{hw:.4f}"]
-        for (ts, energy, mix), hw in zip(samples, weights)
+        for (ts, energy, mix), hw in zip(samples, weights, strict=True)
     ]
     if out_path:
         with open(out_path, "w", newline="") as f:
@@ -192,7 +195,8 @@ def _report(
     print(f"  blend_start={blend_start}  blend_end={blend_end}", file=sep)
 
     print("\n── Energy statistics ───────────────────────────────────────────────", file=sep)
-    for label, p in [("min", 0), ("p50", 50), ("p75", 75), ("p90", 90), ("p95", 95), ("p99", 99), ("max", 100)]:
+    for label, p in [("min", 0), ("p50", 50), ("p75", 75), ("p90", 90),
+                     ("p95", 95), ("p99", 99), ("max", 100)]:
         print(f"  {label:<4}: {_percentile(e_s, p):.4f}", file=sep)
     print(f"  mean: {mean_e:.4f}", file=sep)
 
@@ -211,16 +215,22 @@ def _report(
     n_high = sum(1 for e in energies if e >= blend_end)
     n_blend = n - n_low - n_high
     print(f"  LOW   (energy < {blend_start:.2f})                  : {100.0*n_low/n:.1f}%", file=sep)
-    print(f"  BLEND ({blend_start:.2f} ≤ energy < {blend_end:.2f})        : {100.0*n_blend/n:.1f}%", file=sep)
+    blend_pct = 100.0 * n_blend / n
+    print(f"  BLEND ({blend_start:.2f} ≤ energy < {blend_end:.2f})  : {blend_pct:.1f}%", file=sep)
     print(f"  HIGH  (energy ≥ {blend_end:.2f})                  : {100.0*n_high/n:.1f}%", file=sep)
 
     print("\n── High-effect weight — instantaneous smoothstep (no EMA) ─────────", file=sep)
-    print("  (This is what LayerMixer targets each frame before blend_response smoothing)", file=sep)
+    print(
+        "  (This is what LayerMixer targets each frame before blend_response smoothing)",
+        file=sep,
+    )
     for label, p in [("p50", 50), ("p75", 75), ("p90", 90), ("p95", 95), ("p99", 99)]:
         print(f"  {label}: {_percentile(w_s, p):.4f}", file=sep)
     print(f"  Time weight <10%   : {pct(weights, 0.10):.1f}%", file=sep)
-    print(f"  Time weight 10–50% : {100.0*sum(1 for w in weights if 0.10 <= w < 0.50)/n:.1f}%", file=sep)
-    print(f"  Time weight 50–90% : {100.0*sum(1 for w in weights if 0.50 <= w < 0.90)/n:.1f}%", file=sep)
+    w_mid_lo = 100.0 * sum(1 for w in weights if 0.10 <= w < 0.50) / n
+    w_mid_hi = 100.0 * sum(1 for w in weights if 0.50 <= w < 0.90) / n
+    print(f"  Time weight 10–50% : {w_mid_lo:.1f}%", file=sep)
+    print(f"  Time weight 50–90% : {w_mid_hi:.1f}%", file=sep)
     print(f"  Time weight >90%   : {pct(weights, 0.90, above=True):.1f}%", file=sep)
 
     print("\n── Backend mix — EMA-smoothed (what actually drives LayerMixer) ────", file=sep)
@@ -239,7 +249,9 @@ def _report(
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     ap.add_argument("--host", default="localhost", metavar="HOST",
                     help="HueSync host (default: localhost)")
     ap.add_argument("--port", type=int, default=8420, metavar="PORT",

@@ -302,6 +302,153 @@ def test_band_normaliser_release_time_constant():
 
 
 # ---------------------------------------------------------------------------
+# BandNormaliser — operation-order correctness
+# ---------------------------------------------------------------------------
+# These tests verify that exertion is computed against the PRE-UPDATE EMA.
+# The old code updated self._ema first and then read it back, capping all
+# rising transients at byte ≈ 85 regardless of actual step size.
+
+
+def test_normaliser_rising_step_first_frame():
+    """A 2× step from a converged baseline must produce byte ≈ 170 on the
+    FIRST frame — exertion = 2.0, encoded as int(2.0 * 85) = 170.
+
+    With the bug (EMA updated before exertion): byte 85 (no headroom).
+    With the fix (exertion vs old EMA): byte 170 (correct transient).
+    """
+    norm = BandNormaliser()
+    base_val = 100
+    baseline = bytes([base_val] * 10)
+    # Converge EMA to base_val.
+    for _ in range(200):
+        norm.normalise(baseline, _DT_30HZ)
+
+    # Apply 2× step.
+    step = bytes([base_val * 2] * 10)
+    result = norm.normalise(step, _DT_30HZ)
+
+    # exertion = 200 / 100 = 2.0 → byte = int(2.0 / 3.0 * 255) = 170
+    expected = int(2.0 / BandNormaliser.DEFAULT_EXERTION_CLIP * 255)
+    for b in result:
+        assert abs(b - expected) <= 2, (
+            f"Expected byte ≈ {expected} (2× step, corrected order), got {b}. "
+            "If bytes are ≈ 85, the old EMA-first bug is still present."
+        )
+
+
+def test_normaliser_rising_step_subsequent_frames_fall_back():
+    """After one frame at 2× the baseline, holding at 2× makes the EMA catch
+    up (fast attack, tau=5ms). Within ~10 frames at 30 Hz the output should
+    fall back toward the steady-state byte (≈ 85)."""
+    norm = BandNormaliser()
+    base_val = 100
+    baseline = bytes([base_val] * 10)
+    for _ in range(200):
+        norm.normalise(baseline, _DT_30HZ)
+
+    step = bytes([base_val * 2] * 10)
+    results = [norm.normalise(step, _DT_30HZ) for _ in range(30)]
+
+    # First frame: high transient.
+    assert results[0][0] > 120, f"First-frame byte expected >120, got {results[0][0]}"
+    # After ~10 frames: EMA has converged at 5 ms tau; exertion ≈ 1.0 again.
+    assert results[29][0] < 95, (
+        f"Frame-30 byte expected <95 (EMA converged), got {results[29][0]}"
+    )
+
+
+def test_normaliser_downward_step_is_suppressed():
+    """A 0.5× downward step from a converged baseline must produce byte < 85
+    on the first frame, because exertion = 0.5 < 1.0."""
+    norm = BandNormaliser()
+    base_val = 200
+    baseline = bytes([base_val] * 10)
+    for _ in range(200):
+        norm.normalise(baseline, _DT_30HZ)
+
+    step_down = bytes([base_val // 2] * 10)
+    result = norm.normalise(step_down, _DT_30HZ)
+
+    steady_byte = 85  # exertion 1.0
+    assert all(b < steady_byte for b in result), (
+        f"Downward step must produce bytes < {steady_byte}, got {list(result)}"
+    )
+
+
+def test_normaliser_single_frame_impulse_then_silence():
+    """One frame at 3× (clip ceiling), then back to baseline.
+    The impulse frame must reach the clip ceiling (byte 255), and the
+    following frame at the original level must show suppression because
+    the EMA was driven up by the fast-attack alpha."""
+    norm = BandNormaliser()
+    base_val = 80
+    baseline = bytes([base_val] * 10)
+    for _ in range(200):
+        norm.normalise(baseline, _DT_30HZ)
+
+    impulse = bytes([base_val * 3] * 10)
+    impulse_result = norm.normalise(impulse, _DT_30HZ)
+
+    assert all(b == 255 for b in impulse_result), (
+        f"3× impulse should be clipped to byte 255, got {list(impulse_result)}"
+    )
+
+    # Immediately after, base_val is now well below the elevated EMA.
+    post = norm.normalise(baseline, _DT_30HZ)
+    assert all(b < 85 for b in post), (
+        f"Frame after clip-ceiling impulse should be suppressed, got {list(post)}"
+    )
+
+
+def test_normaliser_repeated_impulses_maintain_suppression():
+    """Repeated 2× impulses do NOT accumulate: each one is judged against the
+    EMA that has already been elevated by previous impulses, so the output
+    byte stays bounded and does not increase monotonically."""
+    norm = BandNormaliser()
+    base_val = 100
+    baseline = bytes([base_val] * 10)
+    for _ in range(200):
+        norm.normalise(baseline, _DT_30HZ)
+
+    spike = bytes([base_val * 2] * 10)
+    byte_values = [norm.normalise(spike, _DT_30HZ)[0] for _ in range(20)]
+
+    # First frame is high; subsequent values must fall as EMA catches up.
+    assert byte_values[0] > byte_values[-1], (
+        f"Repeated impulses should show decay, got monotone: {byte_values}"
+    )
+    # No byte may exceed the clip ceiling.
+    assert all(b <= 255 for b in byte_values)
+
+
+def test_normaliser_frame_rate_consistency():
+    """The corrected operation order must produce the same exertion result
+    regardless of whether the caller runs at 30 Hz or 100 Hz (given enough
+    frames for the EMA to converge at each rate), because exertion is computed
+    against the OLD EMA in both cases.
+
+    Both rates converge the EMA to base_val (fast attack, 5 ms tau ≪ any 1/rate).
+    Then one 2× step frame: expected byte is the same ≈ 170 at both rates.
+    """
+    base_val = 100
+    expected = int(2.0 / BandNormaliser.DEFAULT_EXERTION_CLIP * 255)
+
+    for dt in (_DT_30HZ, _DT_100HZ):
+        norm = BandNormaliser()
+        baseline = bytes([base_val] * 10)
+        # Converge at this rate (5 ms tau ≪ 33 ms or 10 ms; both converge fast).
+        for _ in range(300):
+            norm.normalise(baseline, dt)
+
+        step = bytes([base_val * 2] * 10)
+        result = norm.normalise(step, dt)
+        for b in result:
+            assert abs(b - expected) <= 3, (
+                f"At dt={dt:.4f}s: expected byte ≈ {expected} for 2× step, got {b}"
+            )
+
+
+# ---------------------------------------------------------------------------
 # OnsetDetector — Dixon (2006) three-condition peak-picking
 # ---------------------------------------------------------------------------
 
