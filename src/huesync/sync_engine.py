@@ -788,16 +788,18 @@ class CavaPipeline:
             sum(i * v for i, v in enumerate(bars)) / total / n if total > 1e-9 else 0.0
         )
         onset, onset_strength = self._onset.process(bars)
+        full = _slice_avg(bars, 0.0, 1.0)
         return AudioFeatures(
             bars=bars,
             # Cumulative slices: each covers its range plus everything below it.
             # Proportions are mel-like given cava's log-spaced bars at 50-10000 Hz.
             bass=_slice_avg(bars, 0.0, 0.20),
             mid=_slice_avg(bars, 0.0, 0.55),
-            full=_slice_avg(bars, 0.0, 1.0),
+            full=full,
             centroid=centroid,
             onset=onset,
             onset_strength=onset_strength,
+            relative_exertion=full,
         )
 
 
@@ -989,12 +991,13 @@ class PcmAudioPipeline:
                     onset = onset_bass = onset_mid = onset_treble = False
                     onset_strength = onset_bass_str = onset_mid_str = onset_treble_str = 0.0
 
+                full = _slice_avg(bars, 0.0, 1.0)
                 with self._lock:
                     self._latest = AudioFeatures(
                         bars=bars,
                         bass=_slice_avg(bars, 0.0, 0.20),
                         mid=_slice_avg(bars, 0.0, 0.55),
-                        full=_slice_avg(bars, 0.0, 1.0),
+                        full=full,
                         centroid=centroid,
                         onset=onset,
                         onset_strength=onset_strength,
@@ -1004,6 +1007,7 @@ class PcmAudioPipeline:
                         onset_bass_strength=onset_bass_str,
                         onset_mid_strength=onset_mid_str,
                         onset_treble_strength=onset_treble_str,
+                        relative_exertion=full,
                     )
 
     def start(self) -> None:

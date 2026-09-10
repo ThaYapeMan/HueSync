@@ -175,6 +175,18 @@ class AudioFeatures:
     percussive_energy: float = 0.0   # share that is percussive (drums, transients)
     harmonic_energy: float = 0.0     # share that is harmonic (tones, sustained)
 
+    # Sustained energy — section-level loudness relative to programme mean.
+    # Computed by SustainedEnergyTracker from raw PCM RMS (dual-timescale
+    # log-ratio).  None when no PCM source is attached (cava-only path).
+    # Used by LayerMixer to drive EnergyProfile blend; do NOT use for reactive
+    # per-frame Effect brightness (use features.full / relative_exertion for that).
+    sustained_energy: float | None = None
+
+    # Relative exertion — alias for features.full, kept as a named field so
+    # callers that specifically want the transient detector signal use an
+    # explicit name rather than the ambiguous "full".
+    relative_exertion: float = 0.0
+
 
 # ---------------------------------------------------------------------------
 # Renderer — contract between the colour engine and the analysis layer
