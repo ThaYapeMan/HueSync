@@ -11,11 +11,11 @@ If no coupling is active, energy will be 0.0 for every sample — start a sessio
 before running this.
 
 Columns in CSV:
-    timestamp_s   — seconds since capture start
-    energy        — features.full from the backend (0.0–1.0)
-    mix           — EMA-smoothed LayerMixer crossfade weight (0.0–1.0)
-    high_weight   — smoothstep(energy, blend_start, blend_end), computed locally
-                    (matches LayerMixer target before the blend_response EMA)
+    timestamp_s      — seconds since capture start
+    energy           — features.full / relative_exertion (0.0–1.0)
+    mix              — EMA-smoothed LayerMixer crossfade weight (0.0–1.0)
+    high_weight      — smoothstep(energy, blend_start, blend_end), computed locally
+    sustained_energy — section-level energy from SustainedEnergyTracker (0.0–1.0 or blank)
 """
 
 from __future__ import annotations
@@ -76,7 +76,7 @@ async def _capture(
     host: str,
     port: int,
     duration: float,
-) -> tuple[list[tuple[float, float, float]], float, float, str | None]:
+) -> tuple[list[tuple[float, float, float, float | None]], float, float, str | None]:
     """Connect, collect frames for *duration* seconds.
 
     Returns (samples, blend_start, blend_end, ep_id).
@@ -84,7 +84,7 @@ async def _capture(
     url = f"ws://{host}:{port}/ws/preview"
     api_base = f"http://{host}:{port}/api"
 
-    samples: list[tuple[float, float, float]] = []  # (timestamp_s, energy, mix)
+    samples: list[tuple[float, float, float, float | None]] = []  # (ts, energy, mix, se)
     blend_start = 0.3
     blend_end = 0.7
     ep_fetched = False
@@ -120,7 +120,9 @@ async def _capture(
                 if mtype == "frame":
                     energy = float(msg.get("energy", 0.0))
                     mix = float(msg.get("mix", 0.0))
-                    samples.append((time.monotonic() - start_t, energy, mix))
+                    se_raw = msg.get("sustained_energy")
+                    se: float | None = float(se_raw) if se_raw is not None else None
+                    samples.append((time.monotonic() - start_t, energy, mix, se))
                 elif mtype == "status" and not ep_fetched:
                     ep_id = msg.get("active_energy_profile_id")
                     if ep_id:
@@ -149,7 +151,7 @@ async def _capture(
 
 
 def _report(
-    samples: list[tuple[float, float, float]],
+    samples: list[tuple[float, float, float, float | None]],
     blend_start: float,
     blend_end: float,
     ep_id: str | None,
@@ -159,15 +161,22 @@ def _report(
         print("No samples collected. Was a coupling active?", file=sys.stderr)
         return
 
-    energies = [e for _, e, _ in samples]
-    mixes = [m for _, _, m in samples]
+    energies = [e for _, e, _, _ in samples]
+    mixes = [m for _, _, m, _ in samples]
+    se_vals: list[float | None] = [se for _, _, _, se in samples]
     weights = [_smoothstep(e, blend_start, blend_end) for e in energies]
     n = len(energies)
 
     # CSV
-    rows = [["timestamp_s", "energy", "mix", "high_weight"]] + [
-        [f"{ts:.3f}", f"{energy:.4f}", f"{mix:.4f}", f"{hw:.4f}"]
-        for (ts, energy, mix), hw in zip(samples, weights, strict=True)
+    rows = [["timestamp_s", "energy", "mix", "high_weight", "sustained_energy"]] + [
+        [
+            f"{ts:.3f}",
+            f"{energy:.4f}",
+            f"{mix:.4f}",
+            f"{hw:.4f}",
+            f"{se:.4f}" if se is not None else "",
+        ]
+        for (ts, energy, mix, se), hw in zip(samples, weights, strict=True)
     ]
     if out_path:
         with open(out_path, "w", newline="") as f:
@@ -238,9 +247,46 @@ def _report(
     for label, p in [("p50", 50), ("p75", 75), ("p90", 90), ("p95", 95), ("p99", 99)]:
         print(f"  {label}: {_percentile(m_s, p):.4f}", file=sep)
     print(f"  Time mix <10%  : {pct(mixes, 0.10):.1f}%", file=sep)
-    print(f"  Time mix 10–50%: {100.0*sum(1 for m in mixes if 0.10 <= m < 0.50)/n:.1f}%", file=sep)
-    print(f"  Time mix 50–90%: {100.0*sum(1 for m in mixes if 0.50 <= m < 0.90)/n:.1f}%", file=sep)
+    m_mid_lo = 100.0 * sum(1 for m in mixes if 0.10 <= m < 0.50) / n
+    m_mid_hi = 100.0 * sum(1 for m in mixes if 0.50 <= m < 0.90) / n
+    print(f"  Time mix 10–50%: {m_mid_lo:.1f}%", file=sep)
+    print(f"  Time mix 50–90%: {m_mid_hi:.1f}%", file=sep)
     print(f"  Time mix >90%  : {pct(mixes, 0.90, above=True):.1f}%", file=sep)
+
+    se_present = [v for v in se_vals if v is not None]
+    if se_present:
+        se_s = sorted(se_present)
+        se_n = len(se_present)
+        print(
+            "\n── Sustained energy (section-level, LayerMixer input) ──────────────",
+            file=sep,
+        )
+        print(f"  Samples with SE : {se_n} / {n}", file=sep)
+        for label, p in [("p50", 50), ("p75", 75), ("p90", 90), ("p95", 95), ("p99", 99)]:
+            print(f"  {label}: {_percentile(se_s, p):.4f}", file=sep)
+        n_se_low = sum(1 for v in se_present if v < blend_start)
+        n_se_high = sum(1 for v in se_present if v >= blend_end)
+        n_se_blend = se_n - n_se_low - n_se_high
+        print(
+            f"  LOW   (SE < {blend_start:.2f})       : "
+            f"{100.0*n_se_low/se_n:.1f}%",
+            file=sep,
+        )
+        print(
+            f"  BLEND ({blend_start:.2f} ≤ SE < {blend_end:.2f}) : "
+            f"{100.0*n_se_blend/se_n:.1f}%",
+            file=sep,
+        )
+        print(
+            f"  HIGH  (SE ≥ {blend_end:.2f})       : "
+            f"{100.0*n_se_high/se_n:.1f}%",
+            file=sep,
+        )
+    else:
+        print(
+            "\n── Sustained energy: not available (no PCM source / old backend) ──",
+            file=sep,
+        )
 
 
 # ---------------------------------------------------------------------------

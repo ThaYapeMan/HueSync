@@ -336,6 +336,13 @@ class PlayerManager:
         return 0.0
 
     @property
+    def last_sustained_energy(self) -> float | None:
+        """Section-level sustained energy from SustainedEnergyTracker (None if unavailable)."""
+        if self._active and self._active.sync_engine:
+            return self._active.sync_engine.last_sustained_energy
+        return None
+
+    @property
     def active_energy_profile_id(self) -> str | None:
         if self._active and self._active.coupling:
             return self._active.coupling.energy_profile_id

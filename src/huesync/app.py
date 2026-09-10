@@ -87,6 +87,8 @@ async def ws_preview(websocket: WebSocket):
                 "onset_treble": player_manager.last_onset_treble,
                 "mix": player_manager.last_mix,
                 "energy": player_manager.last_energy,
+                "sustained_energy": player_manager.last_sustained_energy,
+                "relative_exertion": player_manager.last_energy,
             })
 
             if tick % 3 == 0:

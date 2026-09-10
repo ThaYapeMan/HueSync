@@ -1557,11 +1557,19 @@ def _smoothstep(x: float, lo: float, hi: float) -> float:
 class LayerMixer:
     """Crossfades a Mellow and an Active ColourModeEffect by energy.
 
-    mix = smoothstep(features.full, low_threshold, high_threshold),
+    mix = smoothstep(blend_input, low_threshold, high_threshold),
     EMA-smoothed to avoid flickering between bass hits.
 
     mix=0.0 → pure mellow layer (mellow_profile.color_mode).
     mix=1.0 → pure active layer (active_profile.color_mode).
+
+    Blend input (primary): features.sustained_energy — section-level loudness
+    from SustainedEnergyTracker, available when a PCM source is attached.
+    Fallback (degraded): features.full (= relative exertion, a transient
+    detector).  The fallback is intentionally explicit below — do NOT replace
+    it with a silent default.  When sustained_energy is None it means the
+    PCM source is not attached (cava-only path); relative exertion is a poor
+    proxy but better than nothing, and the degraded path is clearly labelled.
 
     Blend thresholds come from active_profile.blend_start / blend_end / blend_response,
     read from the EnergyProfile via the active Profile.
@@ -1581,7 +1589,14 @@ class LayerMixer:
         return self._mix
 
     def render(self, features: AudioFeatures, t: float) -> Scene:
-        target = _smoothstep(features.full, self._low, self._high)
+        if features.sustained_energy is not None:
+            blend_input = features.sustained_energy
+        else:
+            # Degraded path: no PCM source attached (cava-only).
+            # features.full is relative exertion (transient), not sustained
+            # energy — blend will react to beats rather than song sections.
+            blend_input = features.full
+        target = _smoothstep(blend_input, self._low, self._high)
         self._mix += self._ema_alpha * (target - self._mix)
         mellow_scene = self._mellow.render(features, t)
         active_scene = self._active.render(features, t)
@@ -1661,6 +1676,9 @@ class SyncEngine:
         self._last_onset_mid: bool = False
         self._last_onset_treble: bool = False
         self._diag_frame: int = 0
+        self._se_tracker: SustainedEnergyTracker = SustainedEnergyTracker()
+        self._last_sustained_energy: float | None = None
+        self._last_tick_t: float | None = None
 
     def attach_shm_source(self, source: PcmSource) -> None:
         """Connect a PCM source for the PCM-tap onset pipeline.
@@ -1821,6 +1839,10 @@ class SyncEngine:
     def last_bars(self) -> list[float]:
         return self._last_bars
 
+    @property
+    def last_sustained_energy(self) -> float | None:
+        return self._last_sustained_energy
+
     def start(self) -> None:
         self._analyser.start()
 
@@ -1848,6 +1870,10 @@ class SyncEngine:
             # PCM-tap onset path runs BEFORE the effect render so that
             # multiband overwrites features.onset* before _last_onset and the
             # Scene are captured.
+            tick_t = time.monotonic()
+            dt = (tick_t - self._last_tick_t) if self._last_tick_t is not None else SEND_INTERVAL_S
+            self._last_tick_t = tick_t
+
             if self._shm_source is not None:
                 samples = self._shm_source.read_new()
                 if len(samples) > 0:
@@ -1888,6 +1914,13 @@ class SyncEngine:
                             features.hpss_active = True
                             features.percussive_energy = p_energy
                             features.harmonic_energy = h_energy
+
+                    # Sustained energy uses the same samples buffer (do not call
+                    # read_new() again — the PCM position would advance).
+                    se = self._se_tracker.push(samples, dt)
+                    self._last_sustained_energy = se
+                    if features is not None:
+                        features.sustained_energy = se
 
             if features is not None:
                 self._last_onset = features.onset
