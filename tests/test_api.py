@@ -737,9 +737,8 @@ def test_bars_source_roundtrip(client: TestClient):
 
 
 def test_clone_coupling_returns_new_id(client: TestClient):
-    """The cloned Coupling must have a different ID than the original."""
+    """The cloned Coupling must have a different ID and a copy-suffixed name."""
     coupling = _make_full_coupling(client._storage)
-
     resp = client.post(f"/api/couplings/{coupling.id}/clone")
     assert resp.status_code == 201
     body = resp.json()
@@ -747,73 +746,68 @@ def test_clone_coupling_returns_new_id(client: TestClient):
     assert body["name"] == f"{coupling.name} (copy)"
 
 
-def test_clone_coupling_analysis_and_scene_configs_are_independent(client: TestClient):
-    """Cloned Analyser and Effect have new IDs but identical field values.
-    Cloned EnergyProfile has a new ID and points to the new Effect.
+def test_clone_coupling_preserves_entity_references(client: TestClient):
+    """Cloning a Coupling must preserve all FK references.
+
+    The cloned Coupling points to the SAME Analyser, EnergyProfile, Player,
+    and Zone as the original — no new sub-entities are created.
     """
     coupling = _make_full_coupling(client._storage)
-    orig_ac = client._storage.get_analyser(coupling.analyser_id)
-    orig_cf = client._storage.get_energy_profile(coupling.energy_profile_id)
-    orig_effect = client._storage.get_effect(orig_cf.high_energy_effect_id) if orig_cf else None
-
     resp = client.post(f"/api/couplings/{coupling.id}/clone")
     assert resp.status_code == 201
     body = resp.json()
 
-    new_ac = client._storage.get_analyser(body["analyser_id"])
-    new_cf = client._storage.get_energy_profile(body["energy_profile_id"])
-    new_effect = client._storage.get_effect(new_cf.high_energy_effect_id) if new_cf else None
-
-    # New IDs — not the same sub-entity objects.
-    assert new_ac is not None
-    assert new_cf is not None
-    assert new_effect is not None
-    assert orig_ac is not None
-    assert orig_effect is not None
-    assert new_ac.id != orig_ac.id
-    assert new_cf.id != orig_cf.id
-    assert new_effect.id != orig_effect.id
-
-    # All field values identical to the originals.
-    assert new_ac.onset_method == orig_ac.onset_method
-    assert new_ac.onset_delta == orig_ac.onset_delta
-    assert new_ac.onset_alpha == orig_ac.onset_alpha
-    assert new_ac.bars == orig_ac.bars
-    assert new_ac.lower_cutoff_freq == orig_ac.lower_cutoff_freq
-    assert new_ac.higher_cutoff_freq == orig_ac.higher_cutoff_freq
-    assert new_effect.effect_type == orig_effect.effect_type
-    assert new_effect.sensitivity == orig_effect.sensitivity
-    assert new_effect.brightness_floor == orig_effect.brightness_floor
-    assert new_effect.bass_hz == orig_effect.bass_hz
-    assert new_effect.mid_hz == orig_effect.mid_hz
-    assert new_effect.exertion_clip == orig_effect.exertion_clip
-
-    # Player and Zone are shared (same IDs).
+    assert body["analyser_id"] == coupling.analyser_id
+    assert body["energy_profile_id"] == coupling.energy_profile_id
     assert body["player_id"] == coupling.player_id
     assert body["zone_id"] == coupling.zone_id
 
 
-def test_clone_coupling_modifying_clone_does_not_affect_original(client: TestClient):
-    """Mutating the clone's Analyser must not change the original's."""
+def test_clone_coupling_entity_counts_unchanged(client: TestClient):
+    """Cloning a Coupling must not create any additional sub-entities."""
     coupling = _make_full_coupling(client._storage)
+    n_players  = len(client._storage.list_virtual_players())
+    n_zones    = len(client._storage.list_zones())
+    n_analysers = len(client._storage.list_analysers())
+    n_profiles  = len(client._storage.list_energy_profiles())
+    n_effects   = len(client._storage.list_effects())
 
     resp = client.post(f"/api/couplings/{coupling.id}/clone")
     assert resp.status_code == 201
-    clone_body = resp.json()
 
-    # Patch the clone's onset_method via the coupling PATCH endpoint.
-    patch_resp = client.patch(
-        f"/api/couplings/{clone_body['id']}",
-        json={"onset_method": "multiband"},
-    )
+    assert len(client._storage.list_virtual_players())  == n_players
+    assert len(client._storage.list_zones())             == n_zones
+    assert len(client._storage.list_analysers())         == n_analysers
+    assert len(client._storage.list_energy_profiles())   == n_profiles
+    assert len(client._storage.list_effects())           == n_effects
+    assert len(client._storage.list_couplings())         == 2  # original + clone
+
+
+def test_clone_coupling_reassigning_analyser_does_not_affect_original(client: TestClient):
+    """Redirecting the clone's analyser_id FK leaves the original coupling and
+    the original Analyser entity both unchanged."""
+    coupling = _make_full_coupling(client._storage)
+    resp = client.post(f"/api/couplings/{coupling.id}/clone")
+    assert resp.status_code == 201
+    clone_id = resp.json()["id"]
+
+    # Create a second Analyser and reassign the clone to it.
+    r2 = client.post("/api/analysers", json={"name": "AC2", "onset_method": "multiband"})
+    ac2_id = r2.json()["id"]
+
+    patch_resp = client.patch(f"/api/couplings/{clone_id}", json={"analyser_id": ac2_id})
     assert patch_resp.status_code == 200
 
-    # Clone's Analyser now has multiband.
-    clone_ac = client._storage.get_analyser(clone_body["analyser_id"])
-    assert clone_ac.onset_method == "multiband"
+    # Clone now points to AC2.
+    assert patch_resp.json()["analyser_id"] == ac2_id
 
-    # Original's Analyser still has combined (unchanged).
+    # Original coupling still points to the original Analyser.
+    orig_resp = client.get(f"/api/couplings/{coupling.id}")
+    assert orig_resp.json()["analyser_id"] == coupling.analyser_id
+
+    # Original Analyser entity is unmodified.
     orig_ac = client._storage.get_analyser(coupling.analyser_id)
+    assert orig_ac is not None
     assert orig_ac.onset_method == "combined"
 
 
@@ -907,3 +901,266 @@ def test_clone_generates_unique_name(client: TestClient):
     resp = client.post(f"/api/couplings/{coupling.id}/clone")
     assert resp.status_code == 201
     assert resp.json()["name"] == f"{coupling.name} (copy 2)"
+
+
+# ---------------------------------------------------------------------------
+# Clone Effect
+# ---------------------------------------------------------------------------
+
+
+def test_clone_effect_returns_new_id_and_copy_name(client: TestClient):
+    """POST /effects/{id}/clone → 201, new id, copy-suffixed name."""
+    r = client.post("/api/effects", json={"name": "Pulse", "effect_type": "mono_pulse"})
+    effect_id = r.json()["id"]
+
+    resp = client.post(f"/api/effects/{effect_id}/clone")
+    assert resp.status_code == 201
+    body = resp.json()
+    assert body["id"] != effect_id
+    assert body["name"] == "Pulse (copy)"
+
+
+def test_clone_effect_copies_configuration(client: TestClient):
+    """Cloned Effect has identical configuration to the original."""
+    r = client.post("/api/effects", json={
+        "name": "Vivid",
+        "effect_type": "spectrum_rgb",
+        "sensitivity": 2.5,
+        "brightness_floor": 0.05,
+        "bass_hz": 200,
+        "mid_hz": 1800,
+        "exertion_clip": 4.0,
+        "onset_flash_intensity": 0.3,
+    })
+    orig = r.json()
+
+    resp = client.post(f"/api/effects/{orig['id']}/clone")
+    clone = resp.json()
+
+    assert clone["effect_type"] == orig["effect_type"]
+    assert clone["sensitivity"] == orig["sensitivity"]
+    assert clone["brightness_floor"] == orig["brightness_floor"]
+    assert clone["bass_hz"] == orig["bass_hz"]
+    assert clone["mid_hz"] == orig["mid_hz"]
+    assert clone["exertion_clip"] == orig["exertion_clip"]
+    assert clone["onset_flash_intensity"] == orig["onset_flash_intensity"]
+
+
+def test_clone_effect_entity_count(client: TestClient):
+    """Cloning an Effect creates exactly one additional Effect and nothing else."""
+    r = client.post("/api/effects", json={"name": "E1"})
+    effect_id = r.json()["id"]
+
+    n_before = len(client.get("/api/effects").json())
+    resp = client.post(f"/api/effects/{effect_id}/clone")
+    assert resp.status_code == 201
+    assert len(client.get("/api/effects").json()) == n_before + 1
+
+
+def test_clone_effect_not_found(client: TestClient):
+    resp = client.post("/api/effects/no-such-id/clone")
+    assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Clone EnergyProfile
+# ---------------------------------------------------------------------------
+
+
+def test_clone_energy_profile_returns_new_id_and_copy_name(client: TestClient):
+    """POST /energy-profiles/{id}/clone → 201, new id, copy-suffixed name."""
+    eff = client.post("/api/effects", json={"name": "EL"}).json()
+    r = client.post("/api/energy-profiles", json={
+        "name": "Classic", "high_energy_effect_id": eff["id"],
+    })
+    ep_id = r.json()["id"]
+
+    resp = client.post(f"/api/energy-profiles/{ep_id}/clone")
+    assert resp.status_code == 201
+    body = resp.json()
+    assert body["id"] != ep_id
+    assert body["name"] == "Classic (copy)"
+
+
+def test_clone_energy_profile_preserves_effect_references(client: TestClient):
+    """Cloned EnergyProfile must preserve high and low effect references; no Effect clone."""
+    hi = client.post("/api/effects", json={"name": "Hi"}).json()
+    lo = client.post("/api/effects", json={"name": "Lo"}).json()
+    r = client.post("/api/energy-profiles", json={
+        "name": "EP",
+        "high_energy_effect_id": hi["id"],
+        "low_energy_effect_id": lo["id"],
+        "blend_start": 0.2,
+        "blend_end": 0.8,
+        "blend_response": 0.05,
+    })
+    ep = r.json()
+
+    n_effects_before = len(client.get("/api/effects").json())
+
+    resp = client.post(f"/api/energy-profiles/{ep['id']}/clone")
+    assert resp.status_code == 201
+    clone = resp.json()
+
+    assert clone["high_energy_effect_id"] == hi["id"]
+    assert clone["low_energy_effect_id"] == lo["id"]
+    assert clone["blend_start"] == ep["blend_start"]
+    assert clone["blend_end"] == ep["blend_end"]
+    assert clone["blend_response"] == ep["blend_response"]
+
+    # No new Effects created.
+    assert len(client.get("/api/effects").json()) == n_effects_before
+
+
+def test_clone_energy_profile_entity_count(client: TestClient):
+    """Cloning an EnergyProfile creates exactly one additional EnergyProfile."""
+    eff = client.post("/api/effects", json={"name": "X"}).json()
+    r = client.post("/api/energy-profiles", json={
+        "name": "EP2", "high_energy_effect_id": eff["id"],
+    })
+    ep_id = r.json()["id"]
+
+    n_before = len(client.get("/api/energy-profiles").json())
+    resp = client.post(f"/api/energy-profiles/{ep_id}/clone")
+    assert resp.status_code == 201
+    assert len(client.get("/api/energy-profiles").json()) == n_before + 1
+
+
+def test_clone_energy_profile_not_found(client: TestClient):
+    resp = client.post("/api/energy-profiles/no-such-id/clone")
+    assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Clone Analyser
+# ---------------------------------------------------------------------------
+
+
+def test_clone_analyser_returns_new_id_and_copy_name(client: TestClient):
+    """POST /analysers/{id}/clone → 201, new id, copy-suffixed name."""
+    r = client.post("/api/analysers", json={"name": "Cava Combined"})
+    ac_id = r.json()["id"]
+
+    resp = client.post(f"/api/analysers/{ac_id}/clone")
+    assert resp.status_code == 201
+    body = resp.json()
+    assert body["id"] != ac_id
+    assert body["name"] == "Cava Combined (copy)"
+
+
+def test_clone_analyser_copies_configuration(client: TestClient):
+    """Cloned Analyser has identical configuration to the original."""
+    r = client.post("/api/analysers", json={
+        "name": "Custom",
+        "onset_method": "multiband",
+        "bars": 20,
+        "lower_cutoff_freq": 80,
+        "higher_cutoff_freq": 10000,
+        "onset_delta": 0.15,
+        "onset_alpha": 0.85,
+    })
+    orig = r.json()
+
+    resp = client.post(f"/api/analysers/{orig['id']}/clone")
+    clone = resp.json()
+
+    assert clone["onset_method"] == orig["onset_method"]
+    assert clone["bars"] == orig["bars"]
+    assert clone["lower_cutoff_freq"] == orig["lower_cutoff_freq"]
+    assert clone["higher_cutoff_freq"] == orig["higher_cutoff_freq"]
+    assert clone["onset_delta"] == orig["onset_delta"]
+    assert clone["onset_alpha"] == orig["onset_alpha"]
+
+
+def test_clone_analyser_entity_count(client: TestClient):
+    """Cloning an Analyser creates exactly one additional Analyser and nothing else."""
+    r = client.post("/api/analysers", json={"name": "A1"})
+    ac_id = r.json()["id"]
+
+    n_before = len(client.get("/api/analysers").json())
+    resp = client.post(f"/api/analysers/{ac_id}/clone")
+    assert resp.status_code == 201
+    assert len(client.get("/api/analysers").json()) == n_before + 1
+
+
+def test_clone_analyser_not_found(client: TestClient):
+    resp = client.post("/api/analysers/no-such-id/clone")
+    assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Task 6 — Integrity checks
+# ---------------------------------------------------------------------------
+
+
+def test_clone_coupling_then_edit_profile_ref_does_not_affect_original(client: TestClient):
+    """Clone Coupling, then reassign clone's energy_profile_id.
+
+    Original coupling must still point to its original EnergyProfile.
+    The original EnergyProfile must not have been cloned or modified.
+    """
+    coupling = _make_full_coupling(client._storage)
+    clone_id = client.post(f"/api/couplings/{coupling.id}/clone").json()["id"]
+
+    # Create a second EnergyProfile and redirect the clone to it.
+    eff = client.post("/api/effects", json={"name": "X"}).json()
+    ep2_id = client.post("/api/energy-profiles", json={
+        "name": "EP2", "high_energy_effect_id": eff["id"],
+    }).json()["id"]
+
+    patch_resp = client.patch(f"/api/couplings/{clone_id}", json={"energy_profile_id": ep2_id})
+    assert patch_resp.status_code == 200
+    assert patch_resp.json()["energy_profile_id"] == ep2_id
+
+    # Original coupling still references the original EnergyProfile.
+    orig_resp = client.get(f"/api/couplings/{coupling.id}")
+    assert orig_resp.json()["energy_profile_id"] == coupling.energy_profile_id
+
+    # Original EnergyProfile is not modified.
+    orig_ep = client._storage.get_energy_profile(coupling.energy_profile_id)
+    assert orig_ep is not None
+
+
+def test_clone_energy_profile_then_edit_effect_ref_does_not_affect_original(client: TestClient):
+    """Clone EnergyProfile, then change clone's high_energy_effect_id.
+
+    Original EnergyProfile must still reference its original Effect.
+    The referenced Effect must not have been cloned.
+    """
+    hi = client.post("/api/effects", json={"name": "Hi"}).json()
+    ep_id = client.post("/api/energy-profiles", json={
+        "name": "EP", "high_energy_effect_id": hi["id"],
+    }).json()["id"]
+
+    clone_id = client.post(f"/api/energy-profiles/{ep_id}/clone").json()["id"]
+    n_effects = len(client.get("/api/effects").json())
+
+    # Create a third Effect and redirect the clone.
+    hi2 = client.post("/api/effects", json={"name": "Hi2"}).json()
+    patch_resp = client.patch(f"/api/energy-profiles/{clone_id}", json={
+        "high_energy_effect_id": hi2["id"],
+    })
+    assert patch_resp.status_code == 200
+
+    # Original EP still points to Hi.
+    orig_ep = client._storage.get_energy_profile(ep_id)
+    assert orig_ep.high_energy_effect_id == hi["id"]
+
+    # Effect count grew by exactly 1 (hi2), not more.
+    assert len(client.get("/api/effects").json()) == n_effects + 1
+
+
+def test_clone_effect_then_edit_does_not_affect_original(client: TestClient):
+    """Clone Effect, edit clone's parameters.  Original Effect parameters must be unchanged."""
+    r = client.post("/api/effects", json={"name": "Base", "sensitivity": 1.0})
+    orig_id = r.json()["id"]
+
+    clone_id = client.post(f"/api/effects/{orig_id}/clone").json()["id"]
+
+    patch_resp = client.patch(f"/api/effects/{clone_id}", json={"sensitivity": 3.0})
+    assert patch_resp.status_code == 200
+    assert patch_resp.json()["sensitivity"] == pytest.approx(3.0)
+
+    # Original Effect sensitivity is unchanged.
+    orig = client._storage.get_effect(orig_id)
+    assert orig.sensitivity == pytest.approx(1.0)

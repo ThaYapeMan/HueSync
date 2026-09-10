@@ -837,6 +837,22 @@ async def delete_analyser(ac_id: str, request: Request):
     _storage(request).delete_analyser(ac_id)
 
 
+@router.post("/analysers/{ac_id}/clone", status_code=201)
+async def clone_analyser(ac_id: str, request: Request):
+    """Shallow-clone an Analyser: new id, copied configuration, no references to preserve."""
+    storage = _storage(request)
+    ac = storage.get_analyser(ac_id)
+    if ac is None:
+        raise HTTPException(status_code=404, detail="Analyser not found")
+    new_ac = replace(
+        ac,
+        id=str(uuid.uuid4()),
+        name=_unique_copy_name(ac.name, {a.name.lower() for a in storage.list_analysers()}),
+    )
+    storage.save_analyser(new_ac)
+    return new_ac.to_dict()
+
+
 # ---------------------------------------------------------------------------
 # Effects  (canonical: /effects; deprecated alias: /scenes)
 # ---------------------------------------------------------------------------
@@ -917,6 +933,22 @@ async def patch_effect_route(effect_id: str, request: Request, body: EffectPatch
 @router.delete("/effects/{effect_id}", status_code=204)
 async def delete_effect_route(effect_id: str, request: Request):
     _storage(request).delete_effect(effect_id)
+
+
+@router.post("/effects/{effect_id}/clone", status_code=201)
+async def clone_effect(effect_id: str, request: Request):
+    """Shallow-clone an Effect: new id, copied configuration, no references to preserve."""
+    storage = _storage(request)
+    effect = storage.get_effect(effect_id)
+    if effect is None:
+        raise HTTPException(status_code=404, detail="Effect not found")
+    new_effect = replace(
+        effect,
+        id=str(uuid.uuid4()),
+        name=_unique_copy_name(effect.name, {e.name.lower() for e in storage.list_effects()}),
+    )
+    storage.save_effect(new_effect)
+    return new_effect.to_dict()
 
 
 # Deprecated aliases — /scenes kept for backward compatibility; remove in Fase 5.
@@ -1012,6 +1044,23 @@ async def patch_energy_profile_route(ep_id: str, request: Request, body: EnergyP
 @router.delete("/energy-profiles/{ep_id}", status_code=204)
 async def delete_energy_profile_route(ep_id: str, request: Request):
     _storage(request).delete_energy_profile(ep_id)
+
+
+@router.post("/energy-profiles/{ep_id}/clone", status_code=201)
+async def clone_energy_profile(ep_id: str, request: Request):
+    """Shallow-clone an EnergyProfile: new id, copied scalar blend fields,
+    preserved references to high_energy_effect_id and low_energy_effect_id."""
+    storage = _storage(request)
+    ep = storage.get_energy_profile(ep_id)
+    if ep is None:
+        raise HTTPException(status_code=404, detail="EnergyProfile not found")
+    new_ep = replace(
+        ep,
+        id=str(uuid.uuid4()),
+        name=_unique_copy_name(ep.name, {x.name.lower() for x in storage.list_energy_profiles()}),
+    )
+    storage.save_energy_profile(new_ep)
+    return new_ep.to_dict()
 
 
 # Deprecated aliases — /crossfaders kept for backward compatibility; remove in Fase 5.
@@ -1250,54 +1299,24 @@ async def delete_coupling(coupling_id: str, request: Request):
 
 @router.post("/couplings/{coupling_id}/clone", status_code=201)
 async def clone_coupling(coupling_id: str, request: Request):
-    """Deep-clone a Coupling with fresh Analyser, Effect, and EnergyProfile copies.
+    """Shallow-clone a Coupling, preserving all entity references.
 
-    The Player and Zone references are shared (not cloned).
+    Creates a new Coupling with the same player_id, zone_id, analyser_id, and
+    energy_profile_id.  Does NOT clone any referenced entities — the Analyser,
+    EnergyProfile, and Effects are shared by reference.
     The new Coupling is named "<original name> (copy)".
     """
     storage = _storage(request)
-
     coupling = storage.get_coupling(coupling_id)
     if coupling is None:
         raise HTTPException(status_code=404, detail="Coupling not found")
 
-    ac = storage.get_analyser(coupling.analyser_id)
-    cf = storage.get_energy_profile(coupling.energy_profile_id)
-    effect = storage.get_effect(cf.high_energy_effect_id) if cf else None
-    if ac is None or cf is None or effect is None:
-        raise HTTPException(status_code=422, detail="Coupling has missing sub-entities")
-
-    new_ac = replace(
-        ac,
-        id=str(uuid.uuid4()),
-        name=_unique_copy_name(ac.name, {a.name.lower() for a in storage.list_analysers()}),
-    )
-    new_effect = replace(
-        effect,
-        id=str(uuid.uuid4()),
-        name=_unique_copy_name(effect.name, {e.name.lower() for e in storage.list_effects()}),
-    )
-    new_cf = replace(
-        cf,
-        id=str(uuid.uuid4()),
-        high_energy_effect_id=new_effect.id,
-        name=_unique_copy_name(
-            cf.name, {x.name.lower() for x in storage.list_energy_profiles()}
-        ),
-    )
     new_coupling = replace(
         coupling,
         id=str(uuid.uuid4()),
         name=_unique_copy_name(coupling.name, {c.name.lower() for c in storage.list_couplings()}),
-        analyser_id=new_ac.id,
-        energy_profile_id=new_cf.id,
     )
-
-    storage.save_analyser(new_ac)
-    storage.save_effect(new_effect)
-    storage.save_energy_profile(new_cf)
     storage.save_coupling(new_coupling)
-
     return new_coupling.to_dict()
 
 
