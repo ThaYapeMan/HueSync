@@ -271,3 +271,43 @@ def test_decode_audio_mono_synthetic_wav(tmp_path):
     assert abs(info["duration_s"] - 1.0) < 0.01
     # Mono mix of sin+cos at same amp → amplitude = 0.3 * sqrt(2)/2 ≈ 0.212
     assert pcm.max() > 0.1
+
+
+# ---------------------------------------------------------------------------
+# Cadence sensitivity — prevents the 30Hz/50ms mismatch from returning silently
+# ---------------------------------------------------------------------------
+
+def test_se_differs_between_cadences():
+    """SE evolves differently at 30Hz vs 20Hz due to different EMA alpha.
+
+    SyncEngine passes actual wall-clock dt to se_tracker.push().  In practice
+    the event loop runs at ~20Hz (asyncio overhead + DTLS streaming), not the
+    scheduled 30Hz.  Reconstructing at the wrong cadence produces a different
+    SE trajectory and degrades cross-correlation.
+    """
+    sr = 44100
+    # PCM with a clear dynamic transition: quiet → loud → quiet
+    pcm = np.concatenate([
+        _constant_pcm(0.02, 3.0, sr),   # quiet baseline (not silence — avoids None)
+        _constant_pcm(0.50, 6.0, sr),   # loud section (SE should rise)
+        _constant_pcm(0.02, 3.0, sr),   # quiet again (SE should fall)
+    ])
+
+    _, se_30 = reconstruct_se(pcm, sr, 1.0 / 30.0)
+    _, se_20 = reconstruct_se(pcm, sr, 1.0 / 20.0)
+
+    valid_30 = [v for v in se_30 if v is not None]
+    valid_20 = [v for v in se_20 if v is not None]
+    assert len(valid_30) >= 20
+    assert len(valid_20) >= 20
+
+    # Different EMA alphas → different SE values at the same elapsed time.
+    # The loud section onset (frame ~90 at 30Hz, ~60 at 20Hz) drives short EMA
+    # up at different rates.  After 6 s of loud signal the two trajectories
+    # should differ measurably.
+    mid_30 = valid_30[len(valid_30) // 2]
+    mid_20 = valid_20[len(valid_20) // 2]
+    assert abs(mid_30 - mid_20) > 1e-3, (
+        f"Expected SE to differ between 30Hz and 20Hz cadences; "
+        f"got mid_30={mid_30:.5f} vs mid_20={mid_20:.5f}"
+    )
