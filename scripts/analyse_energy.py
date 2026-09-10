@@ -177,16 +177,43 @@ def _band_pcts(vals: list[float]) -> tuple[float, float, float, float]:
     )
 
 
-def _first_cross(vals: list[float], ts: list[float], threshold: float) -> float | None:
-    """Return first timestamp where val >= threshold, or None if never reached."""
-    for t, v in zip(ts, vals, strict=True):
-        if v >= threshold:
-            return t
+def _interp_cross(
+    t_prev: float, v_prev: float, t_curr: float, v_curr: float, threshold: float
+) -> float:
+    """Linear interpolation of the exact moment a threshold is crossed."""
+    dv = v_curr - v_prev
+    if abs(dv) < 1e-12:
+        return t_curr
+    return t_prev + (threshold - v_prev) / dv * (t_curr - t_prev)
+
+
+def _first_up_cross(vals: list[float], ts: list[float], threshold: float) -> float | None:
+    """First upward crossing: previous sample < threshold, current >= threshold.
+
+    Does not fire on frame 0 even if vals[0] >= threshold — a window that
+    starts above threshold has no upward crossing until it first dips below
+    and then rises back.  Returns interpolated timestamp.
+    """
+    for i in range(1, len(vals)):
+        if vals[i - 1] < threshold <= vals[i]:
+            return _interp_cross(ts[i - 1], vals[i - 1], ts[i], vals[i], threshold)
+    return None
+
+
+def _first_down_cross(vals: list[float], ts: list[float], threshold: float) -> float | None:
+    """First downward crossing: previous sample >= threshold, current < threshold.
+
+    Does not fire on frame 0 even if vals[0] < threshold.
+    Returns interpolated timestamp.
+    """
+    for i in range(1, len(vals)):
+        if vals[i - 1] >= threshold > vals[i]:
+            return _interp_cross(ts[i - 1], vals[i - 1], ts[i], vals[i], threshold)
     return None
 
 
 def _fmt_rel(t_abs: float | None, t0: float) -> str:
-    return f"+{t_abs - t0:.1f}s" if t_abs is not None else "  —  "
+    return f"+{t_abs - t0:.1f}s" if t_abs is not None else "—"
 
 
 def _minmeanmax(vals: list[float]) -> str:
@@ -267,11 +294,18 @@ def _print_window_detail(
     candidates: list[Candidate],
     window: tuple[float, float],
 ) -> None:
-    """Print crossing-time detail for one window.
+    """Print directional-crossing detail for one window.
 
     Simulates the full sequence (correct EMA state at window start), then
-    reports SE/target/mix statistics and first-crossing timestamps relative
-    to window start.
+    for each candidate reports target/mix statistics and the first upward and
+    downward crossings of the 50% and 90% thresholds, interpolated to sub-frame
+    precision and expressed as an offset from window start.
+
+    t↑50 / t↑90: first frame where the signal rises from below to >= threshold.
+                  Not fired if the window starts above threshold.
+    t↓50 / t↓90: first frame where the signal falls from >= threshold to below.
+    m↑/m↓:       same semantics for the smoothed mix.
+    "—" means no such crossing occurred in the window.
     """
     w_idx = [i for i, r in enumerate(full_rows) if window[0] <= r.t <= window[1]]
     if not w_idx:
@@ -286,16 +320,20 @@ def _print_window_detail(
     print(f"\n{_DIV}")
     print(f"  Window detail: {window[0]:.2f}–{window[1]:.2f} s  ({len(w_idx)} samples)")
     print(f"  Sustained energy:  {_minmeanmax(se_w) if se_w else '(not available)'}")
-    print(f"  Blend input:       {_minmeanmax(bi_w)}")
+    print(f"  Blend input:       {_minmeanmax(bi_w)}  (start: {bi_w[0]:.3f})")
 
     print()
     print(
         f"  {'Label':<8} {'Speed':<18}"
-        f"  {'Target (min/mean/max)':<22}"
-        f"  {'Mix (min/mean/max)':<22}"
-        f"  {'→t≥50%':>7} {'→t≥90%':>7} {'→m≥50%':>7} {'→m≥90%':>7}"
+        f"  {'Target min/mean/max':<22}"
+        f"  {'t↑50':>6} {'t↑90':>6} {'t↓50':>6} {'t↓90':>6}"
+        f"  {'Mix min/mean/max':<22}"
+        f"  {'m↑50':>6} {'m↑90':>6} {'m↓50':>6} {'m↓90':>6}"
     )
-    print(f"  {'─'*106}")
+    print(f"  {'─'*128}")
+
+    def fr(t_abs: float | None) -> str:
+        return _fmt_rel(t_abs, t0)
 
     for c in candidates:
         sim = simulate(full_rows, c)
@@ -304,14 +342,18 @@ def _print_window_detail(
         print(
             f"  {c.label:<8} {c.speed_label:<18}"
             f"  {_minmeanmax(tgt_w):<22}"
+            f"  {fr(_first_up_cross(tgt_w, ts, 0.50)):>6}"
+            f" {fr(_first_up_cross(tgt_w, ts, 0.90)):>6}"
+            f" {fr(_first_down_cross(tgt_w, ts, 0.50)):>6}"
+            f" {fr(_first_down_cross(tgt_w, ts, 0.90)):>6}"
             f"  {_minmeanmax(mix_w):<22}"
-            f"  {_fmt_rel(_first_cross(tgt_w, ts, 0.50), t0):>7}"
-            f" {_fmt_rel(_first_cross(tgt_w, ts, 0.90), t0):>7}"
-            f" {_fmt_rel(_first_cross(mix_w, ts, 0.50), t0):>7}"
-            f" {_fmt_rel(_first_cross(mix_w, ts, 0.90), t0):>7}"
+            f"  {fr(_first_up_cross(mix_w, ts, 0.50)):>6}"
+            f" {fr(_first_up_cross(mix_w, ts, 0.90)):>6}"
+            f" {fr(_first_down_cross(mix_w, ts, 0.50)):>6}"
+            f" {fr(_first_down_cross(mix_w, ts, 0.90)):>6}"
         )
 
-    print(f"  {'─'*106}")
+    print(f"  {'─'*128}")
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────

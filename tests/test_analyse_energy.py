@@ -14,7 +14,9 @@ from analyse_energy import (
     Candidate,
     Row,
     _band_pcts,
-    _first_cross,
+    _first_down_cross,
+    _first_up_cross,
+    _interp_cross,
     _minmeanmax,
     _parse_csv,
     simulate,
@@ -111,35 +113,139 @@ def test_simulate_returns_one_tuple_per_row():
 
 
 # ---------------------------------------------------------------------------
-# _first_cross()
+# _interp_cross()
 # ---------------------------------------------------------------------------
 
 def _ts(n: int) -> list[float]:
     return [float(i) for i in range(n)]
 
 
-def test_first_cross_found():
-    vals = [0.0, 0.3, 0.6, 0.9]
-    ts   = _ts(4)
-    assert _first_cross(vals, ts, 0.5) == pytest.approx(2.0)
+def test_interp_cross_midpoint():
+    # v_prev=0.0, v_curr=1.0, threshold=0.5, t_prev=0.0, t_curr=1.0 → 0.5
+    assert _interp_cross(0.0, 0.0, 1.0, 1.0, 0.5) == pytest.approx(0.5)
 
 
-def test_first_cross_at_exact_threshold():
+def test_interp_cross_at_boundary():
+    # threshold == v_prev → fraction = 0 → t_prev
+    assert _interp_cross(0.0, 0.5, 1.0, 0.8, 0.5) == pytest.approx(0.0)
+
+
+def test_interp_cross_zero_delta_returns_t_curr():
+    # degenerate: v_prev == v_curr → returns t_curr
+    assert _interp_cross(0.0, 0.5, 1.0, 0.5, 0.5) == pytest.approx(1.0)
+
+
+# ---------------------------------------------------------------------------
+# _first_up_cross()
+# ---------------------------------------------------------------------------
+
+def test_up_cross_starts_below_crosses_upward():
+    # [0.0, 0.3, 0.8] — crosses 0.5 between index 1 (0.3) and 2 (0.8)
+    vals = [0.0, 0.3, 0.8]
+    ts   = _ts(3)
+    # interp: t=1 + (0.5-0.3)/(0.8-0.3) * 1 = 1 + 0.4 = 1.4
+    assert _first_up_cross(vals, ts, 0.5) == pytest.approx(1.4)
+
+
+def test_up_cross_starts_above_no_crossing_until_dip_and_rise():
+    # [0.9, 0.3, 0.8] — starts above, dips below, rises above again
+    # first upward crossing is at i=2 (vals[1]=0.3 < 0.5 <= vals[2]=0.8)
+    vals = [0.9, 0.3, 0.8]
+    ts   = _ts(3)
+    assert _first_up_cross(vals, ts, 0.5) == pytest.approx(1.4)
+
+
+def test_up_cross_starts_above_never_falls():
+    # [0.9, 0.8, 0.7] — always above 0.5; no upward crossing
+    vals = [0.9, 0.8, 0.7]
+    assert _first_up_cross(vals, _ts(3), 0.5) is None
+
+
+def test_up_cross_starts_above_only_one_sample():
+    vals = [0.99]
+    assert _first_up_cross(vals, _ts(1), 0.5) is None
+
+
+def test_up_cross_never_reaches_threshold():
+    vals = [0.1, 0.2, 0.3]
+    assert _first_up_cross(vals, _ts(3), 0.5) is None
+
+
+def test_up_cross_exact_threshold_value():
+    # vals[1] == threshold exactly → counts as crossing (>= threshold)
     vals = [0.0, 0.5, 0.8]
     ts   = _ts(3)
-    assert _first_cross(vals, ts, 0.5) == pytest.approx(1.0)
+    # interp: t=0 + (0.5-0.0)/(0.5-0.0)*1 = 1.0
+    assert _first_up_cross(vals, ts, 0.5) == pytest.approx(1.0)
 
 
-def test_first_cross_never():
-    vals = [0.1, 0.2, 0.3]
+def test_up_cross_oscillation_reports_first():
+    # oscillates above and below: [0.0, 0.8, 0.2, 0.9]
+    # first upward crossing at i=1 (0.0 → 0.8)
+    vals = [0.0, 0.8, 0.2, 0.9]
+    ts   = _ts(4)
+    result = _first_up_cross(vals, ts, 0.5)
+    # interp between ts[0]=0, v=0.0 and ts[1]=1, v=0.8: t=0 + 0.5/0.8 = 0.625
+    assert result == pytest.approx(0.5 / 0.8)
+
+
+def test_up_cross_missing_se_uses_rel_ex():
+    """Up-cross works on mix sequences derived from rel_ex fallback (se=None).
+
+    With alpha=0.10, 10 silent frames then 10 loud frames: mix crosses 0.50
+    around frame 16 (1 - 0.9^6 ≈ 0.47 → 1 - 0.9^7 ≈ 0.52).
+    """
+    rows = [Row(t=float(i), rel_ex=0.9 if i >= 10 else 0.1, captured_mix=0.0, se=None)
+            for i in range(20)]
+    c = Candidate("t", 0.3, 0.7, 0.10, "current")
+    sim = simulate(rows, c)
+    mix_w = [m for _, m in sim]
+    ts_w  = [float(i) for i in range(20)]
+    result = _first_up_cross(mix_w, ts_w, 0.50)
+    assert result is not None
+    assert result > 10.0   # can only rise after signal goes high at frame 10
+
+
+# ---------------------------------------------------------------------------
+# _first_down_cross()
+# ---------------------------------------------------------------------------
+
+def test_down_cross_starts_above_falls_below():
+    # [0.9, 0.3, 0.1] — falls below 0.5 between index 0 (0.9) and 1 (0.3)
+    vals = [0.9, 0.3, 0.1]
     ts   = _ts(3)
-    assert _first_cross(vals, ts, 0.9) is None
+    # interp: t=0 + (0.5-0.9)/(0.3-0.9)*1 = 0 + (-0.4/-0.6) = 0.667
+    assert _first_down_cross(vals, ts, 0.5) == pytest.approx((-0.4) / (-0.6))
 
 
-def test_first_cross_first_frame():
-    vals = [0.99]
-    ts   = _ts(1)
-    assert _first_cross(vals, ts, 0.5) == pytest.approx(0.0)
+def test_down_cross_starts_below_never_fires_immediately():
+    # starts below 0.5; no downward crossing unless it first goes above
+    vals = [0.3, 0.8, 0.2]
+    ts   = _ts(3)
+    # i=1: vals[0]=0.3 < 0.5, vals[1]=0.8 → NOT a down crossing
+    # i=2: vals[1]=0.8 >= 0.5, vals[2]=0.2 → down crossing between i=1 and i=2
+    result = _first_down_cross(vals, ts, 0.5)
+    assert result == pytest.approx(1 + (0.5 - 0.8) / (0.2 - 0.8))
+
+
+def test_down_cross_never_reaches_threshold():
+    vals = [0.1, 0.2, 0.3]
+    assert _first_down_cross(vals, _ts(3), 0.5) is None
+
+
+def test_down_cross_starts_above_stays_above():
+    vals = [0.9, 0.8, 0.7]
+    assert _first_down_cross(vals, _ts(3), 0.5) is None
+
+
+def test_down_cross_oscillation_reports_first():
+    # [0.0, 0.8, 0.2, 0.9] — first down crossing at i=2 (0.8 → 0.2)
+    vals = [0.0, 0.8, 0.2, 0.9]
+    ts   = _ts(4)
+    result = _first_down_cross(vals, ts, 0.5)
+    # interp between ts[1]=1 v=0.8 and ts[2]=2 v=0.2: t=1 + (0.5-0.8)/(0.2-0.8)*1
+    expected = 1 + (0.5 - 0.8) / (0.2 - 0.8)
+    assert result == pytest.approx(expected)
 
 
 # ---------------------------------------------------------------------------
