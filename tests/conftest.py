@@ -1,5 +1,9 @@
 import os
+import sys
 import tempfile
+
+# Make scripts/ importable for test_capture_energy.py.
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 
 
 def pytest_configure(config):  # noqa: ARG001

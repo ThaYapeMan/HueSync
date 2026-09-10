@@ -11,11 +11,16 @@ If no coupling is active, energy will be 0.0 for every sample — start a sessio
 before running this.
 
 Columns in CSV:
-    timestamp_s      — seconds since capture start
-    energy           — features.full / relative_exertion (0.0–1.0)
-    mix              — EMA-smoothed LayerMixer crossfade weight (0.0–1.0)
-    high_weight      — smoothstep(energy, blend_start, blend_end), computed locally
-    sustained_energy — section-level energy from SustainedEnergyTracker (0.0–1.0 or blank)
+    timestamp_s       — seconds since capture start
+    relative_exertion — features.full: BandNormaliser exertion (0.0–1.0)
+                        This is a transient detector, not section-level loudness.
+    mix               — EMA-smoothed LayerMixer crossfade weight (0.0–1.0)
+    ep_target_weight  — smoothstep(blend_input, blend_start, blend_end), where
+                        blend_input = sustained_energy when available,
+                        else relative_exertion (degraded fallback).
+                        Matches LayerMixer's instantaneous target before EMA.
+    sustained_energy  — section-level energy from SustainedEnergyTracker
+                        (0.0–1.0, or blank when PCM source unavailable)
 """
 
 from __future__ import annotations
@@ -45,6 +50,7 @@ except ImportError:
 
 
 def _smoothstep(x: float, lo: float, hi: float) -> float:
+    """Exact copy of sync_engine._smoothstep — must stay in sync."""
     t = max(0.0, min(1.0, (x - lo) / max(hi - lo, 1e-9)))
     return t * t * (3.0 - 2.0 * t)
 
@@ -67,6 +73,14 @@ def _percentile(sorted_vals: list[float], p: float) -> float:
     return sorted_vals[lo] + (idx - lo) * (sorted_vals[hi] - sorted_vals[lo])
 
 
+def _pct_below(vals: list[float], threshold: float, count: int) -> float:
+    return 100.0 * sum(1 for v in vals if v < threshold) / count
+
+
+def _pct_above_eq(vals: list[float], threshold: float, count: int) -> float:
+    return 100.0 * sum(1 for v in vals if v >= threshold) / count
+
+
 # ---------------------------------------------------------------------------
 # WebSocket capture
 # ---------------------------------------------------------------------------
@@ -80,11 +94,12 @@ async def _capture(
     """Connect, collect frames for *duration* seconds.
 
     Returns (samples, blend_start, blend_end, ep_id).
+    Each sample: (timestamp_s, relative_exertion, mix, sustained_energy|None).
     """
     url = f"ws://{host}:{port}/ws/preview"
     api_base = f"http://{host}:{port}/api"
 
-    samples: list[tuple[float, float, float, float | None]] = []  # (ts, energy, mix, se)
+    samples: list[tuple[float, float, float, float | None]] = []
     blend_start = 0.3
     blend_end = 0.7
     ep_fetched = False
@@ -118,11 +133,11 @@ async def _capture(
 
                 mtype = msg.get("type")
                 if mtype == "frame":
-                    energy = float(msg.get("energy", 0.0))
+                    rel_ex = float(msg.get("energy", 0.0))
                     mix = float(msg.get("mix", 0.0))
                     se_raw = msg.get("sustained_energy")
                     se: float | None = float(se_raw) if se_raw is not None else None
-                    samples.append((time.monotonic() - start_t, energy, mix, se))
+                    samples.append((time.monotonic() - start_t, rel_ex, mix, se))
                 elif mtype == "status" and not ep_fetched:
                     ep_id = msg.get("active_energy_profile_id")
                     if ep_id:
@@ -146,7 +161,7 @@ async def _capture(
 
 
 # ---------------------------------------------------------------------------
-# Statistics and output
+# Report
 # ---------------------------------------------------------------------------
 
 
@@ -161,22 +176,36 @@ def _report(
         print("No samples collected. Was a coupling active?", file=sys.stderr)
         return
 
-    energies = [e for _, e, _, _ in samples]
-    mixes = [m for _, _, m, _ in samples]
+    rel_exs: list[float] = [e for _, e, _, _ in samples]
+    mixes:   list[float] = [m for _, _, m, _ in samples]
     se_vals: list[float | None] = [se for _, _, _, se in samples]
-    weights = [_smoothstep(e, blend_start, blend_end) for e in energies]
-    n = len(energies)
+    n = len(rel_exs)
+
+    # EnergyProfile instantaneous target — mirrors LayerMixer.render() exactly:
+    #   blend_input = sustained_energy when available, else relative_exertion.
+    se_present_count = sum(1 for se in se_vals if se is not None)
+    se_available = se_present_count > 0
+    ep_targets: list[float] = [
+        _smoothstep(
+            se if se is not None else re,
+            blend_start,
+            blend_end,
+        )
+        for re, se in zip(rel_exs, se_vals, strict=True)
+    ]
 
     # CSV
-    rows = [["timestamp_s", "energy", "mix", "high_weight", "sustained_energy"]] + [
+    rows = [
+        ["timestamp_s", "relative_exertion", "mix", "ep_target_weight", "sustained_energy"]
+    ] + [
         [
             f"{ts:.3f}",
-            f"{energy:.4f}",
-            f"{mix:.4f}",
-            f"{hw:.4f}",
+            f"{re:.4f}",
+            f"{m:.4f}",
+            f"{w:.4f}",
             f"{se:.4f}" if se is not None else "",
         ]
-        for (ts, energy, mix, se), hw in zip(samples, weights, strict=True)
+        for (ts, re, m, se), w in zip(samples, ep_targets, strict=True)
     ]
     if out_path:
         with open(out_path, "w", newline="") as f:
@@ -187,31 +216,42 @@ def _report(
         for row in rows:
             w.writerow(row)
 
-    e_s = sorted(energies)
-    w_s = sorted(weights)
-    m_s = sorted(mixes)
-    mean_e = sum(energies) / n
-
-    def pct(vals: list[float], threshold: float, above: bool = False) -> float:
-        if above:
-            return 100.0 * sum(1 for v in vals if v >= threshold) / n
-        return 100.0 * sum(1 for v in vals if v < threshold) / n
-
     sep = sys.stderr
-    print("\n── Energy capture summary ──────────────────────────────────────────", file=sep)
-    print(f"  Samples   : {n:,}  ({samples[-1][0]:.1f} s)", file=sep)
-    print(f"  EP ID     : {ep_id or '(none / not active)' }", file=sep)
-    print(f"  blend_start={blend_start}  blend_end={blend_end}", file=sep)
 
-    print("\n── Energy statistics ───────────────────────────────────────────────", file=sep)
+    # ── Capture summary ──────────────────────────────────────────────────────
+    print("\n── Capture summary ─────────────────────────────────────────────────", file=sep)
+    print(f"  Samples     : {n:,}  ({samples[-1][0]:.1f} s)", file=sep)
+    print(f"  EP ID       : {ep_id or '(none / not active)'}", file=sep)
+    print(f"  blend_start = {blend_start}   blend_end = {blend_end}", file=sep)
+    blend_src = "sustained_energy" if se_available else "relative_exertion (degraded — no PCM)"
+    print(f"  LayerMixer blend input: {blend_src}", file=sep)
+
+    # ── 1. Relative exertion ─────────────────────────────────────────────────
+    re_s = sorted(rel_exs)
+    mean_re = sum(rel_exs) / n
+    print(
+        "\n── 1. Relative exertion  "
+        "(features.full — BandNormaliser transient detector) ─────",
+        file=sep,
+    )
+    if se_available:
+        print(
+            "  Note: LayerMixer does NOT use this for blend; it uses sustained_energy.",
+            file=sep,
+        )
+    else:
+        print(
+            "  Note: LayerMixer is using this as a degraded fallback (no PCM source).",
+            file=sep,
+        )
     for label, p in [("min", 0), ("p50", 50), ("p75", 75), ("p90", 90),
                      ("p95", 95), ("p99", 99), ("max", 100)]:
-        print(f"  {label:<4}: {_percentile(e_s, p):.4f}", file=sep)
-    print(f"  mean: {mean_e:.4f}", file=sep)
+        print(f"  {label:<4}: {_percentile(re_s, p):.4f}", file=sep)
+    print(f"  mean: {mean_re:.4f}", file=sep)
 
-    print("\n── Energy histogram (0.1-wide bins) ────────────────────────────────", file=sep)
+    print("\n  Histogram (0.1-wide bins):", file=sep)
     bins = [0] * 10
-    for e in energies:
+    for e in rel_exs:
         bins[min(int(e * 10), 9)] += 1
     for i, cnt in enumerate(bins):
         lo_b, hi_b = i * 0.1, (i + 1) * 0.1
@@ -219,74 +259,97 @@ def _report(
         bar_chr = "█" * int(bar_pct / 2)
         print(f"  [{lo_b:.1f}–{hi_b:.1f}) {cnt:6d}  ({bar_pct:5.1f}%)  {bar_chr}", file=sep)
 
-    print("\n── Zone occupancy ──────────────────────────────────────────────────", file=sep)
-    n_low = sum(1 for e in energies if e < blend_start)
-    n_high = sum(1 for e in energies if e >= blend_end)
-    n_blend = n - n_low - n_high
-    print(f"  LOW   (energy < {blend_start:.2f})                  : {100.0*n_low/n:.1f}%", file=sep)
-    blend_pct = 100.0 * n_blend / n
-    print(f"  BLEND ({blend_start:.2f} ≤ energy < {blend_end:.2f})  : {blend_pct:.1f}%", file=sep)
-    print(f"  HIGH  (energy ≥ {blend_end:.2f})                  : {100.0*n_high/n:.1f}%", file=sep)
+    print("\n  Zone occupancy (against blend thresholds):", file=sep)
+    n_re_low  = sum(1 for e in rel_exs if e < blend_start)
+    n_re_high = sum(1 for e in rel_exs if e >= blend_end)
+    n_re_blend = n - n_re_low - n_re_high
+    print(f"  LOW   (< {blend_start:.2f}) : {100.0*n_re_low/n:.1f}%", file=sep)
+    print(f"  BLEND ({blend_start:.2f}–{blend_end:.2f}): {100.0*n_re_blend/n:.1f}%", file=sep)
+    print(f"  HIGH  (≥ {blend_end:.2f}) : {100.0*n_re_high/n:.1f}%", file=sep)
 
-    print("\n── High-effect weight — instantaneous smoothstep (no EMA) ─────────", file=sep)
-    print(
-        "  (This is what LayerMixer targets each frame before blend_response smoothing)",
-        file=sep,
-    )
-    for label, p in [("p50", 50), ("p75", 75), ("p90", 90), ("p95", 95), ("p99", 99)]:
-        print(f"  {label}: {_percentile(w_s, p):.4f}", file=sep)
-    print(f"  Time weight <10%   : {pct(weights, 0.10):.1f}%", file=sep)
-    w_mid_lo = 100.0 * sum(1 for w in weights if 0.10 <= w < 0.50) / n
-    w_mid_hi = 100.0 * sum(1 for w in weights if 0.50 <= w < 0.90) / n
-    print(f"  Time weight 10–50% : {w_mid_lo:.1f}%", file=sep)
-    print(f"  Time weight 50–90% : {w_mid_hi:.1f}%", file=sep)
-    print(f"  Time weight >90%   : {pct(weights, 0.90, above=True):.1f}%", file=sep)
-
-    print("\n── Backend mix — EMA-smoothed (what actually drives LayerMixer) ────", file=sep)
-    print("  (blend_response EMA further suppresses brief spikes)", file=sep)
-    for label, p in [("p50", 50), ("p75", 75), ("p90", 90), ("p95", 95), ("p99", 99)]:
-        print(f"  {label}: {_percentile(m_s, p):.4f}", file=sep)
-    print(f"  Time mix <10%  : {pct(mixes, 0.10):.1f}%", file=sep)
-    m_mid_lo = 100.0 * sum(1 for m in mixes if 0.10 <= m < 0.50) / n
-    m_mid_hi = 100.0 * sum(1 for m in mixes if 0.50 <= m < 0.90) / n
-    print(f"  Time mix 10–50%: {m_mid_lo:.1f}%", file=sep)
-    print(f"  Time mix 50–90%: {m_mid_hi:.1f}%", file=sep)
-    print(f"  Time mix >90%  : {pct(mixes, 0.90, above=True):.1f}%", file=sep)
-
-    se_present = [v for v in se_vals if v is not None]
+    # ── 2. Sustained energy ──────────────────────────────────────────────────
+    se_present: list[float] = [v for v in se_vals if v is not None]
     if se_present:
         se_s = sorted(se_present)
         se_n = len(se_present)
         print(
-            "\n── Sustained energy (section-level, LayerMixer input) ──────────────",
+            "\n── 2. Sustained energy  "
+            "(SustainedEnergyTracker — section-level loudness) ────────",
             file=sep,
         )
-        print(f"  Samples with SE : {se_n} / {n}", file=sep)
-        for label, p in [("p50", 50), ("p75", 75), ("p90", 90), ("p95", 95), ("p99", 99)]:
-            print(f"  {label}: {_percentile(se_s, p):.4f}", file=sep)
-        n_se_low = sum(1 for v in se_present if v < blend_start)
+        print("  Note: this IS what LayerMixer uses as its blend input.", file=sep)
+        print(f"  Samples with SE: {se_n} / {n}", file=sep)
+        for label, p in [("min", 0), ("p50", 50), ("p75", 75), ("p90", 90),
+                         ("p95", 95), ("p99", 99), ("max", 100)]:
+            print(f"  {label:<4}: {_percentile(se_s, p):.4f}", file=sep)
+
+        n_se_low  = sum(1 for v in se_present if v < blend_start)
         n_se_high = sum(1 for v in se_present if v >= blend_end)
         n_se_blend = se_n - n_se_low - n_se_high
+        print("\n  Zone occupancy (against blend thresholds):", file=sep)
+        print(f"  LOW   (< {blend_start:.2f}) : {100.0*n_se_low/se_n:.1f}%", file=sep)
         print(
-            f"  LOW   (SE < {blend_start:.2f})       : "
-            f"{100.0*n_se_low/se_n:.1f}%",
+            f"  BLEND ({blend_start:.2f}–{blend_end:.2f}): {100.0*n_se_blend/se_n:.1f}%",
             file=sep,
         )
-        print(
-            f"  BLEND ({blend_start:.2f} ≤ SE < {blend_end:.2f}) : "
-            f"{100.0*n_se_blend/se_n:.1f}%",
-            file=sep,
-        )
-        print(
-            f"  HIGH  (SE ≥ {blend_end:.2f})       : "
-            f"{100.0*n_se_high/se_n:.1f}%",
-            file=sep,
-        )
+        print(f"  HIGH  (≥ {blend_end:.2f}) : {100.0*n_se_high/se_n:.1f}%", file=sep)
     else:
         print(
-            "\n── Sustained energy: not available (no PCM source / old backend) ──",
+            "\n── 2. Sustained energy: not available ──────────────────────────────────",
             file=sep,
         )
+        print(
+            "  No PCM source attached. LayerMixer is using relative_exertion as a\n"
+            "  degraded fallback — blend will react to transients, not song sections.",
+            file=sep,
+        )
+
+    # ── 3. EnergyProfile instantaneous target ────────────────────────────────
+    ep_s = sorted(ep_targets)
+    ep_n = len(ep_targets)
+    print(
+        "\n── 3. EnergyProfile instantaneous target  "
+        "(smoothstep of LayerMixer's blend input) ──",
+        file=sep,
+    )
+    if se_available:
+        n_se_none = ep_n - se_present_count
+        print("  blend_input = sustained_energy", file=sep)
+        if n_se_none > 0:
+            print(
+                f"  ({n_se_none} frames used relative_exertion fallback while SE was warming up)",
+                file=sep,
+            )
+    else:
+        print(
+            "  blend_input = relative_exertion  (degraded — no PCM source)",
+            file=sep,
+        )
+    for label, p in [("p50", 50), ("p75", 75), ("p90", 90), ("p95", 95), ("p99", 99)]:
+        print(f"  {label}: {_percentile(ep_s, p):.4f}", file=sep)
+    print(f"  Time target <10%   : {_pct_below(ep_targets, 0.10, ep_n):.1f}%", file=sep)
+    ep_mid_lo = 100.0 * sum(1 for w in ep_targets if 0.10 <= w < 0.50) / ep_n
+    ep_mid_hi = 100.0 * sum(1 for w in ep_targets if 0.50 <= w < 0.90) / ep_n
+    print(f"  Time target 10–50% : {ep_mid_lo:.1f}%", file=sep)
+    print(f"  Time target 50–90% : {ep_mid_hi:.1f}%", file=sep)
+    print(f"  Time target >90%   : {_pct_above_eq(ep_targets, 0.90, ep_n):.1f}%", file=sep)
+
+    # ── 4. EnergyProfile backend smoothed mix ────────────────────────────────
+    m_s = sorted(mixes)
+    print(
+        "\n── 4. EnergyProfile backend smoothed mix  "
+        "(blend_response EMA of instantaneous target) ─",
+        file=sep,
+    )
+    print("  (EMA further suppresses brief spikes; this is what drives the crossfade)", file=sep)
+    for label, p in [("p50", 50), ("p75", 75), ("p90", 90), ("p95", 95), ("p99", 99)]:
+        print(f"  {label}: {_percentile(m_s, p):.4f}", file=sep)
+    print(f"  Time mix <10%  : {_pct_below(mixes, 0.10, n):.1f}%", file=sep)
+    m_mid_lo = 100.0 * sum(1 for m in mixes if 0.10 <= m < 0.50) / n
+    m_mid_hi = 100.0 * sum(1 for m in mixes if 0.50 <= m < 0.90) / n
+    print(f"  Time mix 10–50%: {m_mid_lo:.1f}%", file=sep)
+    print(f"  Time mix 50–90%: {m_mid_hi:.1f}%", file=sep)
+    print(f"  Time mix >90%  : {_pct_above_eq(mixes, 0.90, n):.1f}%", file=sep)
 
 
 # ---------------------------------------------------------------------------
