@@ -13,6 +13,7 @@ import { EffectPreview } from '@/components/EffectPreview'
 import { cn } from '@/lib/utils'
 import {
   EFFECTS,
+  type Controller,
   type Coupling,
   type VirtualPlayer,
   type Zone,
@@ -31,7 +32,9 @@ import {
   getAnalysers,
   getEffects,
   getEnergyProfiles,
+  getControllers,
   getStatus,
+  listLmsPlayers,
 } from '@/lib/api'
 
 interface Props {
@@ -60,16 +63,50 @@ function NodeConnector() {
   )
 }
 
+// ── BranchConnector ───────────────────────────────────────────────────────────
+
+function BranchConnector() {
+  return (
+    <div className="w-full py-1" aria-hidden>
+      <svg viewBox="0 0 400 48" className="w-full h-10">
+        <line x1="200" y1="0" x2="200" y2="18" className="stroke-border/50" strokeWidth="1.5" />
+        <line x1="100" y1="18" x2="300" y2="18" className="stroke-border/50" strokeWidth="1.5" />
+        <line x1="100" y1="18" x2="100" y2="42" className="stroke-border/50" strokeWidth="1.5" />
+        <line x1="300" y1="18" x2="300" y2="42" className="stroke-border/50" strokeWidth="1.5" />
+        <polygon points="94,36 100,43 106,36" className="fill-border/50" />
+        <polygon points="294,36 300,43 306,36" className="fill-border/50" />
+      </svg>
+    </div>
+  )
+}
+
+// ── MergeConnector ────────────────────────────────────────────────────────────
+
+function MergeConnector() {
+  return (
+    <div className="w-full py-1" aria-hidden>
+      <svg viewBox="0 0 400 48" className="w-full h-10">
+        <line x1="100" y1="0" x2="100" y2="24" className="stroke-border/50" strokeWidth="1.5" />
+        <line x1="300" y1="0" x2="300" y2="24" className="stroke-border/50" strokeWidth="1.5" />
+        <line x1="100" y1="24" x2="300" y2="24" className="stroke-border/50" strokeWidth="1.5" />
+        <line x1="200" y1="24" x2="200" y2="48" className="stroke-border/50" strokeWidth="1.5" />
+        <polygon points="194,41 200,48 206,41" className="fill-border/50" />
+      </svg>
+    </div>
+  )
+}
+
 // ── RoutingNode (view mode — Player, Analyser, Zone) ──────────────────────────
 
-function RoutingNode({ label, name, context, onOpen }: {
+function RoutingNode({ label, name, context, onOpen, testId }: {
   label: string
   name?: string
   context?: string
   onOpen?: () => void
+  testId?: string
 }) {
   return (
-    <div className="border border-border rounded-lg overflow-hidden bg-card">
+    <div className="border border-border rounded-lg overflow-hidden bg-card" data-testid={testId}>
       <div className="flex items-center justify-between px-4 py-2 bg-muted/40 border-b border-border/40">
         <span className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">
           {label}
@@ -97,30 +134,58 @@ function RoutingNode({ label, name, context, onOpen }: {
   )
 }
 
-// ── EnergyProfileRoutingNode ──────────────────────────────────────────────────
+// ── VirtualPlayerRoutingNode ──────────────────────────────────────────────────
 
-function EnergyProfileRoutingNode({ ep, effects, onOpen }: {
-  ep: EnergyProfile | undefined
-  effects: Effect[]
+function VirtualPlayerRoutingNode({ player, followPlayerName, onOpen }: {
+  player: VirtualPlayer | undefined
+  followPlayerName: string | undefined
   onOpen?: () => void
 }) {
-  const highEffect = ep ? effects.find(e => e.id === ep.high_energy_effect_id) : undefined
-  const lowEffect = ep
-    ? (ep.low_energy_effect_id
-        ? effects.find(e => e.id === ep.low_energy_effect_id)
-        : highEffect)
+  const displayName = player
+    ? (player.display_name || player.player_name || player.type)
     : undefined
 
-  // Equality is by ID — empty low_energy_effect_id means same as high
-  const singleEffect = !ep?.low_energy_effect_id || ep.low_energy_effect_id === ep.high_energy_effect_id
+  let context: string | undefined
+  if (player?.type === 'AirPlay') {
+    const advertisedName = player.display_name || player.player_name
+    context = `AirPlay · Advertised Player · ${advertisedName}`
+  } else if (player?.type === 'LMS') {
+    const followName = followPlayerName ?? (player.follow_player_mac || undefined)
+    context = followName
+      ? `LMS · Follow Player · ${followName}`
+      : 'LMS'
+  } else if (player?.type) {
+    context = player.type
+  }
 
   return (
-    <div className="border border-border rounded-lg overflow-hidden bg-card">
+    <RoutingNode
+      label="Virtual Player"
+      name={displayName}
+      context={context}
+      onOpen={onOpen}
+      testId="node-virtual-player"
+    />
+  )
+}
+
+// ── EffectRoutingNode ─────────────────────────────────────────────────────────
+
+function EffectRoutingNode({ role, effect, onOpen, testId }: {
+  role: string
+  effect: Effect | undefined
+  onOpen?: () => void
+  testId?: string
+}) {
+  const effectMeta = effect ? EFFECTS.find(e => e.id === effect.effect_type) : undefined
+
+  return (
+    <div className="border border-border rounded-lg overflow-hidden bg-card" data-testid={testId}>
       <div className="flex items-center justify-between px-4 py-2 bg-muted/40 border-b border-border/40">
         <span className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">
-          Energy Profile
+          {role}
         </span>
-        {ep && onOpen && (
+        {effect && onOpen && (
           <button
             className="text-[11px] text-muted-foreground/50 hover:text-primary transition-colors"
             onClick={onOpen}
@@ -130,77 +195,37 @@ function EnergyProfileRoutingNode({ ep, effects, onOpen }: {
         )}
       </div>
       <div className="px-5 py-4">
-        {!ep ? (
+        {!effect ? (
           <p className="text-base text-muted-foreground/40 italic">Not configured</p>
         ) : (
           <>
-            <p className="font-semibold text-base">{ep.name}</p>
-
-            {highEffect ? (
-              singleEffect ? (
-                /* ─── Single effect ─── */
-                <div className="mt-4 pt-3 border-t border-border/30">
-                  <p className="text-[10px] uppercase tracking-widest text-muted-foreground/50 font-semibold mb-2">
-                    Effect
-                  </p>
-                  <div className="bg-black/25 rounded-md">
-                    <EffectPreview effectType={highEffect.effect_type} energy={0.80} count={6} size="md" />
-                  </div>
-                  <p className="text-xs text-muted-foreground mt-2 text-center">
-                    {EFFECTS.find(e => e.id === highEffect.effect_type)?.label ?? highEffect.effect_type}
-                  </p>
-                  <p className="text-sm font-medium text-center mt-0.5">{highEffect.name}</p>
-                </div>
-              ) : (
-                /* ─── Two different effects ─── */
-                <div className="mt-4 pt-3 border-t border-border/30">
-                  <div className="grid grid-cols-2 gap-3">
-                    {/* Low energy */}
-                    <div>
-                      <p className="text-[10px] uppercase tracking-widest text-muted-foreground/50 font-semibold mb-2">
-                        Low energy
-                      </p>
-                      <div className="bg-black/25 rounded-md">
-                        <EffectPreview
-                          effectType={lowEffect?.effect_type ?? 'none'}
-                          energy={0.80}
-                          count={5}
-                          size="md"
-                        />
-                      </div>
-                      <p className="text-xs text-muted-foreground mt-2 text-center">
-                        {EFFECTS.find(e => e.id === lowEffect?.effect_type)?.label ?? lowEffect?.effect_type ?? '—'}
-                      </p>
-                      <p className="text-sm font-medium text-center mt-0.5">{lowEffect?.name ?? '—'}</p>
-                    </div>
-                    {/* High energy */}
-                    <div>
-                      <p className="text-[10px] uppercase tracking-widest text-muted-foreground/50 font-semibold mb-2">
-                        High energy
-                      </p>
-                      <div className="bg-black/25 rounded-md">
-                        <EffectPreview
-                          effectType={highEffect.effect_type}
-                          energy={0.80}
-                          count={5}
-                          size="md"
-                        />
-                      </div>
-                      <p className="text-xs text-muted-foreground mt-2 text-center">
-                        {EFFECTS.find(e => e.id === highEffect.effect_type)?.label ?? highEffect.effect_type}
-                      </p>
-                      <p className="text-sm font-medium text-center mt-0.5">{highEffect.name}</p>
-                    </div>
-                  </div>
-                </div>
-              )
-            ) : (
-              <p className="text-xs text-muted-foreground mt-2 italic">Effects not found</p>
+            <div className="bg-black/25 rounded-md mb-3">
+              <EffectPreview effectType={effect.effect_type} energy={0.75} count={6} size="md" />
+            </div>
+            <p className="text-sm font-medium text-center">{effect.name}</p>
+            {effectMeta && effectMeta.label !== effect.name && (
+              <p className="text-xs text-muted-foreground text-center mt-0.5">{effectMeta.label}</p>
             )}
           </>
         )}
       </div>
     </div>
+  )
+}
+
+// ── EnergyProfileRoutingNode ──────────────────────────────────────────────────
+
+function EnergyProfileRoutingNode({ ep, onOpen }: {
+  ep: EnergyProfile | undefined
+  onOpen?: () => void
+}) {
+  return (
+    <RoutingNode
+      label="Energy Profile"
+      name={ep?.name}
+      onOpen={ep ? onOpen : undefined}
+      testId="node-energy-profile"
+    />
   )
 }
 
@@ -265,6 +290,7 @@ function CouplingListItem({ coupling, playerLabel, zoneLabel, isActive, isSelect
 }) {
   return (
     <button
+      data-testid={`coupling-item-${coupling.id}`}
       className={cn(
         'w-full text-left px-3 py-2.5 rounded-md transition-colors',
         isSelected
@@ -296,6 +322,7 @@ interface WorkspaceProps {
   analysers: Analyser[]
   effects: Effect[]
   energyProfiles: EnergyProfile[]
+  controllers: Controller[]
   activeCouplingId: string | null
   onSaved: (c: Coupling) => void
   onDeleted: (id: string) => void
@@ -308,7 +335,7 @@ interface WorkspaceProps {
 
 function CouplingWorkspace({
   coupling,
-  players, zones, analysers, effects, energyProfiles,
+  players, zones, analysers, effects, energyProfiles, controllers,
   activeCouplingId,
   onSaved, onDeleted, onCloned, onCancelCreate,
   onActivate, onDeactivate, onNavigate,
@@ -329,6 +356,24 @@ function CouplingWorkspace({
   })
   const [savingRouting, setSavingRouting] = useState(false)
   const [routingError, setRoutingError] = useState<string | null>(null)
+
+  const [followPlayerName, setFollowPlayerName] = useState<string | undefined>(undefined)
+
+  // Resolve LMS follow player name
+  useEffect(() => {
+    const player = players.find(p => p.id === coupling?.player_id)
+    if (!player || player.type !== 'LMS' || !player.follow_player_mac || !player.lms_host) {
+      setFollowPlayerName(undefined)
+      return
+    }
+    listLmsPlayers(player.lms_host)
+      .then(lmsPlayers => {
+        const found = lmsPlayers.find(lp => lp.playerid === player.follow_player_mac)
+        setFollowPlayerName(found?.name)
+      })
+      .catch(() => setFollowPlayerName(undefined))
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   async function handleSaveName() {
     if (!coupling || name.trim() === coupling.name) return
@@ -396,17 +441,27 @@ function CouplingWorkspace({
   const analyser = analysers.find(a => a.id === coupling?.analyser_id)
   const ep = energyProfiles.find(e => e.id === coupling?.energy_profile_id)
 
-  const playerName = player
-    ? (player.display_name || player.player_name || player.type)
-    : undefined
-  const playerContext = player
-    ? (player.type === 'LMS' && player.lms_host ? `LMS · ${player.lms_host}` : player.type)
-    : undefined
+  // Effect routing
+  const highEffect = ep ? effects.find(e => e.id === ep.high_energy_effect_id) : undefined
+  const lowEffectId = ep?.low_energy_effect_id || null
+  const twoEffects = !!lowEffectId && lowEffectId !== ep?.high_energy_effect_id
+  const lowEffect = twoEffects ? effects.find(e => e.id === lowEffectId!) : undefined
+  const singleEffect = twoEffects ? undefined : highEffect
+
+  // Analyser context
   const analyserContext = analyser
     ? `${analyser.bars} bars · ${analyser.onset_method} · ${analyser.bars_source === 'pcm_pipeline' ? 'PCM' : 'cava'}`
     : undefined
+
+  // Zone controller type (resolved from controllers list, not hardcoded)
+  const zoneController = controllers.find(c => c.id === zone?.controller_id)
+  const controllerLabel = zoneController?.type
+    ? zoneController.type.charAt(0).toUpperCase() + zoneController.type.slice(1)
+    : undefined
   const zoneContext = zone
-    ? `${zone.light_count} light${zone.light_count === 1 ? '' : 's'}`
+    ? (controllerLabel
+        ? `${controllerLabel} · ${zone.light_count} light${zone.light_count === 1 ? '' : 's'}`
+        : `${zone.light_count} light${zone.light_count === 1 ? '' : 's'}`)
     : undefined
 
   // Edit-mode option lists
@@ -450,7 +505,7 @@ function CouplingWorkspace({
 
       {/* Routing graph */}
       <div className="flex-1 overflow-y-auto">
-        <div className="max-w-md mx-auto px-4 py-8">
+        <div className={cn('max-w-md mx-auto px-4 py-8', twoEffects && 'max-w-2xl')}>
           {isEditingRouting ? (
             <>
               <RoutingEditorNode
@@ -502,10 +557,9 @@ function CouplingWorkspace({
             </>
           ) : (
             <>
-              <RoutingNode
-                label="Virtual Player"
-                name={playerName}
-                context={playerContext}
+              <VirtualPlayerRoutingNode
+                player={player}
+                followPlayerName={followPlayerName}
                 onOpen={onNavigate ? () => onNavigate('players') : undefined}
               />
               <NodeConnector />
@@ -514,19 +568,50 @@ function CouplingWorkspace({
                 name={analyser?.name}
                 context={analyserContext}
                 onOpen={onNavigate ? () => onNavigate('analysers') : undefined}
+                testId="node-analyser"
               />
               <NodeConnector />
               <EnergyProfileRoutingNode
                 ep={ep}
-                effects={effects}
                 onOpen={onNavigate ? () => onNavigate('energy-profiles') : undefined}
               />
-              <NodeConnector />
+              {twoEffects ? (
+                <>
+                  <BranchConnector />
+                  <div className="grid grid-cols-2 gap-4">
+                    <EffectRoutingNode
+                      role="Low Energy Effect"
+                      effect={lowEffect}
+                      onOpen={onNavigate ? () => onNavigate('effects') : undefined}
+                      testId="node-effect-low"
+                    />
+                    <EffectRoutingNode
+                      role="High Energy Effect"
+                      effect={highEffect}
+                      onOpen={onNavigate ? () => onNavigate('effects') : undefined}
+                      testId="node-effect-high"
+                    />
+                  </div>
+                  <MergeConnector />
+                </>
+              ) : (
+                <>
+                  <NodeConnector />
+                  <EffectRoutingNode
+                    role="Effect"
+                    effect={singleEffect}
+                    onOpen={onNavigate ? () => onNavigate('effects') : undefined}
+                    testId="node-effect"
+                  />
+                  <NodeConnector />
+                </>
+              )}
               <RoutingNode
                 label="Zone"
                 name={zone?.name}
                 context={zoneContext}
                 onOpen={onNavigate ? () => onNavigate('zones') : undefined}
+                testId="node-zone"
               />
             </>
           )}
@@ -603,6 +688,7 @@ export function Couplings({ activeCouplingId: activeCouplingIdProp, onActivation
   const [analysers, setAnalysers] = useState<Analyser[]>([])
   const [effects, setEffects] = useState<Effect[]>([])
   const [energyProfiles, setEnergyProfiles] = useState<EnergyProfile[]>([])
+  const [controllers, setControllers] = useState<Controller[]>([])
   const [activeCouplingId, setActiveCouplingId] = useState<string | null>(activeCouplingIdProp)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -612,12 +698,12 @@ export function Couplings({ activeCouplingId: activeCouplingIdProp, onActivation
 
   async function loadAll() {
     try {
-      const [cs, ps, zs, acs, eps, effs, st] = await Promise.all([
+      const [cs, ps, zs, acs, eps, effs, ctrls, st] = await Promise.all([
         getCouplings(), getVirtualPlayers(), getZones(), getAnalysers(),
-        getEnergyProfiles(), getEffects(), getStatus(),
+        getEnergyProfiles(), getEffects(), getControllers(), getStatus(),
       ])
       setCouplings(cs); setPlayers(ps); setZones(zs); setAnalysers(acs)
-      setEnergyProfiles(eps); setEffects(effs)
+      setEnergyProfiles(eps); setEffects(effs); setControllers(ctrls)
       setActiveCouplingId(st.active_coupling_id ?? activeCouplingIdProp)
       setError(null)
     } catch (e) {
@@ -748,6 +834,7 @@ export function Couplings({ activeCouplingId: activeCouplingIdProp, onActivation
               analysers={analysers}
               effects={effects}
               energyProfiles={energyProfiles}
+              controllers={controllers}
               activeCouplingId={activeCouplingId}
               onSaved={handleSaved}
               onDeleted={handleDelete}

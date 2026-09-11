@@ -143,6 +143,7 @@ export const getStatus = () => request<ApiStatus>('/api/status')
 export interface Controller {
   id: string
   name: string
+  type: string
   host: string
   app_key_configured: boolean
   client_key_configured: boolean
