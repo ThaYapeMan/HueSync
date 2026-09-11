@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -14,7 +14,7 @@ import {
 } from '@/components/ui/table'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
 import { EffectCard } from '@/components/EffectCard'
-import { LightPreview } from '@/components/LightPreview'
+import { EffectPreview } from '@/components/EffectPreview'
 import { EditorPageHeader } from '@/components/editor/EditorPageHeader'
 import { SectionLabel } from '@/components/editor/SectionLabel'
 import { usePreviewSocket } from '@/hooks/usePreviewSocket'
@@ -61,6 +61,115 @@ function defaultForm(ep?: EnergyProfile): FormState {
     blend_end:      String(ep?.blend_end      ?? ENERGY_PROFILE_DEFAULTS.blend_end),
     blend_response: String(ep?.blend_response ?? ENERGY_PROFILE_DEFAULTS.blend_response),
   }
+}
+
+// ── Energy position marker color ─────────────────────────────────────────────
+// Interpolates cyan→violet→coral based on simulated energy position.
+// Matches the semantic zone colors without covering the full track.
+
+function energyMarkerColor(v: number): string {
+  const [r1, g1, b1] = v <= 0.5
+    ? [34,  211, 238] : [139, 92, 246]  // cyan or violet (left half)
+  const [r2, g2, b2] = v <= 0.5
+    ? [139, 92,  246] : [251, 113, 133] // violet or coral (right half)
+  const t = v <= 0.5 ? v * 2 : (v - 0.5) * 2
+  return `rgb(${Math.round(r1 + t*(r2-r1))},${Math.round(g1 + t*(g2-g1))},${Math.round(b1 + t*(b2-b1))})`
+}
+
+// ── Simulated energy position slider ─────────────────────────────────────────
+// Neutral track; marker color interpolates through energy semantic zones.
+// Avoids repeating the full Energy Blend gradient on a position control.
+
+function EnergyPositionSlider({ value, onChange }: { value: number; onChange: (v: number) => void }) {
+  const trackRef = useRef<HTMLDivElement>(null)
+
+  function posFromMouse(clientX: number): number {
+    if (!trackRef.current) return value
+    const rect = trackRef.current.getBoundingClientRect()
+    return Math.max(0, Math.min(1, (clientX - rect.left) / rect.width))
+  }
+
+  function handleMouseDown(e: React.MouseEvent) {
+    e.preventDefault()
+    onChange(posFromMouse(e.clientX))
+    const onMove = (ev: MouseEvent) => onChange(posFromMouse(ev.clientX))
+    const onUp = () => document.removeEventListener('mousemove', onMove)
+    document.addEventListener('mousemove', onMove)
+    document.addEventListener('mouseup', onUp, { once: true })
+  }
+
+  function handleKeyDown(e: React.KeyboardEvent) {
+    if      (e.key === 'ArrowRight') { e.preventDefault(); onChange(Math.min(1, value + 0.01)) }
+    else if (e.key === 'ArrowLeft')  { e.preventDefault(); onChange(Math.max(0, value - 0.01)) }
+  }
+
+  const color = energyMarkerColor(value)
+
+  return (
+    <div
+      ref={trackRef}
+      data-testid="energy-slider"
+      className="relative h-5 touch-none select-none cursor-pointer"
+      onMouseDown={handleMouseDown}
+    >
+      <div className="absolute inset-x-0 top-1/2 -translate-y-1/2 h-1.5 rounded-full bg-white/10" />
+      <div
+        role="slider"
+        tabIndex={0}
+        aria-label="Simulated energy"
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={Math.round(value * 100)}
+        className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-4 h-4 rounded-full ring-1 ring-white/25 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/50"
+        style={{ left: `${value * 100}%`, backgroundColor: color, boxShadow: `0 0 8px ${color}99` }}
+        onKeyDown={handleKeyDown}
+      />
+    </div>
+  )
+}
+
+// ── Conceptual output preview ─────────────────────────────────────────────────
+// Uses EffectPreview semantics — vivid per-effect colors, not energy-role colors.
+// When effects differ, splits proportionally: left = low, right = high (by mix).
+// This ensures Swirl and Spectrum RGB look visually distinct, not both teal.
+
+function ConceptualPreview({ lowEffectType, highEffectType, mix, energy }: {
+  lowEffectType: string
+  highEffectType: string
+  mix: number
+  energy: number
+}) {
+  const e = Math.max(0.40, energy)  // ensure preview remains visible at low simulated energy
+  const lowFrac  = 1 - mix
+  const highFrac = mix
+  const sameFx = lowEffectType === highEffectType
+
+  if (sameFx || lowFrac < 0.03) {
+    return (
+      <div data-testid="conceptual-preview">
+        <EffectPreview effectType={highEffectType} energy={e} count={8} size="md" />
+      </div>
+    )
+  }
+  if (highFrac < 0.03) {
+    return (
+      <div data-testid="conceptual-preview">
+        <EffectPreview effectType={lowEffectType} energy={e} count={8} size="md" />
+      </div>
+    )
+  }
+
+  return (
+    <div className="flex" data-testid="conceptual-preview">
+      <div className="overflow-hidden min-w-0" style={{ flex: lowFrac }}>
+        <EffectPreview effectType={lowEffectType} energy={e} count={8} size="md" />
+      </div>
+      <div className="w-px bg-border/25 shrink-0 self-stretch my-2" />
+      <div className="overflow-hidden min-w-0" style={{ flex: highFrac }}>
+        <EffectPreview effectType={highEffectType} energy={e} count={8} size="md" />
+      </div>
+    </div>
+  )
 }
 
 // ── Live channel preview ──────────────────────────────────────────────────────
@@ -462,22 +571,13 @@ export function EnergyProfiles() {
                 </div>
               </div>
 
-              {/* Simulate slider — semantic gradient track, hidden when live */}
+              {/* Simulate slider — neutral track, position-colored marker, hidden when live */}
               {!isLive && (
                 <div className="mt-3 space-y-1.5">
                   <p className="text-xs text-muted-foreground/60">Drag to simulate music energy</p>
-                  <Slider
-                    aria-label="Simulated energy"
-                    data-testid="energy-slider"
-                    min={0}
-                    max={1}
-                    step={0.01}
-                    value={[simulatedEnergy]}
-                    onValueChange={(v) => setSimulatedEnergy(v[0])}
-                    trackStyle={{
-                      background: `linear-gradient(to right, ${E_LOW}, ${E_TRANS}, ${E_HIGH})`,
-                    }}
-                    rangeClassName="bg-transparent"
+                  <EnergyPositionSlider
+                    value={simulatedEnergy}
+                    onChange={setSimulatedEnergy}
                   />
                 </div>
               )}
@@ -491,16 +591,26 @@ export function EnergyProfiles() {
                   {(lowEffect ?? highEffect)?.name ?? 'Low energy'}&nbsp;{lowPct}%
                 </span>
                 <div
-                  className="flex-1 h-2.5 rounded-full overflow-hidden bg-secondary"
+                  className="flex-1 h-2.5 rounded-full overflow-hidden bg-secondary relative"
                   data-testid="current-blend-bar"
                 >
+                  {/* Low segment — restrained fill; strong color lives in the label */}
                   <div
-                    className="h-full transition-all duration-100"
-                    style={{
-                      background: `linear-gradient(to right, ${E_LOW} ${lowPct}%, ${E_HIGH} ${lowPct}%)`,
-                      opacity: 0.80,
-                    }}
+                    className="absolute inset-y-0 left-0 transition-all duration-100"
+                    style={{ right: `${100 - lowPct}%`, background: 'rgba(34,211,238,0.28)' }}
                   />
+                  {/* High segment */}
+                  <div
+                    className="absolute inset-y-0 right-0 transition-all duration-100"
+                    style={{ left: `${lowPct}%`, background: 'rgba(251,113,133,0.28)' }}
+                  />
+                  {/* Proportion divider */}
+                  {lowPct > 2 && lowPct < 98 && (
+                    <div
+                      className="absolute inset-y-0 w-px bg-white/20 transition-all duration-100"
+                      style={{ left: `${lowPct}%` }}
+                    />
+                  )}
                 </div>
                 <span className="text-xs w-32 truncate shrink-0" style={{ color: E_HIGH }}>
                   {highPct}%&nbsp;{highEffect?.name ?? 'High energy'}
@@ -526,7 +636,7 @@ export function EnergyProfiles() {
                 {isLive && preview.channel_colours.length > 0 ? (
                   <LiveChannelPreview channels={preview.channel_colours} />
                 ) : (
-                  <LightPreview
+                  <ConceptualPreview
                     lowEffectType={lowEffectType}
                     highEffectType={highEffectType}
                     mix={displayMix}

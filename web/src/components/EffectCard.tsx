@@ -24,8 +24,8 @@ export function EffectCard({ role, effectId, allEffects, onChange }: Props) {
       className={cn(
         'border rounded-xl p-4 flex flex-col gap-3 min-h-[160px]',
         isHigh
-          ? 'border-rose-400/25 bg-rose-400/5'
-          : 'border-cyan-400/25 bg-cyan-400/5',
+          ? 'border-rose-400/15 bg-transparent'
+          : 'border-cyan-400/15 bg-transparent',
       )}
     >
       {/* Role label */}

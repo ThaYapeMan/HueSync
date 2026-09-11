@@ -348,9 +348,46 @@ describe('Output preview', () => {
     await user.click(await screen.findByRole('button', { name: /Edit/i }))
 
     expect(screen.getByTestId('live-channel-dots')).toBeDefined()
+    expect(screen.queryByTestId('conceptual-preview')).toBeNull()
+  })
+
+  it('live channel dots preserve per-channel identity — 3 distinct channels render as 3 dots', async () => {
+    mockUsePreviewSocket.mockReturnValue({
+      ...DEFAULT_PREVIEW,
+      energy: 0.6,
+      channel_colours: [
+        { r: 0.9, g: 0.1, b: 0.1 },  // red
+        { r: 0.1, g: 0.9, b: 0.1 },  // green
+        { r: 0.1, g: 0.1, b: 0.9 },  // blue
+      ],
+      status: { active_energy_profile_id: 'ep1' },
+    })
+    mapi.getEnergyProfiles.mockResolvedValue([BASE_EP])
+    mapi.getEffects.mockResolvedValue([BASE_EFFECT])
+    mapi.updateEnergyProfile.mockResolvedValue({ ...BASE_EP })
+
+    const user = userEvent.setup()
+    render(<EnergyProfiles />)
+    await user.click(await screen.findByRole('button', { name: /Edit/i }))
+
+    // Each channel gets its own dot — no averaging
     expect(screen.getByTestId('channel-dot-0')).toBeDefined()
     expect(screen.getByTestId('channel-dot-1')).toBeDefined()
     expect(screen.getByTestId('channel-dot-2')).toBeDefined()
+    expect(screen.queryByTestId('channel-dot-3')).toBeNull()
+  })
+
+  it('preview mode shows conceptual-preview (not live-channel-dots)', async () => {
+    await renderAndOpen()
+    expect(screen.getByTestId('conceptual-preview')).toBeDefined()
+    expect(screen.queryByTestId('live-channel-dots')).toBeNull()
+  })
+
+  it('conceptual preview uses EffectPreview for effect-based colors', async () => {
+    await renderAndOpen()
+    // EffectPreview renders with data-testid="effect-preview"
+    const previews = screen.getAllByTestId('effect-preview')
+    expect(previews.length).toBeGreaterThanOrEqual(1)
   })
 
   it('output-preview-section always renders', async () => {
