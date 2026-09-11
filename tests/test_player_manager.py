@@ -723,3 +723,24 @@ def test_airplay_activation_airplay_receiving_property(tmp_path: Path) -> None:
 
     mock_src.running = False
     assert manager.airplay_receiving is False
+
+
+def test_configure_shairport_name_includes_explicit_format(tmp_path: Path) -> None:
+    """_configure_shairport_name must write output_rate, output_format, output_channels."""
+    from huesync.player_manager import PlayerManager
+    from huesync.storage import Storage
+
+    storage = Storage(tmp_path / "config.json")
+    manager = PlayerManager(storage)
+
+    conf_path = tmp_path / "shairport-sync.conf"
+    manager._SHAIRPORT_CONF = conf_path
+
+    with patch("subprocess.run"):
+        manager._configure_shairport_name("My AirPlay")
+
+    text = conf_path.read_text()
+    assert 'name = "My AirPlay"' in text
+    assert "output_rate = 44100" in text
+    assert 'output_format = "S16"' in text
+    assert "output_channels = 2" in text

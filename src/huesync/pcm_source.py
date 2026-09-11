@@ -352,6 +352,9 @@ class PcmHpss:
 
 AIRPLAY_PIPE: Path = Path("/run/huesync/airplay.pcm")
 AIRPLAY_SAMPLE_RATE: int = 44100
+AIRPLAY_CHANNELS: int = 2
+AIRPLAY_SAMPLE_WIDTH: int = 2  # bytes per sample, S16_LE
+AIRPLAY_BYTES_PER_FRAME: int = AIRPLAY_CHANNELS * AIRPLAY_SAMPLE_WIDTH  # 4
 _AIRPLAY_STALE_S: float = 2.0
 
 
@@ -375,11 +378,13 @@ class AirPlayPipeSource:
         self._path = path
         self._fd: int | None = None
         self._last_data_t: float | None = None
+        self._remainder: bytes = b""
 
     def open(self) -> None:
         """Open the pipe non-blocking. Raises OSError if it does not exist."""
         self._fd = os.open(self._path, os.O_RDONLY | os.O_NONBLOCK)
         self._last_data_t = None
+        self._remainder = b""
 
     def close(self) -> None:
         if self._fd is not None:
@@ -412,13 +417,17 @@ class AirPlayPipeSource:
         if not raw:
             return np.empty(0, dtype=np.float32)
 
-        # Round down to complete stereo frames (4 bytes: 2 × s16).
-        n_frames = len(raw) // 4
+        # Prepend any sub-frame bytes carried from the previous read so that
+        # partial frames never cause an L/R channel misalignment.
+        combined = self._remainder + raw
+        n_frames = len(combined) // AIRPLAY_BYTES_PER_FRAME
         if n_frames == 0:
+            self._remainder = combined
             return np.empty(0, dtype=np.float32)
 
+        self._remainder = combined[n_frames * AIRPLAY_BYTES_PER_FRAME :]
         self._last_data_t = time.monotonic()
-        samples = np.frombuffer(raw[: n_frames * 4], dtype=np.int16)
+        samples = np.frombuffer(combined[: n_frames * AIRPLAY_BYTES_PER_FRAME], dtype=np.int16)
         # Interleaved stereo s16 → mono float32 in [−1.0, 1.0].
         return (samples[0::2].astype(np.float32) + samples[1::2].astype(np.float32)) / (
             2.0 * 32768.0

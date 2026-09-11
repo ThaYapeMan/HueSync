@@ -22,7 +22,10 @@ from huesync.pcm_source import (
     _HDR_OFFSET,
     _HDR_SIZE,
     _MMAP_SIZE,
+    AIRPLAY_BYTES_PER_FRAME,
+    AIRPLAY_CHANNELS,
     AIRPLAY_SAMPLE_RATE,
+    AIRPLAY_SAMPLE_WIDTH,
     VIS_BUF_SIZE,
     WINDOW_SIZE,
     AirPlayPipeSource,
@@ -536,6 +539,13 @@ def _stereo_s16le(left: int, right: int, n_frames: int = 1) -> bytes:
     return frame * n_frames
 
 
+def test_airplay_contract_constants() -> None:
+    """Explicit PCM contract constants must be consistent with each other."""
+    assert AIRPLAY_CHANNELS == 2
+    assert AIRPLAY_SAMPLE_WIDTH == 2  # S16_LE
+    assert AIRPLAY_BYTES_PER_FRAME == AIRPLAY_CHANNELS * AIRPLAY_SAMPLE_WIDTH
+
+
 def test_airplay_source_satisfies_protocol() -> None:
     """AirPlayPipeSource must satisfy the PcmSource Protocol at runtime."""
     assert isinstance(AirPlayPipeSource(), PcmSource)
@@ -622,14 +632,71 @@ def test_airplay_running_true_after_data() -> None:
             pass
 
 
-def test_airplay_incomplete_frame_dropped() -> None:
-    """Trailing bytes that do not complete a stereo frame are silently dropped."""
+def test_airplay_incomplete_frame_carried() -> None:
+    """Trailing bytes that do not complete a stereo frame are carried to the next read."""
     r_fd, w_fd = os.pipe()
     try:
-        os.write(w_fd, _stereo_s16le(100, 200) + b"\xff")  # 5 bytes: 1 complete frame + 1 orphan
+        # Write 1 complete frame (4 bytes) + 1 orphan byte.
+        os.write(w_fd, _stereo_s16le(100, 200) + b"\xff")
         src = AirPlayPipeSource()
         src._fd = r_fd
         src._last_data_t = None
+        result = src.read_new()
+        remainder = src._remainder
+        src._fd = None
+    finally:
+        os.close(w_fd)
+        try:
+            os.close(r_fd)
+        except OSError:
+            pass
+
+    assert len(result) == 1  # only the complete frame decoded
+    assert remainder == b"\xff"  # orphan byte is held for the next read
+
+
+def test_airplay_partial_frame_joined_across_reads() -> None:
+    """A frame split across two reads is decoded correctly on the second read."""
+    r_fd, w_fd = os.pipe()
+    try:
+        # First read delivers 3 bytes (incomplete frame of 4).
+        os.write(w_fd, b"\x00\x40\x00")  # first 3 of 4 bytes for L=0x4000, R=...
+        src = AirPlayPipeSource()
+        src._fd = r_fd
+        src._last_data_t = None
+        result1 = src.read_new()
+
+        # Second read delivers the missing byte plus another complete frame.
+        frame2 = _stereo_s16le(1000, -1000)
+        os.write(w_fd, b"\x80" + frame2)  # completes first frame + adds second
+        result2 = src.read_new()
+        src._fd = None
+    finally:
+        os.close(w_fd)
+        try:
+            os.close(r_fd)
+        except OSError:
+            pass
+
+    assert len(result1) == 0  # incomplete frame — nothing yet
+    assert src._remainder == b""  # all bytes now consumed
+    assert len(result2) == 2  # first (reconstructed) + second frame
+
+
+def test_airplay_no_channel_swap_after_partial_read() -> None:
+    """L/R channels must not swap after a read that left sub-frame remainder bytes."""
+    r_fd, w_fd = os.pipe()
+    try:
+        # Frame: L=+32767 (~1.0), R=0 → mono ≈ 0.5
+        frame = _stereo_s16le(32767, 0)
+        # Split: write first 3 bytes, then the last byte.
+        os.write(w_fd, frame[:3])
+        src = AirPlayPipeSource()
+        src._fd = r_fd
+        src._last_data_t = None
+        src.read_new()  # partial — carries 3 bytes
+
+        os.write(w_fd, frame[3:4])  # final byte of first frame
         result = src.read_new()
         src._fd = None
     finally:
@@ -639,4 +706,6 @@ def test_airplay_incomplete_frame_dropped() -> None:
         except OSError:
             pass
 
-    assert len(result) == 1  # only the complete frame
+    assert len(result) == 1
+    # L=32767, R=0 → (32767 + 0) / (2 × 32768) ≈ 0.5
+    assert abs(result[0] - 32767 / (2.0 * 32768.0)) < 1e-4

@@ -1018,6 +1018,9 @@ class PlayerManager:
             '}\n'
             'pipe = {\n'
             '  name = "/run/huesync/airplay.pcm";\n'
+            '  output_rate = 44100;\n'
+            '  output_format = "S16";\n'
+            '  output_channels = 2;\n'
             '}\n'
         )
         try:

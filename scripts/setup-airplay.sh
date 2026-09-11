@@ -198,8 +198,13 @@ general = {
 
 pipe = {
   name = "/run/huesync/airplay.pcm";
+  output_rate = 44100;
+  output_format = "S16";
+  output_channels = 2;
 }
 EOF
+# Allow the huesync service to overwrite the name field at activation time.
+chown huesync:huesync /usr/local/etc/shairport-sync.conf
 
 # ---------------------------------------------------------------------------
 # Phase 6: systemd service — run as huesync user
