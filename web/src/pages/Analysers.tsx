@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
 import { SliderField } from '@/components/SliderField'
@@ -15,6 +15,35 @@ import {
   deleteAnalyser,
   cloneAnalyser,
 } from '@/lib/api'
+
+// ── Analyser defaults ─────────────────────────────────────────────────────────
+
+const ANALYSER_DEFAULTS = {
+  bars_source: 'cava' as const,
+  onset_method: 'combined' as const,
+  bars: 30,
+  lower_cutoff_freq: 50,
+  higher_cutoff_freq: 12000,
+  onset_delta: 0.1,
+  use_hpss_separation: false,
+  onset_alpha: 0.9,
+  superflux_mu: 3,
+  superflux_lag: 2,
+} as const
+
+// ── Logarithmic frequency mapping ─────────────────────────────────────────────
+
+const LOG_MIN = Math.log10(20)
+const LOG_MAX = Math.log10(20000)
+const LOG_STEP = (LOG_MAX - LOG_MIN) / 50   // ~50 keyboard steps across full range
+
+export function hzToPercent(hz: number): number {
+  return ((Math.log10(Math.max(20, Math.min(20000, hz))) - LOG_MIN) / (LOG_MAX - LOG_MIN)) * 100
+}
+
+export function percentToHz(pct: number): number {
+  return Math.round(Math.pow(10, (pct / 100) * (LOG_MAX - LOG_MIN) + LOG_MIN))
+}
 
 // ── Draft state ───────────────────────────────────────────────────────────────
 
@@ -35,28 +64,56 @@ interface Draft {
 function defaultDraft(a?: Analyser | null): Draft {
   return {
     name: a?.name ?? '',
-    bars_source: a?.bars_source ?? 'cava',
-    onset_method: a?.onset_method ?? 'combined',
-    bars: String(a?.bars ?? 30),
-    lower_cutoff_freq: String(a?.lower_cutoff_freq ?? 50),
-    higher_cutoff_freq: String(a?.higher_cutoff_freq ?? 12000),
-    onset_delta: String(a?.onset_delta ?? 0.1),
-    onset_alpha: String(a?.onset_alpha ?? 0.9),
-    superflux_mu: String(a?.superflux_mu ?? 3),
-    superflux_lag: String(a?.superflux_lag ?? 2),
-    use_hpss_separation: a?.use_hpss_separation ?? false,
+    bars_source: a?.bars_source ?? ANALYSER_DEFAULTS.bars_source,
+    onset_method: a?.onset_method ?? ANALYSER_DEFAULTS.onset_method,
+    bars: String(a?.bars ?? ANALYSER_DEFAULTS.bars),
+    lower_cutoff_freq: String(a?.lower_cutoff_freq ?? ANALYSER_DEFAULTS.lower_cutoff_freq),
+    higher_cutoff_freq: String(a?.higher_cutoff_freq ?? ANALYSER_DEFAULTS.higher_cutoff_freq),
+    onset_delta: String(a?.onset_delta ?? ANALYSER_DEFAULTS.onset_delta),
+    onset_alpha: String(a?.onset_alpha ?? ANALYSER_DEFAULTS.onset_alpha),
+    superflux_mu: String(a?.superflux_mu ?? ANALYSER_DEFAULTS.superflux_mu),
+    superflux_lag: String(a?.superflux_lag ?? ANALYSER_DEFAULTS.superflux_lag),
+    use_hpss_separation: a?.use_hpss_separation ?? ANALYSER_DEFAULTS.use_hpss_separation,
   }
 }
 
 // ── ConfigSection helper ──────────────────────────────────────────────────────
 
-function ConfigSection({ title, children }: { title: string; children: React.ReactNode }) {
+function ConfigSection({
+  title,
+  children,
+  onReset,
+  isAtDefault,
+  resetTestId,
+}: {
+  title: string
+  children: React.ReactNode
+  onReset?: () => void
+  isAtDefault?: boolean
+  resetTestId?: string
+}) {
   return (
     <div className="space-y-3">
-      <div>
+      <div className="flex items-center justify-between">
         <span className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">
           {title}
         </span>
+        {onReset && (
+          <button
+            type="button"
+            onClick={isAtDefault ? undefined : onReset}
+            aria-disabled={isAtDefault}
+            data-testid={resetTestId}
+            className={cn(
+              'text-[9px] uppercase tracking-wide transition-colors leading-none py-0.5',
+              isAtDefault
+                ? 'text-muted-foreground/25 pointer-events-none'
+                : 'text-muted-foreground/55 hover:text-muted-foreground cursor-pointer',
+            )}
+          >
+            Reset
+          </button>
+        )}
       </div>
       {children}
     </div>
@@ -75,36 +132,112 @@ function ColumnHeading({ title }: { title: string }) {
   )
 }
 
-// ── FrequencyRangeBar ─────────────────────────────────────────────────────────
+// ── FrequencyRangeSlider ──────────────────────────────────────────────────────
 
-function FrequencyRangeBar({ lowHz, highHz, bands }: { lowHz: number; highHz: number; bands: number }) {
-  const LOG_MIN = Math.log10(20)
-  const LOG_MAX = Math.log10(20000)
-  const toX = (hz: number) =>
-    ((Math.log10(Math.max(20, Math.min(20000, hz))) - LOG_MIN) / (LOG_MAX - LOG_MIN)) * 100
+function FrequencyRangeSlider({
+  lowHz,
+  highHz,
+  bands,
+  onLowChange,
+  onHighChange,
+}: {
+  lowHz: number
+  highHz: number
+  bands: number
+  onLowChange: (hz: number) => void
+  onHighChange: (hz: number) => void
+}) {
+  const trackRef = useRef<HTMLDivElement>(null)
 
-  const leftX = toX(lowHz)
-  const rightX = toX(highHz)
-  const rangeWidth = rightX - leftX
+  const lowPct = hzToPercent(lowHz)
+  const highPct = hzToPercent(highHz)
+  const rangeWidth = Math.max(0, highPct - lowPct)
 
-  const landmarks = [
+  function getPercentFromEvent(e: MouseEvent): number {
+    if (!trackRef.current) return 0
+    const rect = trackRef.current.getBoundingClientRect()
+    return Math.max(0, Math.min(100, ((e.clientX - rect.left) / rect.width) * 100))
+  }
+
+  function startDrag(handle: 'low' | 'high') {
+    // Capture current constraint values at drag start — they don't change
+    // while a single handle is being dragged.
+    const snapHighHz = highHz
+    const snapLowHz = lowHz
+
+    return (e: React.MouseEvent) => {
+      e.preventDefault()
+
+      function onMove(e: MouseEvent) {
+        const pct = getPercentFromEvent(e)
+        const rawHz = percentToHz(pct)
+        if (handle === 'low') {
+          onLowChange(Math.max(20, Math.min(500, Math.min(rawHz, snapHighHz - 1))))
+        } else {
+          onHighChange(Math.max(1000, Math.min(20000, Math.max(rawHz, snapLowHz + 1))))
+        }
+      }
+
+      function onUp() {
+        document.removeEventListener('mousemove', onMove)
+        document.removeEventListener('mouseup', onUp)
+      }
+
+      document.addEventListener('mousemove', onMove)
+      document.addEventListener('mouseup', onUp)
+    }
+  }
+
+  function handleKeyDown(handle: 'low' | 'high') {
+    return (e: React.KeyboardEvent) => {
+      if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return
+      e.preventDefault()
+      const dir = e.key === 'ArrowRight' ? 1 : -1
+      if (handle === 'low') {
+        const newLog = Math.log10(Math.max(20, lowHz)) + dir * LOG_STEP
+        const newHz = Math.round(Math.pow(10, newLog))
+        onLowChange(Math.max(20, Math.min(500, Math.min(newHz, highHz - 1))))
+      } else {
+        const newLog = Math.log10(Math.max(1000, highHz)) + dir * LOG_STEP
+        const newHz = Math.round(Math.pow(10, newLog))
+        onHighChange(Math.max(1000, Math.min(20000, Math.max(newHz, lowHz + 1))))
+      }
+    }
+  }
+
+  const ticks = [
     { hz: 100, label: '100' },
     { hz: 1000, label: '1k' },
     { hz: 5000, label: '5k' },
     { hz: 10000, label: '10k' },
   ]
 
+  const handleClass =
+    'absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-2.5 h-[22px] ' +
+    'bg-zinc-400 dark:bg-zinc-500 rounded-[2px] border border-zinc-500 dark:border-zinc-600 ' +
+    'cursor-ew-resize focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-zinc-400 z-10'
+
   return (
-    <div data-testid="frequency-range-bar">
-      <div className="relative h-6 bg-zinc-900/80 rounded-sm border border-zinc-700/30 overflow-hidden">
-        {/* Active range — subtle cool-neutral fill */}
+    <div data-testid="frequency-range-slider">
+      <div className="flex justify-between text-[9px] text-muted-foreground/35 mb-1">
+        <span>20 Hz</span>
+        <span>20 kHz</span>
+      </div>
+
+      <div
+        ref={trackRef}
+        className="relative h-6 bg-zinc-900/80 rounded-sm border border-zinc-700/30 select-none"
+        style={{ overflow: 'visible' }}
+        data-testid="slider-track"
+      >
+        {/* Active range fill */}
         <div
-          className="absolute inset-y-0 bg-zinc-500/18"
-          style={{ left: `${leftX}%`, width: `${rangeWidth}%` }}
+          className="absolute inset-y-0 bg-zinc-500/20"
+          style={{ left: `${lowPct}%`, width: `${rangeWidth}%` }}
         />
         {/* Band division lines within active range */}
         {Array.from({ length: Math.max(0, bands - 1) }, (_, i) => {
-          const bandX = leftX + rangeWidth * (i + 1) / bands
+          const bandX = lowPct + rangeWidth * (i + 1) / bands
           return (
             <div
               key={i}
@@ -113,24 +246,49 @@ function FrequencyRangeBar({ lowHz, highHz, bands }: { lowHz: number; highHz: nu
             />
           )
         })}
-        {/* Cutoff boundary markers */}
-        <div className="absolute inset-y-0 w-0.5 bg-zinc-400/55 rounded-r" style={{ left: `${leftX}%` }} />
-        <div className="absolute inset-y-0 w-0.5 bg-zinc-400/55 rounded-l" style={{ left: `${rightX - 0.2}%` }} />
+
+        {/* Low handle */}
+        <div
+          role="slider"
+          aria-label="Low frequency cutoff"
+          aria-valuemin={20}
+          aria-valuemax={500}
+          aria-valuenow={lowHz}
+          tabIndex={0}
+          data-testid="slider-handle-low"
+          className={handleClass}
+          style={{ left: `${lowPct}%` }}
+          onMouseDown={startDrag('low')}
+          onKeyDown={handleKeyDown('low')}
+        />
+
+        {/* High handle */}
+        <div
+          role="slider"
+          aria-label="High frequency cutoff"
+          aria-valuemin={1000}
+          aria-valuemax={20000}
+          aria-valuenow={highHz}
+          tabIndex={0}
+          data-testid="slider-handle-high"
+          className={handleClass}
+          style={{ left: `${highPct}%` }}
+          onMouseDown={startDrag('high')}
+          onKeyDown={handleKeyDown('high')}
+        />
       </div>
-      {/* Landmark labels */}
+
+      {/* Frequency tick labels */}
       <div className="relative h-4 mt-0.5">
-        {landmarks.map(({ hz, label }) => {
-          const x = toX(hz)
-          return (
-            <span
-              key={hz}
-              className="absolute text-[9px] text-muted-foreground/35 -translate-x-1/2"
-              style={{ left: `${x}%` }}
-            >
-              {label}
-            </span>
-          )
-        })}
+        {ticks.map(({ hz, label }) => (
+          <span
+            key={hz}
+            className="absolute text-[9px] text-muted-foreground/35 -translate-x-1/2"
+            style={{ left: `${hzToPercent(hz)}%` }}
+          >
+            {label}
+          </span>
+        ))}
       </div>
     </div>
   )
@@ -186,6 +344,58 @@ function AnalyserWorkspace({ analyser, couplings, onSaved, onDeleted, onCloned, 
 
   const usedByCount = analyser ? couplings.filter(c => c.analyser_id === analyser.id).length : 0
 
+  // ── isAtDefault checks ────────────────────────────────────────────────────
+
+  const isDefaultBarsSource = draft.bars_source === ANALYSER_DEFAULTS.bars_source
+  const isDefaultOnsetMethod = draft.onset_method === ANALYSER_DEFAULTS.onset_method
+  const isDefaultFreqRange =
+    parseInt(draft.lower_cutoff_freq, 10) === ANALYSER_DEFAULTS.lower_cutoff_freq &&
+    parseInt(draft.higher_cutoff_freq, 10) === ANALYSER_DEFAULTS.higher_cutoff_freq
+  const isDefaultBars = parseInt(draft.bars, 10) === ANALYSER_DEFAULTS.bars
+  const isDefaultOnsetDelta = parseFloat(draft.onset_delta) === ANALYSER_DEFAULTS.onset_delta
+  const isDefaultHpss = draft.use_hpss_separation === ANALYSER_DEFAULTS.use_hpss_separation
+  const isDefaultOnsetTuning =
+    parseFloat(draft.onset_alpha) === ANALYSER_DEFAULTS.onset_alpha &&
+    (draft.onset_method !== 'superflux' || (
+      parseInt(draft.superflux_mu, 10) === ANALYSER_DEFAULTS.superflux_mu &&
+      parseInt(draft.superflux_lag, 10) === ANALYSER_DEFAULTS.superflux_lag
+    ))
+
+  // ── Reset actions — operate on local draft only ───────────────────────────
+
+  function resetBarsSource() {
+    setDraft(d => ({ ...d, bars_source: ANALYSER_DEFAULTS.bars_source }))
+  }
+  function resetOnsetMethod() {
+    setDraft(d => ({ ...d, onset_method: ANALYSER_DEFAULTS.onset_method }))
+  }
+  function resetFreqRange() {
+    setDraft(d => ({
+      ...d,
+      lower_cutoff_freq: String(ANALYSER_DEFAULTS.lower_cutoff_freq),
+      higher_cutoff_freq: String(ANALYSER_DEFAULTS.higher_cutoff_freq),
+    }))
+  }
+  function resetBars() {
+    setDraft(d => ({ ...d, bars: String(ANALYSER_DEFAULTS.bars) }))
+  }
+  function resetOnsetDelta() {
+    setDraft(d => ({ ...d, onset_delta: String(ANALYSER_DEFAULTS.onset_delta) }))
+  }
+  function resetHpss() {
+    setDraft(d => ({ ...d, use_hpss_separation: ANALYSER_DEFAULTS.use_hpss_separation }))
+  }
+  function resetOnsetTuning() {
+    setDraft(d => ({
+      ...d,
+      onset_alpha: String(ANALYSER_DEFAULTS.onset_alpha),
+      superflux_mu: String(ANALYSER_DEFAULTS.superflux_mu),
+      superflux_lag: String(ANALYSER_DEFAULTS.superflux_lag),
+    }))
+  }
+
+  // ── Save ──────────────────────────────────────────────────────────────────
+
   async function handleSave() {
     setSaving(true)
     setSaveError(null)
@@ -194,13 +404,13 @@ function AnalyserWorkspace({ analyser, couplings, onSaved, onDeleted, onCloned, 
         name: draft.name.trim() || 'Unnamed',
         bars_source: draft.bars_source,
         onset_method: draft.onset_method,
-        bars: parseInt(draft.bars, 10) || 30,
-        lower_cutoff_freq: parseInt(draft.lower_cutoff_freq, 10) || 50,
-        higher_cutoff_freq: parseInt(draft.higher_cutoff_freq, 10) || 12000,
-        onset_delta: parseFloat(draft.onset_delta) || 0.1,
-        onset_alpha: parseFloat(draft.onset_alpha) || 0.9,
-        superflux_mu: parseInt(draft.superflux_mu, 10) || 3,
-        superflux_lag: parseInt(draft.superflux_lag, 10) || 2,
+        bars: parseInt(draft.bars, 10) || ANALYSER_DEFAULTS.bars,
+        lower_cutoff_freq: parseInt(draft.lower_cutoff_freq, 10) || ANALYSER_DEFAULTS.lower_cutoff_freq,
+        higher_cutoff_freq: parseInt(draft.higher_cutoff_freq, 10) || ANALYSER_DEFAULTS.higher_cutoff_freq,
+        onset_delta: parseFloat(draft.onset_delta) || ANALYSER_DEFAULTS.onset_delta,
+        onset_alpha: parseFloat(draft.onset_alpha) || ANALYSER_DEFAULTS.onset_alpha,
+        superflux_mu: parseInt(draft.superflux_mu, 10) || ANALYSER_DEFAULTS.superflux_mu,
+        superflux_lag: parseInt(draft.superflux_lag, 10) || ANALYSER_DEFAULTS.superflux_lag,
         use_hpss_separation: draft.use_hpss_separation,
       }
       const result = isCreating
@@ -219,9 +429,9 @@ function AnalyserWorkspace({ analyser, couplings, onSaved, onDeleted, onCloned, 
     onCloned(analyser.id)
   }
 
-  const lowHz = parseInt(draft.lower_cutoff_freq, 10) || 50
-  const highHz = parseInt(draft.higher_cutoff_freq, 10) || 12000
-  const barsNum = parseInt(draft.bars, 10) || 30
+  const lowHz = parseInt(draft.lower_cutoff_freq, 10) || ANALYSER_DEFAULTS.lower_cutoff_freq
+  const highHz = parseInt(draft.higher_cutoff_freq, 10) || ANALYSER_DEFAULTS.higher_cutoff_freq
+  const barsNum = parseInt(draft.bars, 10) || ANALYSER_DEFAULTS.bars
 
   const combinedOpt = ONSET_METHODS.find(m => m.value === 'combined')!
   const otherOpts = ONSET_METHODS.filter(m => m.value !== 'combined')
@@ -311,7 +521,12 @@ function AnalyserWorkspace({ analyser, couplings, onSaved, onDeleted, onCloned, 
 
             {/* Audio Source — side-by-side cards */}
             <div data-testid="section-audio-source">
-              <ConfigSection title="Audio Source">
+              <ConfigSection
+                title="Audio Source"
+                onReset={resetBarsSource}
+                isAtDefault={isDefaultBarsSource}
+                resetTestId="reset-audio-source"
+              >
                 <div className="grid grid-cols-2 gap-1.5">
                   {BARS_SOURCE_OPTIONS.map((opt) => (
                     <button
@@ -336,10 +551,21 @@ function AnalyserWorkspace({ analyser, couplings, onSaved, onDeleted, onCloned, 
 
             <div className="h-px bg-border/30" />
 
-            {/* Frequency Range */}
+            {/* Frequency Range — interactive dual-handle slider */}
             <div data-testid="section-freq-range">
-              <ConfigSection title="Frequency Range">
-                <FrequencyRangeBar lowHz={lowHz} highHz={highHz} bands={barsNum} />
+              <ConfigSection
+                title="Frequency Range"
+                onReset={resetFreqRange}
+                isAtDefault={isDefaultFreqRange}
+                resetTestId="reset-freq-range"
+              >
+                <FrequencyRangeSlider
+                  lowHz={lowHz}
+                  highHz={highHz}
+                  bands={barsNum}
+                  onLowChange={(hz) => setDraft(d => ({ ...d, lower_cutoff_freq: String(hz) }))}
+                  onHighChange={(hz) => setDraft(d => ({ ...d, higher_cutoff_freq: String(hz) }))}
+                />
                 <div className="grid grid-cols-2 gap-3">
                   <div className="space-y-1">
                     <label className="text-xs text-muted-foreground">Low cut</label>
@@ -382,7 +608,12 @@ function AnalyserWorkspace({ analyser, couplings, onSaved, onDeleted, onCloned, 
 
             {/* Spectrum Resolution */}
             <div data-testid="section-spectrum">
-              <ConfigSection title="Spectrum Resolution">
+              <ConfigSection
+                title="Spectrum Resolution"
+                onReset={resetBars}
+                isAtDefault={isDefaultBars}
+                resetTestId="reset-bars"
+              >
                 <SliderField
                   label="Frequency bands"
                   value={barsNum}
@@ -410,7 +641,12 @@ function AnalyserWorkspace({ analyser, couplings, onSaved, onDeleted, onCloned, 
 
             {/* Detection Method — Combined full-width, Multiband + SuperFlux side-by-side */}
             <div data-testid="section-beat-detection">
-              <ConfigSection title="Detection Method">
+              <ConfigSection
+                title="Detection Method"
+                onReset={resetOnsetMethod}
+                isAtDefault={isDefaultOnsetMethod}
+                resetTestId="reset-onset-method"
+              >
                 <div className="space-y-1.5">
                   <button
                     type="button"
@@ -453,7 +689,12 @@ function AnalyserWorkspace({ analyser, couplings, onSaved, onDeleted, onCloned, 
 
             {/* Beat Sensitivity */}
             <div data-testid="section-beat-sensitivity">
-              <ConfigSection title="Beat Sensitivity">
+              <ConfigSection
+                title="Beat Sensitivity"
+                onReset={resetOnsetDelta}
+                isAtDefault={isDefaultOnsetDelta}
+                resetTestId="reset-onset-delta"
+              >
                 <div className="space-y-1">
                   <div className="flex items-center justify-between">
                     <label className="text-sm" htmlFor="onset-delta-input">Beat sensitivity</label>
@@ -481,7 +722,12 @@ function AnalyserWorkspace({ analyser, couplings, onSaved, onDeleted, onCloned, 
 
             {/* Harmonic / Percussive Separation */}
             <div data-testid="section-advanced-processing">
-              <ConfigSection title="Harmonic / Percussive Separation">
+              <ConfigSection
+                title="Harmonic / Percussive Separation"
+                onReset={resetHpss}
+                isAtDefault={isDefaultHpss}
+                resetTestId="reset-hpss"
+              >
                 <div className="flex items-start gap-2.5 rounded border border-border/50 p-3 bg-muted/20">
                   <input
                     id="hpss-check"
@@ -509,7 +755,12 @@ function AnalyserWorkspace({ analyser, couplings, onSaved, onDeleted, onCloned, 
               <>
                 <div className="h-px bg-border/30" />
                 <div data-testid="section-onset-tuning">
-                  <ConfigSection title="Onset Tuning">
+                  <ConfigSection
+                    title="Onset Tuning"
+                    onReset={resetOnsetTuning}
+                    isAtDefault={isDefaultOnsetTuning}
+                    resetTestId="reset-onset-tuning"
+                  >
                     <div className="space-y-4">
                       <div className="space-y-1">
                         <div className="flex items-center justify-between">
