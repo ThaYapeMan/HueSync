@@ -43,8 +43,19 @@ AirPlayPipeSource  →  PcmAudioPipeline (~100 Hz STFT, source-agnostic)
    │  bars + onset flags → AudioFeatures
 
 ── Rendering (both paths) ────────────────────────────────────────────────────
-SyncEngine  →  Effect  →  Scene (Protocol)
-   │  30 Hz send loop (DTLS/UDP)
+SyncEngine (30 Hz)
+   │
+   ├─ SustainedEnergyTracker  ←  raw PCM RMS, dual-timescale log-ratio
+   │       │  τ_short ≈ 300 ms / τ_long ≈ 30 s, ±6 dB mapped to [0, 1]
+   │       │  AudioFeatures.sustained_energy  (None when no PCM source)
+   │
+   ├─ AudioPipeline  →  AudioFeatures  →  LayerMixer
+   │                                          │  EnergyProfile blend:
+   │                                          │  sustained_energy drives crossfade
+   │                                          │  (fallback: features.full when None)
+   │                                          ↓
+   └─────────────────────────────────────  Scene (Protocol)
+                                              │
 HueDriver  →  Hue Bridge  →  Entertainment Area
 ```
 
@@ -106,11 +117,19 @@ VirtualPlayer ──── Coupling ──── EnergyProfile ──── Effe
 Using "Zone" for the Hue Entertainment Area avoids confusion — a Zone is a
 physical room definition, a sync group is an audio routing concept.
 
-A Coupling can be **cloned** (Clone button in the UI) — the new Coupling gets
-independent copies of its Analyser, Effects, and EnergyProfile (fresh IDs,
-same values), while sharing the same Virtual Player and Zone. This is the
-recommended way to set up A/B comparisons: clone, change one field on the
-copy, switch between them.
+A Coupling can be **cloned** (Clone button on the Couplings page) — the new
+Coupling is a **shallow copy**: it shares the same Virtual Player, Zone,
+Analyser, and EnergyProfile references as the original. No child entities are
+duplicated. To build a genuinely independent A/B pair:
+
+1. Clone the Coupling (Clone button on the Couplings page).
+2. Clone the specific Analyser you want to vary (Clone button on the Analysers
+   page). This creates an independent copy with its own row in the list.
+   The API also supports cloning Effects and EnergyProfiles individually
+   (`POST /api/effects/{id}/clone`, `POST /api/energy-profiles/{id}/clone`),
+   though the UI does not expose those buttons yet.
+3. In the cloned Coupling editor, point the Analyser (or EnergyProfile)
+   dropdown at the newly cloned entity.
 
 ### Relationship rules
 
@@ -330,11 +349,26 @@ Couplings directly without switching tabs.
 
 ### Configuration UI
 
-All Analyser and Effect fields have plain-language descriptions and
-context-sensitive hints directly in the editor dialogs — no prior knowledge of
-DSP terminology required. The onset method selector uses the same card-picker
-pattern as the effect selector, with one-line descriptions per option. SuperFlux
-parameters are hidden unless SuperFlux is the selected method.
+> **Work in progress.** The configuration pages are being progressively rebuilt
+> from modal dialogs into full-page desktop workspaces. The following pages have
+> already been redesigned:
+>
+> - **Couplings** — signal-flow routing graph; live/blind edit badges.
+> - **Analysers** — two-column workspace with Standard / Expert progressive disclosure.
+> - **Effects** — card gallery + per-effect workspace editor with Standard / Expert mode.
+> - **Energy Profiles** — EnergyBlendEditor workspace with animated blend preview.
+>
+> The following pages still use the earlier modal-dialog style and will be
+> redesigned in a future iteration:
+>
+> - Virtual Players, Zones, Latency, Now Playing.
+
+The rebuilt pages expose all fields with plain-language labels and in-place
+descriptions — no prior knowledge of DSP terminology is required. Analyser and
+Effect editors use a Standard / Expert toggle: Standard mode shows the handful
+of settings that most affect perceived output; Expert mode reveals the full set
+including exact numeric inputs, frequency-band boundaries, and exertion clip.
+SuperFlux parameters are shown only when SuperFlux is the selected onset method.
 
 ### Live vs. Blind edits
 
@@ -387,9 +421,9 @@ active Coupling also applies live — no Coupling restart needed.
 |---|---|---|
 | `high_energy_effect_id` | — | Effect used during loud passages. |
 | `low_energy_effect_id` | — | Effect used during quiet passages. Empty = same as high-energy effect. |
-| `blend_start` | 0.3 | Energy level below which the low-energy effect is used at full weight. |
-| `blend_end` | 0.7 | Energy level above which the high-energy effect is used at full weight. |
-| `blend_response` | 0.1 | EMA smoothing — how quickly the blend tracks music energy. |
+| `blend_start` | 0.3 | `sustained_energy` below which the low-energy effect is used at full weight. `sustained_energy` is section-level loudness from `SustainedEnergyTracker` (dual-timescale PCM RMS log-ratio, ±6 dB → [0, 1]). Falls back to `features.full` (relative exertion) when no PCM source is attached. |
+| `blend_end` | 0.7 | `sustained_energy` above which the high-energy effect is used at full weight. |
+| `blend_response` | 0.1 | EMA smoothing coefficient — how quickly `LayerMixer` tracks the target blend position. Larger = faster crossfade. |
 
 ### Player latency
 
@@ -443,7 +477,7 @@ GET/PATCH/DELETE /api/energy-profiles/{id}
 GET/POST         /api/couplings
 GET/PATCH/DELETE /api/couplings/{id}
 POST             /api/couplings/{id}/activate
-POST             /api/couplings/{id}/clone        deep-clone with fresh Analyser + Effect + EnergyProfile copies
+POST             /api/couplings/{id}/clone        shallow clone — new Coupling shares all entity references with the original
 POST             /api/couplings/{id}/restart-cava restart cava for the active coupling
 POST             /api/couplings/deactivate
 ```
@@ -495,10 +529,21 @@ AudioPipeline  →  AudioFeatures  →  Effect  →  Scene (Protocol)  →  Outp
 ```
 
 - **AudioPipeline** (`CavaPipeline` or `PcmAudioPipeline`): produces `AudioFeatures`
-  — normalised spectrum bars and onset flags. `CavaPipeline` reads the cava FIFO;
+  — normalised spectrum bars, onset flags, and (when HPSS is active)
+  `percussive_energy` / `harmonic_energy`. `CavaPipeline` reads the cava FIFO;
   `PcmAudioPipeline` runs its own STFT directly on a PCM source (squeezelite SHM
-  or AirPlay pipe) and is fully source-agnostic.
-- **Effect** (`ColourModeEffect`): maps `AudioFeatures` to a `Scene` (Protocol).
+  or AirPlay pipe) and is fully source-agnostic. `AudioFeatures` also carries
+  two additional energy signals populated by `SyncEngine` each tick:
+  - **`sustained_energy`** (`float | None`): section-level loudness from
+    `SustainedEnergyTracker` — dual-timescale log-ratio of short-term EMA
+    (τ ≈ 300 ms) to long-term EMA (τ ≈ 30 s) of PCM RMS, ±6 dB → [0, 1].
+    `None` when no PCM source is attached (cava-only path).
+  - **`relative_exertion`**: alias for `features.full` — BandNormaliser exertion
+    after AGC, a transient detector rather than a section-level signal.
+- **Effect** (`LayerMixer`): maps `AudioFeatures` to a `Scene` (Protocol),
+  crossfading a mellow and an active `ColourModeEffect` by energy. The blend
+  input is `sustained_energy` (primary) or `features.full` (degraded fallback
+  when no PCM source).
 - **Scene**: `color_at(position, t) → Colour` — effects never touch Hue
   protocol types or channel IDs.
 - **Output** (`HueDriver`): samples the `Scene` at each light's `(x, y, z)`
@@ -542,6 +587,18 @@ git add src/huesync/webui/
 
 Then deploy as usual (`git pull && pip install . && systemctl restart huesync`).
 
+### Diagnostic scripts
+
+Run on the LXC with the project venv (`.venv/bin/python scripts/<name>.py`).
+
+| Script | Purpose |
+|---|---|
+| `compare_bars.py` | Side-by-side comparison of cava bar output versus `PcmAudioPipeline` bar output from the same squeezelite SHM source — useful for verifying the two analysis paths agree. |
+| `verify_pcm_source.py` | Polls `SqueezeliteShmSource.read_new()` for five seconds against a live squeezelite instance and prints per-poll statistics including torn-read discard counts. |
+| `capture_energy.py` | Streams live energy and blend-weight data from a running HueSync instance to a CSV file. Columns include `relative_exertion`, `sustained_energy`, and `mix`. Use to capture reference data for offline analysis. |
+| `analyse_energy.py` | Offline evaluation of alternative `blend_start` / `blend_end` / `blend_response` settings against a CSV produced by `capture_energy.py`, without replaying audio or touching runtime state. Supports windowed analysis. |
+| `calibrate_energy.py` | Decodes an audio file, reconstructs `sustained_energy` at production tick rate, and aligns it with a HueSync capture CSV via cross-correlation. Use to evaluate EnergyProfile thresholds against a specific track. |
+
 ---
 
 ## Known limitations
@@ -555,6 +612,10 @@ Then deploy as usual (`git pull && pip install . && systemctl restart huesync`).
   mapping for those effects is a planned milestone.
 - No authentication on the web UI — intended for a trusted home LAN only.
 - LMS discovery uses UDP broadcast and does not cross subnets.
+- **Configuration UI is partially redesigned.** Couplings, Analysers, Effects,
+  and Energy Profiles have been rebuilt as full-page workspace editors; Virtual
+  Players, Zones, Latency, and Now Playing still use the older modal-dialog
+  style. See the Configuration UI section above for the current state.
 
 ---
 
