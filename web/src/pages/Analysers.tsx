@@ -63,6 +63,18 @@ function ConfigSection({ title, children }: { title: string; children: React.Rea
   )
 }
 
+// ── ColumnHeading helper ──────────────────────────────────────────────────────
+
+function ColumnHeading({ title }: { title: string }) {
+  return (
+    <div className="pb-1">
+      <span className="text-[11px] font-bold uppercase tracking-widest text-foreground/60">
+        {title}
+      </span>
+    </div>
+  )
+}
+
 // ── FrequencyRangeBar ─────────────────────────────────────────────────────────
 
 function FrequencyRangeBar({ lowHz, highHz, bands }: { lowHz: number; highHz: number; bands: number }) {
@@ -84,10 +96,10 @@ function FrequencyRangeBar({ lowHz, highHz, bands }: { lowHz: number; highHz: nu
 
   return (
     <div data-testid="frequency-range-bar">
-      <div className="relative h-6 bg-muted/40 rounded-sm border border-border/40 overflow-hidden">
-        {/* Active range background */}
+      <div className="relative h-6 bg-zinc-900/80 rounded-sm border border-zinc-700/30 overflow-hidden">
+        {/* Active range — subtle cool-neutral fill */}
         <div
-          className="absolute inset-y-0 bg-primary/15"
+          className="absolute inset-y-0 bg-zinc-500/18"
           style={{ left: `${leftX}%`, width: `${rangeWidth}%` }}
         />
         {/* Band division lines within active range */}
@@ -96,14 +108,14 @@ function FrequencyRangeBar({ lowHz, highHz, bands }: { lowHz: number; highHz: nu
           return (
             <div
               key={i}
-              className="absolute inset-y-0 w-px bg-primary/15"
+              className="absolute inset-y-0 w-px bg-zinc-600/25"
               style={{ left: `${bandX}%` }}
             />
           )
         })}
-        {/* Range boundary markers */}
-        <div className="absolute inset-y-0 w-0.5 bg-primary/50 rounded-r" style={{ left: `${leftX}%` }} />
-        <div className="absolute inset-y-0 w-0.5 bg-primary/50 rounded-l" style={{ left: `${rightX - 0.2}%` }} />
+        {/* Cutoff boundary markers */}
+        <div className="absolute inset-y-0 w-0.5 bg-zinc-400/55 rounded-r" style={{ left: `${leftX}%` }} />
+        <div className="absolute inset-y-0 w-0.5 bg-zinc-400/55 rounded-l" style={{ left: `${rightX - 0.2}%` }} />
       </div>
       {/* Landmark labels */}
       <div className="relative h-4 mt-0.5">
@@ -112,7 +124,7 @@ function FrequencyRangeBar({ lowHz, highHz, bands }: { lowHz: number; highHz: nu
           return (
             <span
               key={hz}
-              className="absolute text-[9px] text-muted-foreground/40 -translate-x-1/2"
+              className="absolute text-[9px] text-muted-foreground/35 -translate-x-1/2"
               style={{ left: `${x}%` }}
             >
               {label}
@@ -211,6 +223,9 @@ function AnalyserWorkspace({ analyser, couplings, onSaved, onDeleted, onCloned, 
   const highHz = parseInt(draft.higher_cutoff_freq, 10) || 12000
   const barsNum = parseInt(draft.bars, 10) || 30
 
+  const combinedOpt = ONSET_METHODS.find(m => m.value === 'combined')!
+  const otherOpts = ONSET_METHODS.filter(m => m.value !== 'combined')
+
   return (
     <div className="flex-1 overflow-hidden flex flex-col">
       {/* Header */}
@@ -286,252 +301,280 @@ function AnalyserWorkspace({ analyser, couplings, onSaved, onDeleted, onCloned, 
         )}
       </div>
 
-      {/* Scrollable config body */}
-      <div className="flex-1 overflow-y-auto px-5 py-5 space-y-5">
-        {/* 1. Audio Source */}
-        <div data-testid="section-audio-source">
-          <ConfigSection title="Audio Source">
-            <div className="space-y-1.5">
-              {BARS_SOURCE_OPTIONS.map((opt) => (
-                <button
-                  key={opt.value}
-                  type="button"
-                  data-testid={`opt-bars-source-${opt.value}`}
-                  onClick={() => setDraft(d => ({ ...d, bars_source: opt.value }))}
-                  className={cn(
-                    'w-full text-left rounded border p-2.5 text-sm transition-colors',
-                    draft.bars_source === opt.value
-                      ? 'border-primary bg-primary/10'
-                      : 'border-border hover:border-muted-foreground/60',
-                  )}
-                >
-                  <div className="font-medium leading-tight">{opt.label}</div>
-                  <div className="text-xs text-muted-foreground leading-tight mt-0.5">{opt.description}</div>
-                </button>
-              ))}
-            </div>
-          </ConfigSection>
-        </div>
+      {/* Two-column configuration workspace */}
+      <div className="flex-1 overflow-y-auto">
+        <div className="grid grid-cols-2 divide-x divide-border/30 min-h-full">
 
-        <div className="h-px bg-border/30" />
+          {/* ── LEFT: Audio / Spectrum ─────────────────────────────────── */}
+          <div className="px-5 py-5 space-y-5">
+            <ColumnHeading title="Audio / Spectrum" />
 
-        {/* 2. Beat Detection */}
-        <div data-testid="section-beat-detection">
-          <ConfigSection title="Beat Detection">
-            <div className="space-y-1.5">
-              {ONSET_METHODS.map((opt) => (
-                <button
-                  key={opt.value}
-                  type="button"
-                  data-testid={`opt-onset-method-${opt.value}`}
-                  onClick={() => setDraft(d => ({ ...d, onset_method: opt.value }))}
-                  className={cn(
-                    'w-full text-left rounded border p-2.5 text-sm transition-colors',
-                    draft.onset_method === opt.value
-                      ? 'border-primary bg-primary/10'
-                      : 'border-border hover:border-muted-foreground/60',
-                  )}
-                >
-                  <div className="font-medium leading-tight">{opt.label}</div>
-                  <div className="text-xs text-muted-foreground leading-tight mt-0.5">{opt.description}</div>
-                </button>
-              ))}
-            </div>
-          </ConfigSection>
-        </div>
-
-        <div className="h-px bg-border/30" />
-
-        {/* 3. Frequency Range */}
-        <div data-testid="section-freq-range">
-          <ConfigSection title="Frequency Range">
-            <FrequencyRangeBar lowHz={lowHz} highHz={highHz} bands={barsNum} />
-            <div className="grid grid-cols-2 gap-3">
-              <div className="space-y-1">
-                <label className="text-xs text-muted-foreground">Low cut</label>
-                <div className="flex items-center gap-1">
-                  <input
-                    type="number"
-                    min={20}
-                    max={500}
-                    value={draft.lower_cutoff_freq}
-                    onChange={e => setDraft(d => ({ ...d, lower_cutoff_freq: e.target.value }))}
-                    className="flex h-8 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
-                    data-testid="field-lower-cutoff"
-                  />
-                  <span className="text-xs text-muted-foreground shrink-0">Hz</span>
-                </div>
-              </div>
-              <div className="space-y-1">
-                <label className="text-xs text-muted-foreground">High cut</label>
-                <div className="flex items-center gap-1">
-                  <input
-                    type="number"
-                    min={1000}
-                    max={20000}
-                    value={draft.higher_cutoff_freq}
-                    onChange={e => setDraft(d => ({ ...d, higher_cutoff_freq: e.target.value }))}
-                    className="flex h-8 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
-                    data-testid="field-higher-cutoff"
-                  />
-                  <span className="text-xs text-muted-foreground shrink-0">Hz</span>
-                </div>
-              </div>
-            </div>
-            <p className="text-xs text-muted-foreground/60">
-              Sets the frequency window analysed. 50–12000 Hz covers most music.
-            </p>
-          </ConfigSection>
-        </div>
-
-        <div className="h-px bg-border/30" />
-
-        {/* 4. Spectrum Resolution */}
-        <div data-testid="section-spectrum">
-          <ConfigSection title="Spectrum Resolution">
-            <SliderField
-              label="Frequency bands"
-              value={barsNum}
-              min={10}
-              max={60}
-              step={1}
-              format={(v) => `${v} bands`}
-              onChange={(v) => setDraft(d => ({ ...d, bars: String(v) }))}
-              inputHz={barsNum}
-              inputMin={10}
-              inputMax={60}
-              onInputCommit={(v) => setDraft(d => ({ ...d, bars: String(v) }))}
-              inputTestId="field-bars"
-            />
-            <p className="text-xs text-muted-foreground/60">
-              20–30 bands works well for most rooms. More bands = finer detail.
-            </p>
-          </ConfigSection>
-        </div>
-
-        <div className="h-px bg-border/30" />
-
-        {/* 5. Beat Sensitivity */}
-        <div data-testid="section-beat-sensitivity">
-          <ConfigSection title="Beat Sensitivity">
-            <div className="space-y-1">
-              <div className="flex items-center justify-between">
-                <label className="text-sm" htmlFor="onset-delta-input">Beat sensitivity</label>
-                <span className="font-mono text-sm tabular-nums text-muted-foreground">{draft.onset_delta}</span>
-              </div>
-              <input
-                id="onset-delta-input"
-                type="number"
-                step={0.01}
-                min={0.01}
-                max={1.0}
-                value={draft.onset_delta}
-                onChange={e => setDraft(d => ({ ...d, onset_delta: e.target.value }))}
-                className="flex h-8 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
-                data-testid="field-onset-delta"
-              />
-              <p className="text-xs text-muted-foreground/60">
-                Lower values catch softer beats; higher values require stronger hits to trigger.
-              </p>
-            </div>
-          </ConfigSection>
-        </div>
-
-        <div className="h-px bg-border/30" />
-
-        {/* 6. Advanced Processing */}
-        <div data-testid="section-advanced-processing">
-          <ConfigSection title="Advanced Processing">
-            <div className="flex items-start gap-2.5 rounded border border-border/50 p-3 bg-muted/20">
-              <input
-                id="hpss-check"
-                type="checkbox"
-                checked={draft.use_hpss_separation}
-                onChange={e => setDraft(d => ({ ...d, use_hpss_separation: e.target.checked }))}
-                className="mt-0.5 h-4 w-4 shrink-0 cursor-pointer"
-                data-testid="field-use-hpss"
-              />
-              <div>
-                <label htmlFor="hpss-check" className="text-sm font-medium cursor-pointer">
-                  Harmonic / percussive separation
-                </label>
-                <p className="text-xs text-muted-foreground mt-0.5">
-                  Splits music into rhythm and melody layers for more targeted effects.
-                  High-energy effects react to beats; low-energy effects react to melody.
-                </p>
-              </div>
-            </div>
-          </ConfigSection>
-        </div>
-
-        {/* Expert mode: Onset Tuning */}
-        {expert && (
-          <>
-            <div className="h-px bg-border/30" />
-            <div data-testid="section-onset-tuning">
-              <ConfigSection title="Onset Tuning">
-                <div className="space-y-4">
-                  <div className="space-y-1">
-                    <div className="flex items-center justify-between">
-                      <label className="text-sm" htmlFor="onset-alpha-input">Threshold adaptation</label>
-                    </div>
-                    <input
-                      id="onset-alpha-input"
-                      type="number"
-                      step={0.01}
-                      min={0}
-                      max={1}
-                      value={draft.onset_alpha}
-                      onChange={e => setDraft(d => ({ ...d, onset_alpha: e.target.value }))}
-                      className="flex h-8 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
-                      data-testid="field-onset-alpha"
-                    />
-                    <p className="text-xs text-muted-foreground/60">
-                      How quickly the beat threshold adjusts to changing volume levels.
-                    </p>
-                  </div>
-
-                  {draft.onset_method === 'superflux' && (
-                    <>
-                      <div className="space-y-1">
-                        <label className="text-sm" htmlFor="superflux-mu-input">Vibrato suppression</label>
-                        <input
-                          id="superflux-mu-input"
-                          type="number"
-                          min={1}
-                          max={20}
-                          value={draft.superflux_mu}
-                          onChange={e => setDraft(d => ({ ...d, superflux_mu: e.target.value }))}
-                          className="flex h-8 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
-                          data-testid="field-superflux-mu"
-                        />
-                        <p className="text-xs text-muted-foreground/60">
-                          Filters out false beats from sustained notes and vocal runs. Higher = more filtering.
-                        </p>
-                      </div>
-                      <div className="space-y-1">
-                        <label className="text-sm" htmlFor="superflux-lag-input">Look-back window</label>
-                        <input
-                          id="superflux-lag-input"
-                          type="number"
-                          min={1}
-                          max={10}
-                          value={draft.superflux_lag}
-                          onChange={e => setDraft(d => ({ ...d, superflux_lag: e.target.value }))}
-                          className="flex h-8 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
-                          data-testid="field-superflux-lag"
-                        />
-                        <p className="text-xs text-muted-foreground/60">
-                          Number of frames used for vibrato detection. Higher = more context, slightly slower response.
-                        </p>
-                      </div>
-                    </>
-                  )}
+            {/* Audio Source — side-by-side cards */}
+            <div data-testid="section-audio-source">
+              <ConfigSection title="Audio Source">
+                <div className="grid grid-cols-2 gap-1.5">
+                  {BARS_SOURCE_OPTIONS.map((opt) => (
+                    <button
+                      key={opt.value}
+                      type="button"
+                      data-testid={`opt-bars-source-${opt.value}`}
+                      onClick={() => setDraft(d => ({ ...d, bars_source: opt.value }))}
+                      className={cn(
+                        'text-left rounded border p-2.5 text-sm transition-colors',
+                        draft.bars_source === opt.value
+                          ? 'border-primary bg-primary/10'
+                          : 'border-border hover:border-muted-foreground/60',
+                      )}
+                    >
+                      <div className="font-medium leading-tight">{opt.label}</div>
+                      <div className="text-xs text-muted-foreground leading-snug mt-0.5">{opt.description}</div>
+                    </button>
+                  ))}
                 </div>
               </ConfigSection>
             </div>
-          </>
-        )}
+
+            <div className="h-px bg-border/30" />
+
+            {/* Frequency Range */}
+            <div data-testid="section-freq-range">
+              <ConfigSection title="Frequency Range">
+                <FrequencyRangeBar lowHz={lowHz} highHz={highHz} bands={barsNum} />
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-1">
+                    <label className="text-xs text-muted-foreground">Low cut</label>
+                    <div className="flex items-center gap-1">
+                      <input
+                        type="number"
+                        min={20}
+                        max={500}
+                        value={draft.lower_cutoff_freq}
+                        onChange={e => setDraft(d => ({ ...d, lower_cutoff_freq: e.target.value }))}
+                        className="flex h-8 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                        data-testid="field-lower-cutoff"
+                      />
+                      <span className="text-xs text-muted-foreground shrink-0">Hz</span>
+                    </div>
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-xs text-muted-foreground">High cut</label>
+                    <div className="flex items-center gap-1">
+                      <input
+                        type="number"
+                        min={1000}
+                        max={20000}
+                        value={draft.higher_cutoff_freq}
+                        onChange={e => setDraft(d => ({ ...d, higher_cutoff_freq: e.target.value }))}
+                        className="flex h-8 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                        data-testid="field-higher-cutoff"
+                      />
+                      <span className="text-xs text-muted-foreground shrink-0">Hz</span>
+                    </div>
+                  </div>
+                </div>
+                <p className="text-xs text-muted-foreground/60">
+                  Sets the frequency window analysed. 50–12000 Hz covers most music.
+                </p>
+              </ConfigSection>
+            </div>
+
+            <div className="h-px bg-border/30" />
+
+            {/* Spectrum Resolution */}
+            <div data-testid="section-spectrum">
+              <ConfigSection title="Spectrum Resolution">
+                <SliderField
+                  label="Frequency bands"
+                  value={barsNum}
+                  min={10}
+                  max={60}
+                  step={1}
+                  format={(v) => `${v} bands`}
+                  onChange={(v) => setDraft(d => ({ ...d, bars: String(v) }))}
+                  inputHz={barsNum}
+                  inputMin={10}
+                  inputMax={60}
+                  onInputCommit={(v) => setDraft(d => ({ ...d, bars: String(v) }))}
+                  inputTestId="field-bars"
+                />
+                <p className="text-xs text-muted-foreground/60">
+                  20–30 bands works well for most rooms. More bands = finer detail.
+                </p>
+              </ConfigSection>
+            </div>
+          </div>
+
+          {/* ── RIGHT: Beat Detection ──────────────────────────────────── */}
+          <div className="px-5 py-5 space-y-5">
+            <ColumnHeading title="Beat Detection" />
+
+            {/* Detection Method — Combined full-width, Multiband + SuperFlux side-by-side */}
+            <div data-testid="section-beat-detection">
+              <ConfigSection title="Detection Method">
+                <div className="space-y-1.5">
+                  <button
+                    type="button"
+                    data-testid={`opt-onset-method-${combinedOpt.value}`}
+                    onClick={() => setDraft(d => ({ ...d, onset_method: combinedOpt.value }))}
+                    className={cn(
+                      'w-full text-left rounded border p-2.5 text-sm transition-colors',
+                      draft.onset_method === combinedOpt.value
+                        ? 'border-primary bg-primary/10'
+                        : 'border-border hover:border-muted-foreground/60',
+                    )}
+                  >
+                    <div className="font-medium leading-tight">{combinedOpt.label}</div>
+                    <div className="text-xs text-muted-foreground leading-tight mt-0.5">{combinedOpt.description}</div>
+                  </button>
+                  <div className="grid grid-cols-2 gap-1.5">
+                    {otherOpts.map((opt) => (
+                      <button
+                        key={opt.value}
+                        type="button"
+                        data-testid={`opt-onset-method-${opt.value}`}
+                        onClick={() => setDraft(d => ({ ...d, onset_method: opt.value }))}
+                        className={cn(
+                          'text-left rounded border p-2.5 text-sm transition-colors',
+                          draft.onset_method === opt.value
+                            ? 'border-primary bg-primary/10'
+                            : 'border-border hover:border-muted-foreground/60',
+                        )}
+                      >
+                        <div className="font-medium leading-tight">{opt.label}</div>
+                        <div className="text-xs text-muted-foreground leading-snug mt-0.5">{opt.description}</div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </ConfigSection>
+            </div>
+
+            <div className="h-px bg-border/30" />
+
+            {/* Beat Sensitivity */}
+            <div data-testid="section-beat-sensitivity">
+              <ConfigSection title="Beat Sensitivity">
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between">
+                    <label className="text-sm" htmlFor="onset-delta-input">Beat sensitivity</label>
+                    <span className="font-mono text-sm tabular-nums text-muted-foreground">{draft.onset_delta}</span>
+                  </div>
+                  <input
+                    id="onset-delta-input"
+                    type="number"
+                    step={0.01}
+                    min={0.01}
+                    max={1.0}
+                    value={draft.onset_delta}
+                    onChange={e => setDraft(d => ({ ...d, onset_delta: e.target.value }))}
+                    className="flex h-8 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                    data-testid="field-onset-delta"
+                  />
+                  <p className="text-xs text-muted-foreground/60">
+                    Lower values catch softer beats; higher values require stronger hits to trigger.
+                  </p>
+                </div>
+              </ConfigSection>
+            </div>
+
+            <div className="h-px bg-border/30" />
+
+            {/* Harmonic / Percussive Separation */}
+            <div data-testid="section-advanced-processing">
+              <ConfigSection title="Harmonic / Percussive Separation">
+                <div className="flex items-start gap-2.5 rounded border border-border/50 p-3 bg-muted/20">
+                  <input
+                    id="hpss-check"
+                    type="checkbox"
+                    checked={draft.use_hpss_separation}
+                    onChange={e => setDraft(d => ({ ...d, use_hpss_separation: e.target.checked }))}
+                    className="mt-0.5 h-4 w-4 shrink-0 cursor-pointer"
+                    data-testid="field-use-hpss"
+                  />
+                  <div>
+                    <label htmlFor="hpss-check" className="text-sm font-medium cursor-pointer">
+                      Enable separation
+                    </label>
+                    <p className="text-xs text-muted-foreground mt-0.5">
+                      Splits audio into rhythm and melody layers. Beat-driven effects react to percussion;
+                      energy-based effects react to melody and harmony.
+                    </p>
+                  </div>
+                </div>
+              </ConfigSection>
+            </div>
+
+            {/* Expert mode: Onset Tuning — inside Beat Detection column */}
+            {expert && (
+              <>
+                <div className="h-px bg-border/30" />
+                <div data-testid="section-onset-tuning">
+                  <ConfigSection title="Onset Tuning">
+                    <div className="space-y-4">
+                      <div className="space-y-1">
+                        <div className="flex items-center justify-between">
+                          <label className="text-sm" htmlFor="onset-alpha-input">Threshold adaptation</label>
+                        </div>
+                        <input
+                          id="onset-alpha-input"
+                          type="number"
+                          step={0.01}
+                          min={0}
+                          max={1}
+                          value={draft.onset_alpha}
+                          onChange={e => setDraft(d => ({ ...d, onset_alpha: e.target.value }))}
+                          className="flex h-8 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                          data-testid="field-onset-alpha"
+                        />
+                        <p className="text-xs text-muted-foreground/60">
+                          How quickly the beat threshold adjusts to changing volume levels.
+                        </p>
+                      </div>
+
+                      {draft.onset_method === 'superflux' && (
+                        <>
+                          <div className="space-y-1">
+                            <label className="text-sm" htmlFor="superflux-mu-input">Vibrato suppression</label>
+                            <input
+                              id="superflux-mu-input"
+                              type="number"
+                              min={1}
+                              max={20}
+                              value={draft.superflux_mu}
+                              onChange={e => setDraft(d => ({ ...d, superflux_mu: e.target.value }))}
+                              className="flex h-8 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                              data-testid="field-superflux-mu"
+                            />
+                            <p className="text-xs text-muted-foreground/60">
+                              Filters out false beats from sustained notes and vocal runs. Higher = more filtering.
+                            </p>
+                          </div>
+                          <div className="space-y-1">
+                            <label className="text-sm" htmlFor="superflux-lag-input">Look-back window</label>
+                            <input
+                              id="superflux-lag-input"
+                              type="number"
+                              min={1}
+                              max={10}
+                              value={draft.superflux_lag}
+                              onChange={e => setDraft(d => ({ ...d, superflux_lag: e.target.value }))}
+                              className="flex h-8 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                              data-testid="field-superflux-lag"
+                            />
+                            <p className="text-xs text-muted-foreground/60">
+                              Number of frames used for vibrato detection. Higher = more context, slightly slower response.
+                            </p>
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  </ConfigSection>
+                </div>
+              </>
+            )}
+          </div>
+
+        </div>
       </div>
 
       {/* Bottom action bar */}
