@@ -24,15 +24,15 @@ export function EffectCard({ role, effectId, allEffects, onChange }: Props) {
       className={cn(
         'border rounded-xl p-4 flex flex-col gap-3 min-h-[160px]',
         isHigh
-          ? 'border-orange-500/25 bg-orange-500/5'
-          : 'border-blue-500/25 bg-blue-500/5',
+          ? 'border-rose-400/25 bg-rose-400/5'
+          : 'border-cyan-400/25 bg-cyan-400/5',
       )}
     >
       {/* Role label */}
       <div
         className={cn(
           'text-xs font-semibold uppercase tracking-widest',
-          isHigh ? 'text-orange-400' : 'text-blue-400',
+          isHigh ? 'text-rose-400' : 'text-cyan-400',
         )}
       >
         {isHigh ? 'High energy' : 'Low energy'}

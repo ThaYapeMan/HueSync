@@ -5,8 +5,11 @@ import { cn } from "@/lib/utils"
 
 const Slider = React.forwardRef<
   React.ElementRef<typeof SliderPrimitive.Root>,
-  React.ComponentPropsWithoutRef<typeof SliderPrimitive.Root>
->(({ className, ...props }, ref) => {
+  React.ComponentPropsWithoutRef<typeof SliderPrimitive.Root> & {
+    trackStyle?: React.CSSProperties
+    rangeClassName?: string
+  }
+>(({ className, trackStyle, rangeClassName, ...props }, ref) => {
   const thumbCount = (props.value ?? props.defaultValue ?? [0]).length
   return (
     <SliderPrimitive.Root
@@ -17,8 +20,11 @@ const Slider = React.forwardRef<
       )}
       {...props}
     >
-      <SliderPrimitive.Track className="relative h-2 w-full grow overflow-hidden rounded-full bg-secondary">
-        <SliderPrimitive.Range className="absolute h-full bg-primary" />
+      <SliderPrimitive.Track
+        className="relative h-2 w-full grow overflow-hidden rounded-full bg-secondary"
+        style={trackStyle}
+      >
+        <SliderPrimitive.Range className={cn("absolute h-full bg-primary", rangeClassName)} />
       </SliderPrimitive.Track>
       {Array.from({ length: thumbCount }).map((_, i) => (
         <SliderPrimitive.Thumb

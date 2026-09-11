@@ -17,7 +17,6 @@ import { EffectCard } from '@/components/EffectCard'
 import { LightPreview } from '@/components/LightPreview'
 import { EditorPageHeader } from '@/components/editor/EditorPageHeader'
 import { SectionLabel } from '@/components/editor/SectionLabel'
-import { AdvancedSection } from '@/components/editor/AdvancedSection'
 import { usePreviewSocket } from '@/hooks/usePreviewSocket'
 import { calcBlendMix, settleTime, responseToSlider, sliderToResponse } from '@/lib/blend'
 import { cn } from '@/lib/utils'
@@ -30,6 +29,19 @@ import {
   deleteEnergyProfile,
   getEffects,
 } from '@/lib/api'
+
+// Semantic energy zone colors — purely for UI navigation, not actual effect/light colors.
+const E_LOW   = '#22D3EE'  // cyan-400
+const E_TRANS = '#8B5CF6'  // violet-500
+const E_HIGH  = '#FB7185'  // rose-400
+
+const ENERGY_PROFILE_DEFAULTS = {
+  blend_start:    0.3,
+  blend_end:      0.7,
+  blend_response: 0.1,
+} as const
+
+// ── Form state ────────────────────────────────────────────────────────────────
 
 interface FormState {
   name: string
@@ -44,12 +56,136 @@ function defaultForm(ep?: EnergyProfile): FormState {
   return {
     name: ep?.name ?? '',
     high_energy_effect_id: ep?.high_energy_effect_id ?? '',
-    low_energy_effect_id: ep?.low_energy_effect_id ?? '',
-    blend_start: String(ep?.blend_start ?? 0.3),
-    blend_end: String(ep?.blend_end ?? 0.7),
-    blend_response: String(ep?.blend_response ?? 0.1),
+    low_energy_effect_id:  ep?.low_energy_effect_id  ?? '',
+    blend_start:    String(ep?.blend_start    ?? ENERGY_PROFILE_DEFAULTS.blend_start),
+    blend_end:      String(ep?.blend_end      ?? ENERGY_PROFILE_DEFAULTS.blend_end),
+    blend_response: String(ep?.blend_response ?? ENERGY_PROFILE_DEFAULTS.blend_response),
   }
 }
+
+// ── Live channel preview ──────────────────────────────────────────────────────
+// Renders per-channel colours from the WebSocket feed as emissive light dots.
+// Mirrors the emissive model in EffectPreview (γ≈0.58, bloom above 70%).
+
+function channelDotBg(r: number, g: number, b: number): string {
+  const lum = r * 0.2126 + g * 0.7152 + b * 0.0722
+  if (lum < 0.04) return 'rgb(8,8,8)'
+  const t = Math.pow(lum, 0.58)
+  const scale = t / lum
+  let rr = r * 255 * scale, gg = g * 255 * scale, bb = b * 255 * scale
+  if (t > 0.70) {
+    const bloom = ((t - 0.70) / 0.30) * 95
+    rr = Math.min(255, rr + bloom)
+    gg = Math.min(255, gg + bloom)
+    bb = Math.min(255, bb + bloom)
+  }
+  return `rgb(${Math.round(rr)},${Math.round(gg)},${Math.round(bb)})`
+}
+
+function channelGlow(r: number, g: number, b: number): string {
+  const lum = r * 0.2126 + g * 0.7152 + b * 0.0722
+  if (lum < 0.04) return 'none'
+  const R = Math.round(r * 255), G = Math.round(g * 255), B = Math.round(b * 255)
+  const inner = Math.round(lum * 6)
+  const outer = Math.round(lum * 18)
+  return [
+    `0 0 ${inner}px rgba(${R},${G},${B},${Math.min(0.90, lum * 0.95).toFixed(2)})`,
+    `0 0 ${outer}px rgba(${R},${G},${B},${Math.min(0.55, lum * 0.60).toFixed(2)})`,
+  ].join(', ')
+}
+
+function LiveChannelPreview({ channels }: { channels: Array<{ r: number; g: number; b: number }> }) {
+  return (
+    <div
+      className="flex items-center justify-center gap-2 py-3 flex-wrap"
+      data-testid="live-channel-dots"
+    >
+      {channels.slice(0, 12).map((ch, i) => (
+        <div
+          key={i}
+          data-testid={`channel-dot-${i}`}
+          className="rounded-full w-9 h-9 shrink-0 transition-all duration-75"
+          style={{
+            backgroundColor: channelDotBg(ch.r, ch.g, ch.b),
+            boxShadow: channelGlow(ch.r, ch.g, ch.b),
+          }}
+        />
+      ))}
+    </div>
+  )
+}
+
+// ── Section with reset button ─────────────────────────────────────────────────
+
+interface SectionWithResetProps {
+  title: React.ReactNode
+  isAtDefault: boolean
+  onReset: () => void
+  resetTestId?: string
+  children: React.ReactNode
+}
+
+function SectionWithReset({ title, isAtDefault, onReset, resetTestId, children }: SectionWithResetProps) {
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between">
+        <SectionLabel>{title}</SectionLabel>
+        <button
+          type="button"
+          onClick={isAtDefault ? undefined : onReset}
+          aria-disabled={isAtDefault}
+          data-testid={resetTestId}
+          className={cn(
+            'text-[9px] uppercase tracking-wide transition-colors leading-none py-0.5',
+            isAtDefault
+              ? 'text-muted-foreground/25 pointer-events-none'
+              : 'text-foreground cursor-pointer',
+          )}
+        >
+          Reset
+        </button>
+      </div>
+      {children}
+    </div>
+  )
+}
+
+// ── Mode toggle ───────────────────────────────────────────────────────────────
+
+function ModeToggle({ expertMode, onToggle }: { expertMode: boolean; onToggle: (v: boolean) => void }) {
+  return (
+    <div className="flex shrink-0 rounded-md border border-border overflow-hidden">
+      <button
+        type="button"
+        data-testid="mode-standard-btn"
+        onClick={() => onToggle(false)}
+        className={cn(
+          'px-3 py-1 text-xs transition-colors',
+          !expertMode
+            ? 'bg-muted font-semibold text-foreground'
+            : 'text-muted-foreground hover:text-foreground hover:bg-muted/50',
+        )}
+      >
+        Standard
+      </button>
+      <button
+        type="button"
+        data-testid="mode-expert-btn"
+        onClick={() => onToggle(true)}
+        className={cn(
+          'px-3 py-1 text-xs transition-colors border-l border-border',
+          expertMode
+            ? 'bg-muted font-semibold text-foreground'
+            : 'text-muted-foreground hover:text-foreground hover:bg-muted/50',
+        )}
+      >
+        Expert
+      </button>
+    </div>
+  )
+}
+
+// ── Main component ────────────────────────────────────────────────────────────
 
 export function EnergyProfiles() {
   const [energyProfiles, setEnergyProfiles] = useState<EnergyProfile[]>([])
@@ -62,33 +198,37 @@ export function EnergyProfiles() {
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
   const [simulatedEnergy, setSimulatedEnergy] = useState(0.5)
+  const [expertMode, setExpertMode] = useState(false)
 
   const preview = usePreviewSocket()
 
-  // --- Derived values for workspace ---
-  const blendStart = parseFloat(form.blend_start) || 0
-  const blendEnd = parseFloat(form.blend_end) || 1
+  // --- Derived values ---
+  const blendStart    = parseFloat(form.blend_start)    || 0
+  const blendEnd      = parseFloat(form.blend_end)      || 1
   const blendResponse = parseFloat(form.blend_response) || 0.1
   const startPct = blendStart * 100
-  const endPct = blendEnd * 100
+  const endPct   = blendEnd   * 100
+
+  const blendAtDefault    = Math.abs(blendStart    - ENERGY_PROFILE_DEFAULTS.blend_start)    < 0.001
+                         && Math.abs(blendEnd      - ENERGY_PROFILE_DEFAULTS.blend_end)      < 0.001
+  const responseAtDefault = Math.abs(blendResponse - ENERGY_PROFILE_DEFAULTS.blend_response) < 0.001
 
   const isLive = editingId !== null && editingId !== 'new'
     && preview.status?.active_energy_profile_id === editingId
 
   const displayEnergy = isLive ? preview.energy : simulatedEnergy
-  const instantMix = calcBlendMix(displayEnergy, blendStart, blendEnd)
-  const displayMix = isLive ? preview.mix : instantMix
+  const instantMix    = calcBlendMix(displayEnergy, blendStart, blendEnd)
+  const displayMix    = isLive ? preview.mix : instantMix
 
-  const highEffect = effects.find((e) => e.id === form.high_energy_effect_id)
-  const lowEffect = effects.find((e) => e.id === form.low_energy_effect_id)
+  const highEffect    = effects.find((e) => e.id === form.high_energy_effect_id)
+  const lowEffect     = effects.find((e) => e.id === form.low_energy_effect_id)
   const lowEffectType = (lowEffect ?? highEffect)?.effect_type ?? 'mono_pulse'
   const highEffectType = highEffect?.effect_type ?? 'mono_pulse'
 
-  const lowPct = Math.round((1 - displayMix) * 100)
+  const lowPct  = Math.round((1 - displayMix) * 100)
   const highPct = Math.round(displayMix * 100)
 
   // --- Load ---
-
   async function load() {
     try {
       const [eps, effs] = await Promise.all([getEnergyProfiles(), getEffects()])
@@ -105,23 +245,22 @@ export function EnergyProfiles() {
   useEffect(() => { load() }, [])
 
   // --- Form helpers ---
-
   function set<K extends keyof FormState>(key: K, value: string) {
     setForm((f) => ({ ...f, [key]: value }))
   }
 
   function handleRangeChange([start, end]: number[]) {
     set('blend_start', String(Math.round(start * 100) / 100))
-    set('blend_end', String(Math.round(end * 100) / 100))
+    set('blend_end',   String(Math.round(end   * 100) / 100))
   }
 
   // --- Editor lifecycle ---
-
   function openNew() {
     setEditingId('new')
     setForm(defaultForm())
     setSaveError(null)
     setSimulatedEnergy(0.5)
+    setExpertMode(false)
   }
 
   function openEdit(ep: EnergyProfile) {
@@ -129,6 +268,7 @@ export function EnergyProfiles() {
     setForm(defaultForm(ep))
     setSaveError(null)
     setSimulatedEnergy(0.5)
+    setExpertMode(false)
   }
 
   function closeEditor() {
@@ -143,9 +283,9 @@ export function EnergyProfiles() {
       const body = {
         name: form.name,
         high_energy_effect_id: form.high_energy_effect_id,
-        low_energy_effect_id: form.low_energy_effect_id,
-        blend_start: parseFloat(form.blend_start),
-        blend_end: parseFloat(form.blend_end),
+        low_energy_effect_id:  form.low_energy_effect_id,
+        blend_start:    parseFloat(form.blend_start),
+        blend_end:      parseFloat(form.blend_end),
         blend_response: parseFloat(form.blend_response),
       }
       if (editingId === 'new') {
@@ -168,7 +308,6 @@ export function EnergyProfiles() {
   }
 
   // --- Loading / error ---
-
   if (loading || error) {
     return (
       <div className="flex items-center justify-center h-full text-sm">
@@ -201,9 +340,12 @@ export function EnergyProfiles() {
           saveDisabled={!form.high_energy_effect_id}
           onCancel={closeEditor}
           onSave={handleSave}
+          additionalControls={
+            <ModeToggle expertMode={expertMode} onToggle={setExpertMode} />
+          }
         />
 
-        {/* Body: main + inspector */}
+        {/* Body: main workspace + inspector */}
         <div className="flex flex-1 overflow-hidden">
 
           {/* Main workspace */}
@@ -229,22 +371,32 @@ export function EnergyProfiles() {
             </section>
 
             {/* ── Energy blend zone ── */}
-            <section>
-              <SectionLabel className="mb-4">Energy blend</SectionLabel>
-
-              {/* Zone color bar */}
-              <div className="relative h-2.5 rounded-full overflow-hidden mb-4">
+            <SectionWithReset
+              title="Energy blend"
+              isAtDefault={blendAtDefault}
+              onReset={() => { set('blend_start', '0.3'); set('blend_end', '0.7') }}
+              resetTestId="reset-blend"
+            >
+              {/* Three-zone color bar: LOW (cyan) | TRANSITION (gradient) | HIGH (coral) */}
+              <div
+                data-testid="blend-zone-bar"
+                className="relative h-2.5 rounded-full overflow-hidden mb-1"
+              >
                 <div
-                  className="absolute inset-y-0 left-0 bg-blue-500/35"
-                  style={{ right: `${100 - startPct}%` }}
+                  className="absolute inset-y-0 left-0"
+                  style={{ right: `${100 - startPct}%`, background: 'rgba(34,211,238,0.40)' }}
                 />
                 <div
-                  className="absolute inset-y-0 bg-amber-400/35"
-                  style={{ left: `${startPct}%`, right: `${100 - endPct}%` }}
+                  className="absolute inset-y-0"
+                  style={{
+                    left: `${startPct}%`,
+                    right: `${100 - endPct}%`,
+                    background: 'linear-gradient(to right, rgba(34,211,238,0.40), rgba(139,92,246,0.40), rgba(251,113,133,0.40))',
+                  }}
                 />
                 <div
-                  className="absolute inset-y-0 right-0 bg-orange-500/35"
-                  style={{ left: `${endPct}%` }}
+                  className="absolute inset-y-0 right-0"
+                  style={{ left: `${endPct}%`, background: 'rgba(251,113,133,0.40)' }}
                 />
               </div>
 
@@ -259,15 +411,15 @@ export function EnergyProfiles() {
               />
 
               {/* Zone labels */}
-              <div className="relative h-5 mt-1 text-xs font-mono text-muted-foreground/70 select-none">
-                <span className="absolute left-0">LOW 100%</span>
+              <div className="relative h-5 mt-1 text-xs font-mono select-none">
+                <span className="absolute left-0" style={{ color: E_LOW + 'B3' }}>LOW 100%</span>
                 <span
-                  className="absolute -translate-x-1/2 text-amber-400/75"
-                  style={{ left: `${(startPct + endPct) / 2}%` }}
+                  className="absolute -translate-x-1/2"
+                  style={{ left: `${(startPct + endPct) / 2}%`, color: E_TRANS + 'B3' }}
                 >
                   AUTO BLEND
                 </span>
-                <span className="absolute right-0">HIGH 100%</span>
+                <span className="absolute right-0" style={{ color: E_HIGH + 'B3' }}>HIGH 100%</span>
               </div>
 
               {/* Percent ticks */}
@@ -275,16 +427,16 @@ export function EnergyProfiles() {
                 <span className="absolute left-0">0%</span>
                 {startPct > 8 && startPct < 92 && (
                   <span
-                    className="absolute -translate-x-1/2 text-blue-400/60"
-                    style={{ left: `${startPct}%` }}
+                    className="absolute -translate-x-1/2"
+                    style={{ left: `${startPct}%`, color: E_LOW + '99' }}
                   >
                     {Math.round(startPct)}%
                   </span>
                 )}
                 {endPct > 8 && endPct < 92 && Math.abs(endPct - startPct) > 6 && (
                   <span
-                    className="absolute -translate-x-1/2 text-orange-400/60"
-                    style={{ left: `${endPct}%` }}
+                    className="absolute -translate-x-1/2"
+                    style={{ left: `${endPct}%`, color: E_HIGH + '99' }}
                   >
                     {Math.round(endPct)}%
                   </span>
@@ -298,9 +450,7 @@ export function EnergyProfiles() {
                   className="absolute flex flex-col items-center -translate-x-1/2"
                   style={{ left: `${displayEnergy * 100}%` }}
                 >
-                  <div
-                    className={cn('w-px h-4', isLive ? 'bg-green-400' : 'bg-muted-foreground/35')}
-                  />
+                  <div className={cn('w-px h-4', isLive ? 'bg-green-400' : 'bg-muted-foreground/35')} />
                   <span
                     className={cn(
                       'text-[9px] whitespace-nowrap font-mono',
@@ -312,57 +462,77 @@ export function EnergyProfiles() {
                 </div>
               </div>
 
-              {/* Simulate slider (hidden when live) */}
+              {/* Simulate slider — semantic gradient track, hidden when live */}
               {!isLive && (
                 <div className="mt-3 space-y-1.5">
                   <p className="text-xs text-muted-foreground/60">Drag to simulate music energy</p>
                   <Slider
                     aria-label="Simulated energy"
+                    data-testid="energy-slider"
                     min={0}
                     max={1}
                     step={0.01}
                     value={[simulatedEnergy]}
                     onValueChange={(v) => setSimulatedEnergy(v[0])}
+                    trackStyle={{
+                      background: `linear-gradient(to right, ${E_LOW}, ${E_TRANS}, ${E_HIGH})`,
+                    }}
+                    rangeClassName="bg-transparent"
                   />
                 </div>
               )}
-            </section>
+            </SectionWithReset>
 
-            {/* ── Blend weights ── */}
+            {/* ── Current blend ── */}
             <section>
               <SectionLabel className="mb-3">Current blend</SectionLabel>
               <div className="flex items-center gap-3">
-                <span className="text-xs text-blue-300 w-32 text-right truncate shrink-0">
+                <span className="text-xs w-32 text-right truncate shrink-0" style={{ color: E_LOW }}>
                   {(lowEffect ?? highEffect)?.name ?? 'Low energy'}&nbsp;{lowPct}%
                 </span>
-                <div className="flex-1 h-2.5 rounded-full overflow-hidden bg-secondary">
+                <div
+                  className="flex-1 h-2.5 rounded-full overflow-hidden bg-secondary"
+                  data-testid="current-blend-bar"
+                >
                   <div
-                    className="h-full rounded-full transition-all duration-100"
+                    className="h-full transition-all duration-100"
                     style={{
-                      background: `linear-gradient(to right,
-                        rgb(96, 165, 250) 0%,
-                        rgb(96, 165, 250) ${lowPct}%,
-                        rgb(251, 146, 60) ${lowPct}%,
-                        rgb(251, 146, 60) 100%)`,
+                      background: `linear-gradient(to right, ${E_LOW} ${lowPct}%, ${E_HIGH} ${lowPct}%)`,
+                      opacity: 0.80,
                     }}
                   />
                 </div>
-                <span className="text-xs text-orange-300 w-32 truncate shrink-0">
+                <span className="text-xs w-32 truncate shrink-0" style={{ color: E_HIGH }}>
                   {highPct}%&nbsp;{highEffect?.name ?? 'High energy'}
                 </span>
               </div>
             </section>
 
             {/* ── Output preview ── */}
-            <section>
-              <SectionLabel className="mb-2">Output preview</SectionLabel>
-              <div className="rounded-xl bg-black/25 border border-border/40">
-                <LightPreview
-                  lowEffectType={lowEffectType}
-                  highEffectType={highEffectType}
-                  mix={displayMix}
-                  energy={displayEnergy}
-                />
+            <section data-testid="output-preview-section">
+              <div className="flex items-center justify-between mb-2">
+                <SectionLabel>Output preview</SectionLabel>
+                <span
+                  data-testid={isLive ? 'label-live-output' : 'label-preview'}
+                  className={cn(
+                    'text-[9px] font-mono uppercase tracking-wide',
+                    isLive ? 'text-green-400' : 'text-muted-foreground/40',
+                  )}
+                >
+                  {isLive ? '● Live output' : 'Preview'}
+                </span>
+              </div>
+              <div className="rounded-xl bg-black/25 border border-border/40 overflow-hidden">
+                {isLive && preview.channel_colours.length > 0 ? (
+                  <LiveChannelPreview channels={preview.channel_colours} />
+                ) : (
+                  <LightPreview
+                    lowEffectType={lowEffectType}
+                    highEffectType={highEffectType}
+                    mix={displayMix}
+                    energy={displayEnergy}
+                  />
+                )}
               </div>
             </section>
 
@@ -373,8 +543,12 @@ export function EnergyProfiles() {
             <div className="p-5 space-y-5">
 
               {/* Response */}
-              <div>
-                <SectionLabel className="mb-3">Response</SectionLabel>
+              <SectionWithReset
+                title="Response"
+                isAtDefault={responseAtDefault}
+                onReset={() => set('blend_response', String(ENERGY_PROFILE_DEFAULTS.blend_response))}
+                resetTestId="reset-response"
+              >
                 <div className="space-y-2">
                   <div className="flex items-center gap-2">
                     <span className="text-xs text-muted-foreground w-12 shrink-0">Smooth</span>
@@ -392,50 +566,60 @@ export function EnergyProfiles() {
                   <p className="text-xs text-muted-foreground">
                     Blend settles over {settleTime(blendResponse)} after a sustained energy change
                   </p>
+                  {expertMode && (
+                    <div className="pt-1 space-y-1">
+                      <Label className="text-xs text-muted-foreground">Response (exact)</Label>
+                      <Input
+                        data-testid="field-blend-response"
+                        type="number"
+                        step={0.01}
+                        min={0.01}
+                        max={0.5}
+                        value={form.blend_response}
+                        onChange={(e) => set('blend_response', e.target.value)}
+                        className="h-7 text-xs"
+                      />
+                    </div>
+                  )}
                 </div>
-              </div>
+              </SectionWithReset>
 
-              <Separator />
-
-              {/* Advanced */}
-              <AdvancedSection>
-                <div className="space-y-1">
-                  <Label className="text-xs text-muted-foreground">Blend start</Label>
-                  <Input
-                    type="number"
-                    step={0.05}
-                    min={0}
-                    max={1}
-                    value={form.blend_start}
-                    onChange={(e) => set('blend_start', e.target.value)}
-                    className="h-7 text-xs"
-                  />
-                </div>
-                <div className="space-y-1">
-                  <Label className="text-xs text-muted-foreground">Blend end</Label>
-                  <Input
-                    type="number"
-                    step={0.05}
-                    min={0}
-                    max={1}
-                    value={form.blend_end}
-                    onChange={(e) => set('blend_end', e.target.value)}
-                    className="h-7 text-xs"
-                  />
-                </div>
-                <div className="space-y-1">
-                  <Label className="text-xs text-muted-foreground">Response (exact)</Label>
-                  <Input
-                    type="number"
-                    step={0.01}
-                    min={0.01}
-                    max={0.5}
-                    value={form.blend_response}
-                    onChange={(e) => set('blend_response', e.target.value)}
-                    className="h-7 text-xs"
-                  />
-                </div>
-              </AdvancedSection>
+              {expertMode && (
+                <>
+                  <Separator />
+                  <div className="space-y-3">
+                    <span className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">
+                      Blend exact values
+                    </span>
+                    <div className="space-y-1">
+                      <Label className="text-xs text-muted-foreground">Blend start</Label>
+                      <Input
+                        data-testid="field-blend-start"
+                        type="number"
+                        step={0.05}
+                        min={0}
+                        max={1}
+                        value={form.blend_start}
+                        onChange={(e) => set('blend_start', e.target.value)}
+                        className="h-7 text-xs"
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <Label className="text-xs text-muted-foreground">Blend end</Label>
+                      <Input
+                        data-testid="field-blend-end"
+                        type="number"
+                        step={0.05}
+                        min={0}
+                        max={1}
+                        value={form.blend_end}
+                        onChange={(e) => set('blend_end', e.target.value)}
+                        className="h-7 text-xs"
+                      />
+                    </div>
+                  </div>
+                </>
+              )}
 
             </div>
           </aside>

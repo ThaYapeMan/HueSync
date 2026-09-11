@@ -11,6 +11,7 @@ interface Props {
   onCancel: () => void
   onSave: () => void
   'aria-label'?: string
+  additionalControls?: React.ReactNode
 }
 
 export function EditorPageHeader({
@@ -24,6 +25,7 @@ export function EditorPageHeader({
   onCancel,
   onSave,
   'aria-label': ariaLabel,
+  additionalControls,
 }: Props) {
   return (
     <div className="flex items-center gap-4 px-6 py-3 border-b border-border shrink-0">
@@ -35,6 +37,7 @@ export function EditorPageHeader({
         className="flex-1 bg-transparent text-base font-semibold outline-none placeholder:text-muted-foreground/40 min-w-0"
         data-testid="editor-name-input"
       />
+      {additionalControls}
       {isLive && (
         <span className="flex items-center gap-1.5 text-xs font-medium text-green-400 shrink-0">
           <span className="w-1.5 h-1.5 rounded-full bg-green-400" />
