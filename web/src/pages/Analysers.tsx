@@ -108,7 +108,7 @@ function ConfigSection({
               'text-[9px] uppercase tracking-wide transition-colors leading-none py-0.5',
               isAtDefault
                 ? 'text-muted-foreground/25 pointer-events-none'
-                : 'text-muted-foreground/55 hover:text-muted-foreground cursor-pointer',
+                : 'text-foreground cursor-pointer',
             )}
           >
             Reset

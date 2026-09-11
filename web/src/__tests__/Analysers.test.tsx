@@ -607,6 +607,22 @@ describe('Default / Reset behavior', () => {
     expect(barsInput.value).toBe('30')
   })
 
+  // ── Reset active-state visual styling ─────────────────────────────────────
+
+  it('reset button at default has muted styling (not text-foreground)', async () => {
+    await renderAndSelect({ ...BASE, onset_delta: 0.1 })
+    const resetBtn = screen.getByTestId('reset-onset-delta')
+    expect(resetBtn.className).not.toMatch(/\btext-foreground\b/)
+    expect(resetBtn.className).toMatch(/pointer-events-none/)
+  })
+
+  it('reset button at non-default has white/foreground active styling', async () => {
+    await renderAndSelect({ ...BASE, onset_delta: 0.07 })
+    const resetBtn = screen.getByTestId('reset-onset-delta')
+    expect(resetBtn.className).toMatch(/\btext-foreground\b/)
+    expect(resetBtn.className).not.toMatch(/pointer-events-none/)
+  })
+
   // ── Beat Sensitivity ───────────────────────────────────────────────────────
 
   it('reset-onset-delta is disabled when onset_delta = 0.1 (default)', async () => {
