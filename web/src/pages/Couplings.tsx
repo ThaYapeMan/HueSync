@@ -9,9 +9,10 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
-import { getEffectRgb } from '@/lib/effectColors'
+import { EffectPreview } from '@/components/EffectPreview'
 import { cn } from '@/lib/utils'
 import {
+  EFFECTS,
   type Coupling,
   type VirtualPlayer,
   type Zone,
@@ -43,15 +44,15 @@ interface Props {
 
 function NodeConnector() {
   return (
-    <div className="flex justify-center py-1">
+    <div className="flex justify-center py-2">
       <div className="flex flex-col items-center">
-        <div className="w-px h-5 bg-border/50" />
+        <div className="w-px h-7 bg-border/50" />
         <div
           className="w-0 h-0"
           style={{
-            borderLeft: '5px solid transparent',
-            borderRight: '5px solid transparent',
-            borderTop: '5px solid hsl(var(--border) / 0.5)',
+            borderLeft: '6px solid transparent',
+            borderRight: '6px solid transparent',
+            borderTop: '6px solid hsl(var(--border) / 0.5)',
           }}
         />
       </div>
@@ -59,18 +60,17 @@ function NodeConnector() {
   )
 }
 
-// ── RoutingNode (view mode) ───────────────────────────────────────────────────
+// ── RoutingNode (view mode — Player, Analyser, Zone) ──────────────────────────
 
-function RoutingNode({ label, name, context, onOpen, children }: {
+function RoutingNode({ label, name, context, onOpen }: {
   label: string
   name?: string
   context?: string
   onOpen?: () => void
-  children?: React.ReactNode
 }) {
   return (
     <div className="border border-border rounded-lg overflow-hidden bg-card">
-      <div className="flex items-center justify-between px-3 py-1.5 bg-muted/40 border-b border-border/40">
+      <div className="flex items-center justify-between px-4 py-2 bg-muted/40 border-b border-border/40">
         <span className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">
           {label}
         </span>
@@ -83,15 +83,121 @@ function RoutingNode({ label, name, context, onOpen, children }: {
           </button>
         )}
       </div>
-      <div className="px-4 py-3">
+      <div className="px-5 py-4">
         {name ? (
           <>
-            <p className="font-medium text-sm">{name}</p>
-            {context && <p className="text-xs text-muted-foreground mt-0.5">{context}</p>}
-            {children}
+            <p className="font-semibold text-base">{name}</p>
+            {context && <p className="text-xs text-muted-foreground mt-1">{context}</p>}
           </>
         ) : (
-          <p className="text-sm text-muted-foreground/40 italic">Not configured</p>
+          <p className="text-base text-muted-foreground/40 italic">Not configured</p>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ── EnergyProfileRoutingNode ──────────────────────────────────────────────────
+
+function EnergyProfileRoutingNode({ ep, effects, onOpen }: {
+  ep: EnergyProfile | undefined
+  effects: Effect[]
+  onOpen?: () => void
+}) {
+  const highEffect = ep ? effects.find(e => e.id === ep.high_energy_effect_id) : undefined
+  const lowEffect = ep
+    ? (ep.low_energy_effect_id
+        ? effects.find(e => e.id === ep.low_energy_effect_id)
+        : highEffect)
+    : undefined
+
+  // Equality is by ID — empty low_energy_effect_id means same as high
+  const singleEffect = !ep?.low_energy_effect_id || ep.low_energy_effect_id === ep.high_energy_effect_id
+
+  return (
+    <div className="border border-border rounded-lg overflow-hidden bg-card">
+      <div className="flex items-center justify-between px-4 py-2 bg-muted/40 border-b border-border/40">
+        <span className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">
+          Energy Profile
+        </span>
+        {ep && onOpen && (
+          <button
+            className="text-[11px] text-muted-foreground/50 hover:text-primary transition-colors"
+            onClick={onOpen}
+          >
+            Open →
+          </button>
+        )}
+      </div>
+      <div className="px-5 py-4">
+        {!ep ? (
+          <p className="text-base text-muted-foreground/40 italic">Not configured</p>
+        ) : (
+          <>
+            <p className="font-semibold text-base">{ep.name}</p>
+
+            {highEffect ? (
+              singleEffect ? (
+                /* ─── Single effect ─── */
+                <div className="mt-4 pt-3 border-t border-border/30">
+                  <p className="text-[10px] uppercase tracking-widest text-muted-foreground/50 font-semibold mb-2">
+                    Effect
+                  </p>
+                  <div className="bg-black/25 rounded-md">
+                    <EffectPreview effectType={highEffect.effect_type} energy={0.80} count={6} size="md" />
+                  </div>
+                  <p className="text-xs text-muted-foreground mt-2 text-center">
+                    {EFFECTS.find(e => e.id === highEffect.effect_type)?.label ?? highEffect.effect_type}
+                  </p>
+                  <p className="text-sm font-medium text-center mt-0.5">{highEffect.name}</p>
+                </div>
+              ) : (
+                /* ─── Two different effects ─── */
+                <div className="mt-4 pt-3 border-t border-border/30">
+                  <div className="grid grid-cols-2 gap-3">
+                    {/* Low energy */}
+                    <div>
+                      <p className="text-[10px] uppercase tracking-widest text-muted-foreground/50 font-semibold mb-2">
+                        Low energy
+                      </p>
+                      <div className="bg-black/25 rounded-md">
+                        <EffectPreview
+                          effectType={lowEffect?.effect_type ?? 'none'}
+                          energy={0.80}
+                          count={5}
+                          size="md"
+                        />
+                      </div>
+                      <p className="text-xs text-muted-foreground mt-2 text-center">
+                        {EFFECTS.find(e => e.id === lowEffect?.effect_type)?.label ?? lowEffect?.effect_type ?? '—'}
+                      </p>
+                      <p className="text-sm font-medium text-center mt-0.5">{lowEffect?.name ?? '—'}</p>
+                    </div>
+                    {/* High energy */}
+                    <div>
+                      <p className="text-[10px] uppercase tracking-widest text-muted-foreground/50 font-semibold mb-2">
+                        High energy
+                      </p>
+                      <div className="bg-black/25 rounded-md">
+                        <EffectPreview
+                          effectType={highEffect.effect_type}
+                          energy={0.80}
+                          count={5}
+                          size="md"
+                        />
+                      </div>
+                      <p className="text-xs text-muted-foreground mt-2 text-center">
+                        {EFFECTS.find(e => e.id === highEffect.effect_type)?.label ?? highEffect.effect_type}
+                      </p>
+                      <p className="text-sm font-medium text-center mt-0.5">{highEffect.name}</p>
+                    </div>
+                  </div>
+                </div>
+              )
+            ) : (
+              <p className="text-xs text-muted-foreground mt-2 italic">Effects not found</p>
+            )}
+          </>
         )}
       </div>
     </div>
@@ -110,12 +216,12 @@ function RoutingEditorNode({ label, options, value, onChange, placeholder, onNav
 }) {
   return (
     <div className="border border-border rounded-lg overflow-hidden bg-card">
-      <div className="px-3 py-1.5 bg-muted/40 border-b border-border/40">
+      <div className="px-4 py-2 bg-muted/40 border-b border-border/40">
         <span className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">
           {label}
         </span>
       </div>
-      <div className="px-3 py-2.5">
+      <div className="px-5 py-3">
         {options.length === 0 ? (
           <div className="flex items-center justify-between gap-2">
             <p className="text-xs text-muted-foreground/50 italic">No {label.toLowerCase()}s available</p>
@@ -143,38 +249,6 @@ function RoutingEditorNode({ label, options, value, onChange, placeholder, onNav
           </Select>
         )}
       </div>
-    </div>
-  )
-}
-
-// ── MiniLightPreview (Energy Profile node only) ───────────────────────────────
-
-function MiniLightPreview({ lowEffectType, highEffectType }: {
-  lowEffectType: string
-  highEffectType: string
-}) {
-  const lo = getEffectRgb(lowEffectType)
-  const hi = getEffectRgb(highEffectType)
-  const energy = 0.65
-  return (
-    <div className="flex items-center justify-center gap-1.5 mt-3 pt-2.5 border-t border-border/30">
-      {Array.from({ length: 6 }).map((_, i) => {
-        const mix = i / 5
-        const r = Math.round(lo[0] * (1 - mix) + hi[0] * mix)
-        const g = Math.round(lo[1] * (1 - mix) + hi[1] * mix)
-        const b = Math.round(lo[2] * (1 - mix) + hi[2] * mix)
-        return (
-          <div
-            key={i}
-            className="rounded-full w-5 h-5 shrink-0"
-            style={{
-              backgroundColor: `rgb(${r},${g},${b})`,
-              opacity: energy,
-              boxShadow: `0 0 ${Math.round(energy * 10)}px rgba(${r},${g},${b},0.5)`,
-            }}
-          />
-        )
-      })}
     </div>
   )
 }
@@ -321,8 +395,6 @@ function CouplingWorkspace({
   const zone = zones.find(z => z.id === coupling?.zone_id)
   const analyser = analysers.find(a => a.id === coupling?.analyser_id)
   const ep = energyProfiles.find(e => e.id === coupling?.energy_profile_id)
-  const highEffect = effects.find(e => e.id === ep?.high_energy_effect_id)
-  const lowEffect = effects.find(e => e.id === ep?.low_energy_effect_id) ?? highEffect
 
   const playerName = player
     ? (player.display_name || player.player_name || player.type)
@@ -378,7 +450,7 @@ function CouplingWorkspace({
 
       {/* Routing graph */}
       <div className="flex-1 overflow-y-auto">
-        <div className="max-w-sm mx-auto px-4 py-5">
+        <div className="max-w-md mx-auto px-4 py-8">
           {isEditingRouting ? (
             <>
               <RoutingEditorNode
@@ -420,20 +492,10 @@ function CouplingWorkspace({
                 <p className="text-sm text-destructive mt-4">{routingError}</p>
               )}
               <div className="flex gap-2 mt-5">
-                <Button
-                  size="sm"
-                  onClick={handleSaveRouting}
-                  disabled={savingRouting}
-                  className="flex-1"
-                >
+                <Button size="sm" onClick={handleSaveRouting} disabled={savingRouting} className="flex-1">
                   {savingRouting ? 'Saving…' : isCreating ? 'Create coupling' : 'Save routing'}
                 </Button>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={handleCancelRouting}
-                  disabled={savingRouting}
-                >
+                <Button size="sm" variant="outline" onClick={handleCancelRouting} disabled={savingRouting}>
                   Cancel
                 </Button>
               </div>
@@ -454,18 +516,11 @@ function CouplingWorkspace({
                 onOpen={onNavigate ? () => onNavigate('analysers') : undefined}
               />
               <NodeConnector />
-              <RoutingNode
-                label="Energy Profile"
-                name={ep?.name}
+              <EnergyProfileRoutingNode
+                ep={ep}
+                effects={effects}
                 onOpen={onNavigate ? () => onNavigate('energy-profiles') : undefined}
-              >
-                {highEffect && (
-                  <MiniLightPreview
-                    lowEffectType={lowEffect?.effect_type ?? highEffect.effect_type}
-                    highEffectType={highEffect.effect_type}
-                  />
-                )}
-              </RoutingNode>
+              />
               <NodeConnector />
               <RoutingNode
                 label="Zone"
