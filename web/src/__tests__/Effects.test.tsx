@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { Effects } from '../pages/Effects'
+import { Effects, EFFECT_DEFAULTS } from '../pages/Effects'
+import * as apiModule from '../lib/api'
 
 // ── mocks ────────────────────────────────────────────────────────────────────
 
@@ -22,7 +23,6 @@ vi.mock('../hooks/usePreviewSocket', () => ({
   }),
 }))
 
-
 vi.mock('../lib/api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../lib/api')>()
   return {
@@ -36,6 +36,11 @@ vi.mock('../lib/api', async (importOriginal) => {
       {
         id: 'e2', name: 'Calm Spectrum', effect_type: 'spectrum_rgb',
         effect_speed: 1.0, effect_decay: 0.3, sensitivity: 0.6, brightness_floor: 0.15,
+        bass_hz: 250, mid_hz: 2000, exertion_clip: 3.0, onset_flash_intensity: 0.0,
+      },
+      {
+        id: 'e3', name: 'Lights Off', effect_type: 'none',
+        effect_speed: 1.0, effect_decay: 0.3, sensitivity: 1.0, brightness_floor: 0.15,
         bass_hz: 250, mid_hz: 2000, exertion_clip: 3.0, onset_flash_intensity: 0.0,
       },
     ]),
@@ -55,7 +60,6 @@ vi.mock('../lib/api', async (importOriginal) => {
 async function renderEffects() {
   const user = userEvent.setup()
   render(<Effects />)
-  // Wait for async load
   await screen.findByTestId('effects-gallery')
   return user
 }
@@ -65,7 +69,33 @@ async function renderEffectsInWorkspace() {
   render(<Effects />)
   await screen.findByTestId('effects-gallery')
   await user.click(screen.getByTestId('edit-effect-e1'))
-  // Wait for workspace to appear
+  await screen.findByTestId('editor-name-input')
+  return user
+}
+
+async function renderSpectrumInWorkspace() {
+  const user = userEvent.setup()
+  render(<Effects />)
+  await screen.findByTestId('effects-gallery')
+  await user.click(screen.getByTestId('edit-effect-e2'))
+  await screen.findByTestId('editor-name-input')
+  return user
+}
+
+async function renderNoneInWorkspace() {
+  const user = userEvent.setup()
+  render(<Effects />)
+  await screen.findByTestId('effects-gallery')
+  await user.click(screen.getByTestId('edit-effect-e3'))
+  await screen.findByTestId('editor-name-input')
+  return user
+}
+
+async function renderNewEffectInWorkspace() {
+  const user = userEvent.setup()
+  render(<Effects />)
+  await screen.findByTestId('effects-gallery')
+  await user.click(screen.getByTestId('new-effect-btn'))
   await screen.findByTestId('editor-name-input')
   return user
 }
@@ -166,21 +196,16 @@ describe('Effects workspace editor', () => {
     await user.click(screen.getByTestId('effect-type-change'))
     const picker = await screen.findByTestId('effect-type-picker')
     expect(picker).toBeDefined()
-    // All effect types are shown
     expect(screen.getByTestId('type-option-spectrum_rgb')).toBeDefined()
     expect(screen.getByTestId('type-option-fireworks')).toBeDefined()
-    // Pick spectrum_rgb
     await user.click(screen.getByTestId('type-option-spectrum_rgb'))
-    // Picker closes, display shows new selection
     const display = await screen.findByTestId('effect-type-display')
     expect(within(display).getByText('Spectrum RGB')).toBeDefined()
   })
 
   it('shows the large effect preview', async () => {
     await renderEffectsInWorkspace()
-    // The workspace has a large preview with 8 dots
     const previews = screen.getAllByTestId('effect-preview')
-    // At least one preview exists in the workspace
     expect(previews.length).toBeGreaterThan(0)
   })
 
@@ -196,7 +221,6 @@ describe('Effects workspace editor', () => {
     const user = await renderEffectsInWorkspace()
     const calmBtn = screen.getByTestId('preview-calm')
     await user.click(calmBtn)
-    // After clicking, calm should be active (primary style)
     expect(calmBtn.className).toMatch(/bg-primary/)
   })
 
@@ -205,20 +229,282 @@ describe('Effects workspace editor', () => {
     const liveBtn = screen.getByTestId('preview-live') as HTMLButtonElement
     expect(liveBtn.disabled).toBe(true)
   })
+})
 
-  it('Advanced section is collapsed by default', async () => {
+// ── Standard / Expert mode ────────────────────────────────────────────────────
+
+describe('Standard / Expert mode', () => {
+  beforeEach(() => { vi.clearAllMocks() })
+
+  it('Standard mode is active by default', async () => {
     await renderEffectsInWorkspace()
-    const toggle = screen.getByTestId('advanced-toggle')
-    expect(toggle.getAttribute('aria-expanded')).toBe('false')
-    expect(screen.queryByTestId('advanced-content')).toBeNull()
+    const standardBtn = screen.getByTestId('mode-standard-btn')
+    expect(standardBtn.className).toMatch(/font-semibold/)
+    expect(screen.queryByTestId('field-bass-hz')).toBeNull()
+    expect(screen.queryByTestId('field-exertion-clip')).toBeNull()
   })
 
-  it('Advanced section expands on click', async () => {
+  it('Expert mode button exists in header', async () => {
+    await renderEffectsInWorkspace()
+    expect(screen.getByTestId('mode-expert-btn')).toBeDefined()
+  })
+
+  it('switching to Expert reveals advanced fields', async () => {
     const user = await renderEffectsInWorkspace()
-    const toggle = screen.getByTestId('advanced-toggle')
-    await user.click(toggle)
-    expect(toggle.getAttribute('aria-expanded')).toBe('true')
-    expect(screen.getByTestId('advanced-content')).toBeDefined()
+    await user.click(screen.getByTestId('mode-expert-btn'))
+    expect(screen.getByTestId('field-bass-hz')).toBeDefined()
+    expect(screen.getByTestId('field-mid-hz')).toBeDefined()
+    expect(screen.getByTestId('field-exertion-clip')).toBeDefined()
+  })
+
+  it('Expert mode shows exact numeric inputs for all Standard sliders', async () => {
+    const user = await renderEffectsInWorkspace()
+    await user.click(screen.getByTestId('mode-expert-btn'))
+    expect(screen.getByTestId('field-sensitivity-exact')).toBeDefined()
+    expect(screen.getByTestId('field-speed-exact')).toBeDefined()       // fireworks hasSpeed
+    expect(screen.getByTestId('field-decay-exact')).toBeDefined()       // fireworks hasDecay
+    expect(screen.getByTestId('field-brightness-floor-exact')).toBeDefined()
+    expect(screen.getByTestId('field-beat-flash-exact')).toBeDefined()
+  })
+
+  it('switching back to Standard hides Expert-only inputs', async () => {
+    const user = await renderEffectsInWorkspace()
+    await user.click(screen.getByTestId('mode-expert-btn'))
+    expect(screen.getByTestId('field-bass-hz')).toBeDefined()
+    await user.click(screen.getByTestId('mode-standard-btn'))
+    expect(screen.queryByTestId('field-bass-hz')).toBeNull()
+    expect(screen.queryByTestId('field-sensitivity-exact')).toBeNull()
+  })
+
+  it('mode switch does not mutate draft values', async () => {
+    const user = await renderEffectsInWorkspace() // e1 sensitivity=1.4
+    await user.click(screen.getByTestId('mode-expert-btn'))
+    const exactInput = screen.getByTestId('field-sensitivity-exact') as HTMLInputElement
+    expect(exactInput.value).toBe('1.4')
+    // Change to 1.8 in Expert
+    await user.clear(exactInput)
+    await user.type(exactInput, '1.8')
+    // Switch to Standard and back
+    await user.click(screen.getByTestId('mode-standard-btn'))
+    await user.click(screen.getByTestId('mode-expert-btn'))
+    // Value must still be 1.8
+    const exactAfter = screen.getByTestId('field-sensitivity-exact') as HTMLInputElement
+    expect(exactAfter.value).toBe('1.8')
+  })
+
+  it('Expert values survive Standard-mode Save', async () => {
+    const user = await renderEffectsInWorkspace() // e1 bass_hz=250
+    await user.click(screen.getByTestId('mode-expert-btn'))
+    const bassInput = screen.getByTestId('field-bass-hz') as HTMLInputElement
+    await user.clear(bassInput)
+    await user.type(bassInput, '300')
+    // Switch to Standard — field-bass-hz disappears
+    await user.click(screen.getByTestId('mode-standard-btn'))
+    expect(screen.queryByTestId('field-bass-hz')).toBeNull()
+    // Save in Standard mode
+    await user.click(screen.getByTestId('editor-save'))
+    expect(vi.mocked(apiModule.updateEffect)).toHaveBeenCalledWith(
+      'e1',
+      expect.objectContaining({ bass_hz: 300 }),
+    )
+  })
+
+  it('opening a new editor always starts in Standard mode', async () => {
+    const user = await renderEffectsInWorkspace() // e1 editor
+    await user.click(screen.getByTestId('mode-expert-btn'))
+    await user.click(screen.getByText('Cancel'))
+    // Open second editor
+    await user.click(screen.getByTestId('edit-effect-e2'))
+    await screen.findByTestId('editor-name-input')
+    // Must be back in Standard
+    expect(screen.queryByTestId('field-bass-hz')).toBeNull()
+    expect(screen.getByTestId('mode-standard-btn').className).toMatch(/font-semibold/)
+  })
+})
+
+// ── Conditional fields — applicability ───────────────────────────────────────
+
+describe('Conditional fields — applicability', () => {
+  beforeEach(() => { vi.clearAllMocks() })
+
+  it('fireworks shows Speed and Decay fields (hasSpeed=true, hasDecay=true)', async () => {
+    await renderEffectsInWorkspace() // e1 fireworks
+    expect(screen.getByTestId('reset-speed')).toBeDefined()
+    expect(screen.getByTestId('reset-decay')).toBeDefined()
+  })
+
+  it('spectrum_rgb does not show Speed or Decay fields (hasSpeed=false, hasDecay=false)', async () => {
+    await renderSpectrumInWorkspace() // e2 spectrum_rgb
+    expect(screen.queryByTestId('reset-speed')).toBeNull()
+    expect(screen.queryByTestId('reset-decay')).toBeNull()
+  })
+
+  it('none type shows none-message, not behaviour section', async () => {
+    await renderNoneInWorkspace() // e3 none
+    expect(screen.getByTestId('section-none-message')).toBeDefined()
+    expect(screen.queryByTestId('section-behaviour')).toBeNull()
+  })
+
+  it('none type does not expose Behaviour sliders in Expert mode', async () => {
+    const user = await renderNoneInWorkspace()
+    await user.click(screen.getByTestId('mode-expert-btn'))
+    expect(screen.queryByTestId('field-sensitivity-exact')).toBeNull()
+    expect(screen.queryByTestId('field-bass-hz')).toBeNull()
+  })
+
+  it('Sensitivity and Brightness floor always appear for non-none types', async () => {
+    await renderSpectrumInWorkspace() // spectrum_rgb, no speed/decay
+    expect(screen.getByTestId('reset-sensitivity')).toBeDefined()
+    expect(screen.getByTestId('reset-brightness-floor')).toBeDefined()
+    expect(screen.getByTestId('reset-beat-flash')).toBeDefined()
+  })
+})
+
+// ── Reset behavior ────────────────────────────────────────────────────────────
+
+describe('Reset behavior', () => {
+  beforeEach(() => { vi.clearAllMocks() })
+
+  it('sensitivity Reset is disabled (aria-disabled=true) at default value', async () => {
+    await renderNewEffectInWorkspace() // all defaults
+    const resetBtn = screen.getByTestId('reset-sensitivity')
+    expect(resetBtn.getAttribute('aria-disabled')).toBe('true')
+  })
+
+  it('sensitivity Reset is active (aria-disabled=false) when non-default', async () => {
+    await renderEffectsInWorkspace() // e1 sensitivity=1.4
+    const resetBtn = screen.getByTestId('reset-sensitivity')
+    expect(resetBtn.getAttribute('aria-disabled')).toBe('false')
+  })
+
+  it('clicking sensitivity Reset restores model default', async () => {
+    const user = await renderEffectsInWorkspace() // e1 sensitivity=1.4
+    await user.click(screen.getByTestId('mode-expert-btn'))
+    const exact = screen.getByTestId('field-sensitivity-exact') as HTMLInputElement
+    expect(exact.value).toBe('1.4')
+    await user.click(screen.getByTestId('reset-sensitivity'))
+    expect(exact.value).toBe(String(EFFECT_DEFAULTS.sensitivity))
+  })
+
+  it('resetting sensitivity does not change decay', async () => {
+    const user = await renderEffectsInWorkspace() // e1 decay=0.6
+    await user.click(screen.getByTestId('mode-expert-btn'))
+    const decayInput = screen.getByTestId('field-decay-exact') as HTMLInputElement
+    expect(decayInput.value).toBe('0.6')
+    await user.click(screen.getByTestId('reset-sensitivity'))
+    expect(decayInput.value).toBe('0.6')
+  })
+
+  it('brightness floor Reset is disabled when at default (e2: 0.15)', async () => {
+    await renderSpectrumInWorkspace() // e2 brightness_floor=0.15 (default)
+    const resetBtn = screen.getByTestId('reset-brightness-floor')
+    expect(resetBtn.getAttribute('aria-disabled')).toBe('true')
+  })
+
+  it('brightness floor Reset is active when non-default (e1: 0.05)', async () => {
+    await renderEffectsInWorkspace() // e1 brightness_floor=0.05
+    const resetBtn = screen.getByTestId('reset-brightness-floor')
+    expect(resetBtn.getAttribute('aria-disabled')).toBe('false')
+  })
+
+  it('clicking brightness floor Reset restores 0.15', async () => {
+    const user = await renderEffectsInWorkspace() // e1 brightness_floor=0.05
+    await user.click(screen.getByTestId('mode-expert-btn'))
+    const exact = screen.getByTestId('field-brightness-floor-exact') as HTMLInputElement
+    expect(exact.value).toBe('0.05')
+    await user.click(screen.getByTestId('reset-brightness-floor'))
+    expect(exact.value).toBe(String(EFFECT_DEFAULTS.brightness_floor))
+  })
+
+  it('beat flash Reset is disabled at default (0.0)', async () => {
+    await renderNewEffectInWorkspace() // all defaults — onset_flash_intensity=0.0
+    const resetBtn = screen.getByTestId('reset-beat-flash')
+    expect(resetBtn.getAttribute('aria-disabled')).toBe('true')
+  })
+
+  it('beat flash Reset is active when non-default (e1: 0.3)', async () => {
+    await renderEffectsInWorkspace() // e1 onset_flash_intensity=0.3
+    const resetBtn = screen.getByTestId('reset-beat-flash')
+    expect(resetBtn.getAttribute('aria-disabled')).toBe('false')
+  })
+
+  it('freq-bands Reset is disabled when both at default', async () => {
+    const user = await renderEffectsInWorkspace() // e1 bass=250,mid=2000 (defaults)
+    await user.click(screen.getByTestId('mode-expert-btn'))
+    const resetBtn = screen.getByTestId('reset-freq-bands')
+    expect(resetBtn.getAttribute('aria-disabled')).toBe('true')
+  })
+
+  it('freq-bands Reset becomes active after changing bass_hz', async () => {
+    const user = await renderEffectsInWorkspace()
+    await user.click(screen.getByTestId('mode-expert-btn'))
+    const bassInput = screen.getByTestId('field-bass-hz') as HTMLInputElement
+    await user.clear(bassInput)
+    await user.type(bassInput, '400')
+    const resetBtn = screen.getByTestId('reset-freq-bands')
+    expect(resetBtn.getAttribute('aria-disabled')).toBe('false')
+  })
+
+  it('freq-bands Reset restores both bass and mid to defaults', async () => {
+    const user = await renderEffectsInWorkspace()
+    await user.click(screen.getByTestId('mode-expert-btn'))
+    const bassInput = screen.getByTestId('field-bass-hz') as HTMLInputElement
+    const midInput  = screen.getByTestId('field-mid-hz')  as HTMLInputElement
+    await user.clear(bassInput)
+    await user.type(bassInput, '400')
+    await user.click(screen.getByTestId('reset-freq-bands'))
+    expect(bassInput.value).toBe(String(EFFECT_DEFAULTS.bass_hz))
+    expect(midInput.value).toBe(String(EFFECT_DEFAULTS.mid_hz))
+  })
+})
+
+// ── Preview Input — mutation safety ──────────────────────────────────────────
+
+describe('Preview Input — mutation safety', () => {
+  beforeEach(() => { vi.clearAllMocks() })
+
+  it('switching preview input does not call updateEffect', async () => {
+    const user = await renderEffectsInWorkspace()
+    await user.click(screen.getByTestId('preview-calm'))
+    await user.click(screen.getByTestId('preview-beat-heavy'))
+    await user.click(screen.getByTestId('preview-groove'))
+    expect(vi.mocked(apiModule.updateEffect)).not.toHaveBeenCalled()
+  })
+
+  it('preview-calm activates Calm button', async () => {
+    const user = await renderEffectsInWorkspace()
+    await user.click(screen.getByTestId('preview-calm'))
+    expect(screen.getByTestId('preview-calm').className).toMatch(/bg-primary/)
+    expect(screen.getByTestId('preview-groove').className).not.toMatch(/bg-primary/)
+  })
+
+  it('preview-beat-heavy activates Beat-heavy button', async () => {
+    const user = await renderEffectsInWorkspace()
+    await user.click(screen.getByTestId('preview-beat-heavy'))
+    expect(screen.getByTestId('preview-beat-heavy').className).toMatch(/bg-primary/)
+  })
+
+  it('switching preview input does not dirty the form (name-based save guard unaffected)', async () => {
+    const user = await renderNewEffectInWorkspace()
+    // New editor: name is empty, save is disabled
+    expect(screen.getByTestId('editor-save')).toBeDisabled()
+    // Switch preview inputs
+    await user.click(screen.getByTestId('preview-calm'))
+    await user.click(screen.getByTestId('preview-beat-heavy'))
+    // Save still disabled — no name entered
+    expect(screen.getByTestId('editor-save')).toBeDisabled()
+  })
+
+  it('preview input state resets to groove when opening a different editor', async () => {
+    const user = await renderEffectsInWorkspace()
+    await user.click(screen.getByTestId('preview-calm'))
+    expect(screen.getByTestId('preview-calm').className).toMatch(/bg-primary/)
+    // Cancel and open e2
+    await user.click(screen.getByText('Cancel'))
+    await user.click(screen.getByTestId('edit-effect-e2'))
+    await screen.findByTestId('editor-name-input')
+    // groove should be the default active button
+    expect(screen.getByTestId('preview-groove').className).toMatch(/bg-primary/)
   })
 })
 
