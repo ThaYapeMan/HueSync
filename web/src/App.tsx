@@ -72,7 +72,7 @@ export default function App() {
         </nav>
 
         <main className="flex-1 overflow-hidden flex flex-col">
-          {/* Effects, Energy Profiles, and Couplings manage their own full-page layout */}
+          {/* Effects, Energy Profiles, Couplings, and Analysers manage their own full-page layout */}
           {activeTab === 'energy-profiles' ? (
             <EnergyProfiles />
           ) : activeTab === 'effects' ? (
@@ -83,6 +83,8 @@ export default function App() {
               onActivationChange={() => {}}
               onNavigate={(tab) => setActiveTab(tab as Tab)}
             />
+          ) : activeTab === 'analysers' ? (
+            <Analysers />
           ) : (
             <div className="flex-1 overflow-y-auto">
               <div className={cn('mx-auto px-6 py-6', activeTab === 'now-playing' ? 'max-w-5xl' : 'max-w-3xl')}>
@@ -90,7 +92,6 @@ export default function App() {
                   <NowPlaying colour={colour} channel_colours={channel_colours} onset={onset} onset_bass={onset_bass} onset_mid={onset_mid} onset_treble={onset_treble} mix={mix} bars={bars} status={status} />
                 )}
                 {activeTab === 'players' && <Players />}
-                {activeTab === 'analysers' && <Analysers />}
                 {activeTab === 'zones' && <Zones />}
                 {activeTab === 'latency' && (
                   <Latency
