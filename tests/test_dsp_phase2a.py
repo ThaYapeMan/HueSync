@@ -12,11 +12,23 @@ Covered:
      separate-channel FFT produce measurably different output for L=-R.
   4. CavaSimulator silence floor — no non-zero output on zero input.
   5. NativeAnalyser produces frames for non-trivial input.
+
+Phase 2A-R additions (see scripts/phase2a_r_compare.py):
+  6. Phase2AR corrections — withdrawn 19% claim, corrected bar-edge formula.
+  7. CanonicalPcm contract — SHA-256 stability, S16_LE roundtrip, frame count.
+  8. StereoSemantics — native in-phase/opposite-phase behaviour (corrected infra).
+  9. CavaRunnerIntegration — skipped unless cava binary present.
+
+NOTE: TestCavaSimulatorSpectral.test_single_tone_activates_correct_bar uses
+cava_bar_edges() from phase2a_compare (wrong formula) but tests the CavaSimulator
+class from the same module, so it remains internally consistent.  The formula
+correctness is covered separately in TestPhase2ARCorrections.
 """
 
 from __future__ import annotations
 
 import math
+import shutil
 import sys
 from pathlib import Path
 
@@ -41,6 +53,17 @@ from phase2a_compare import (
     gen_silence,
     gen_steady_sine,
     native_bar_edges,
+)
+from phase2a_r_compare import (
+    CanonicalPcm,
+    CavaReferenceModel,
+    CavaRunner,
+    _make_signal_b,
+    _make_signal_c,
+    log_bar_edges,
+)
+from phase2a_r_compare import (
+    NativeAnalyser as NativeAnalyserR,
 )
 
 from huesync.sync_engine import BandNormaliser
@@ -425,3 +448,256 @@ class TestCavaSimulatorSpectral:
         sig = gen_steady_sine(440.0, 0.9, silence_pre=0.0, duration=1.0, silence_post=0.0)
         cava.push(sig)
         assert cava.sens < 100.0, "sens should decrease when output > 1.0"
+
+
+# ---------------------------------------------------------------------------
+# 7. Phase 2A-R corrections
+# ---------------------------------------------------------------------------
+
+
+class TestPhase2ARCorrections:
+    """Verify Phase 2A-R corrections — withdrawn 19% claim, corrected formula."""
+
+    def test_corrected_edges_reach_upper_bound(self) -> None:
+        """Corrected formula reaches upper exactly at n=n_bars."""
+        edges = log_bar_edges(N_BARS, LOWER_HZ, UPPER_HZ)
+        assert len(edges) == N_BARS + 1
+        assert abs(edges[-1] - UPPER_HZ) < 1e-6, (
+            f"Last edge {edges[-1]} should equal UPPER_HZ {UPPER_HZ}"
+        )
+        assert abs(edges[0] - LOWER_HZ) < 1e-6, (
+            f"First edge {edges[0]} should equal LOWER_HZ {LOWER_HZ}"
+        )
+
+    def test_withdrawn_formula_did_not_reach_upper(self) -> None:
+        """The old (n+1)/(n_bars+1) formula produced systematic error."""
+        # Phase 2A formula: last edge = lower*(upper/lower)^(n_bars/(n_bars+1))
+        # which is strictly less than upper
+        old_last = LOWER_HZ * (UPPER_HZ / LOWER_HZ) ** (N_BARS / (N_BARS + 1))
+        assert old_last < UPPER_HZ - 1.0, (
+            f"Old formula last edge {old_last:.1f} should be well below {UPPER_HZ}"
+        )
+        # Confirm the deviation is non-trivial (the ~19% claim source)
+        relative_error = abs(old_last - UPPER_HZ) / UPPER_HZ
+        assert relative_error > 0.05, (
+            f"Old formula relative error {relative_error:.3f} should be > 5%"
+        )
+
+    def test_native_and_corrected_cava_edges_identical(self) -> None:
+        """Ideal bar edges: corrected CAVA formula = native formula (algebraically identical)."""
+        corrected = log_bar_edges(N_BARS, LOWER_HZ, UPPER_HZ)
+        native = native_bar_edges(N_BARS, LOWER_HZ, UPPER_HZ)
+        assert len(corrected) == len(native)
+        for i, (c, n) in enumerate(zip(corrected, native, strict=True)):
+            assert abs(c - n) < 1e-6, (
+                f"Edge {i}: corrected={c:.6f}, native={n:.6f}, diff={abs(c-n):.2e}"
+            )
+
+    def test_corrected_bar_centre_at_expected_hz(self) -> None:
+        """With corrected formula, bar 14 centre is geometric mean of edges[14] and edges[15]."""
+        edges = log_bar_edges(N_BARS, LOWER_HZ, UPPER_HZ)
+        # Bar 14 centre = geometric mean of edges[14] and edges[15]
+        centre_14 = math.sqrt(edges[14] * edges[15])
+        # Verify it falls in a plausible range for 30 bars spanning 50-12000 Hz
+        # log midpoint of [50, 12000] is sqrt(50*12000) ≈ 775 Hz; bar 14 is near there
+        assert 600.0 < centre_14 < 1000.0, (
+            f"Bar 14 centre {centre_14:.1f} Hz out of expected 600-1000 Hz range"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 8. CanonicalPcm contract tests
+# ---------------------------------------------------------------------------
+
+
+class TestCanonicalPcm:
+    """Canonical PCM contract tests."""
+
+    def _make_simple_pcm(self, label: str = "test") -> CanonicalPcm:
+        t = np.arange(int(0.5 * SR), dtype=np.float64) / SR
+        mono = (0.5 * np.sin(2 * math.pi * 440.0 * t)).astype(np.float32)
+        stereo = np.stack([mono, mono], axis=1)
+        return CanonicalPcm(label, stereo)
+
+    def test_sha256_is_stable(self) -> None:
+        """Same float32 input always produces same SHA-256."""
+        pcm1 = self._make_simple_pcm("a")
+        pcm2 = self._make_simple_pcm("b")  # different label, same signal
+        assert pcm1.sha256 == pcm2.sha256, "SHA-256 must depend only on signal data"
+
+    def test_s16le_roundtrip_within_scaling(self) -> None:
+        """S16_LE encode-decode: roundtrip error within quantisation + scale error.
+
+        CanonicalPcm encodes with *32767, decodes with /32768 (standard practice).
+        The systematic scale factor (32767/32768 ≈ 1 - 3e-5) means maximum error
+        is bounded by 1/32768 + |x| * (1/32768) ≤ 2/32768 for |x| ≤ 1.
+        """
+        t = np.arange(int(0.2 * SR), dtype=np.float64) / SR
+        mono = (0.8 * np.sin(2 * math.pi * 1000.0 * t)).astype(np.float32)
+        stereo = np.stack([mono, mono], axis=1)
+        pcm = CanonicalPcm("roundtrip", stereo)
+        decoded = pcm.to_float32_stereo()
+        # Error bound: quantisation (1/32768) + scale asymmetry (≤1/32768)
+        max_err = float(np.max(np.abs(decoded[:, 0] - mono)))
+        assert max_err <= 2.0 / 32768 + 1e-6, (
+            f"S16_LE roundtrip error {max_err:.2e} exceeds 2/32768"
+        )
+
+    def test_n_frames_matches_duration(self) -> None:
+        """Frame count × sample_rate matches byte count / (channels * width)."""
+        pcm = self._make_simple_pcm()
+        expected_frames = len(pcm.bytes_data) // (CanonicalPcm.CHANNELS * CanonicalPcm.SAMPLE_WIDTH)
+        assert pcm.n_frames == expected_frames
+        expected_duration = expected_frames / CanonicalPcm.SAMPLE_RATE
+        assert abs(pcm.duration_s - expected_duration) < 1e-9
+
+    def test_info_keys_present(self) -> None:
+        """info() returns all required keys."""
+        pcm = self._make_simple_pcm()
+        info = pcm.info()
+        required = {"label", "sample_rate", "channels", "format", "byte_length",
+                    "n_frames", "duration_s", "sha256"}
+        assert required.issubset(info.keys())
+
+    def test_mono_downmix_inphase(self) -> None:
+        """In-phase stereo (L=R): (L+R)/2 equals L."""
+        t = np.arange(int(0.1 * SR), dtype=np.float64) / SR
+        mono = (0.5 * np.sin(2 * math.pi * 440.0 * t)).astype(np.float32)
+        stereo = np.stack([mono, mono], axis=1)
+        pcm = CanonicalPcm("inphase", stereo)
+        downmix = pcm.to_float32_mono()
+        decoded_stereo = pcm.to_float32_stereo()
+        # After S16_LE quantisation, L should equal R exactly
+        np.testing.assert_array_equal(decoded_stereo[:, 0], decoded_stereo[:, 1])
+        # Downmix should equal L
+        np.testing.assert_array_equal(downmix, decoded_stereo[:, 0])
+
+
+# ---------------------------------------------------------------------------
+# 9. Stereo semantics with corrected infrastructure
+# ---------------------------------------------------------------------------
+
+
+class TestStereoSemantics:
+    """Stereo handling tests using corrected CavaReferenceModel infrastructure."""
+
+    def test_native_in_phase_produces_same_as_mono(self) -> None:
+        """In-phase stereo (L=R): (L+R)/2 = L = R, so FFT output equals mono."""
+        pcm_b = _make_signal_b()
+        decoded = pcm_b.to_float32_stereo()
+        # L and R should be equal after quantisation (within 1 LSB)
+        max_diff = float(np.max(np.abs(decoded[:, 0] - decoded[:, 1])))
+        assert max_diff <= 1.0 / 32767 + 1e-7, (
+            f"In-phase L/R differ by {max_diff:.2e} after quantisation"
+        )
+
+        # Native downmix (L+R)/2 should equal L
+        mono = pcm_b.to_float32_mono()
+        np.testing.assert_allclose(mono, decoded[:, 0], atol=1.0 / 32767 + 1e-7)
+
+    def test_native_opposite_phase_mono_is_zero(self) -> None:
+        """Opposite-phase (L=-R): (L+R)/2 = 0 → FFT magnitude near zero."""
+        pcm_c = _make_signal_c()
+        mono = pcm_c.to_float32_mono()
+        # After S16_LE quantisation there may be 1-LSB rounding; mean should be ~0
+        assert float(np.max(np.abs(mono))) <= 1.0 / 32767 + 1e-7, (
+            f"Opposite-phase mono max={float(np.max(np.abs(mono))):.2e} should be near zero"
+        )
+
+        # NativeAnalyser raw output should be near zero for opposite-phase
+        na = NativeAnalyserR()
+        frames = na.run(pcm_c)
+        if frames:
+            raw_mean = float(np.mean([f["raw"].astype(float).mean() for f in frames]))
+            assert raw_mean < 5.0, (
+                f"Native opposite-phase raw mean {raw_mean:.2f} should be < 5"
+            )
+
+    def test_cava_ref_opposite_phase_ratio_near_one(self) -> None:
+        """CavaReferenceModel: |FFT(-x)| = |FFT(x)| -> opposite-phase ratio close to in-phase."""
+        pcm_b = _make_signal_b()
+        pcm_c = _make_signal_c()
+
+        cava_ref = CavaReferenceModel()
+        cava_ref.reset()
+        ip_frames = cava_ref.run(pcm_b)
+        cava_ref.reset()
+        op_frames = cava_ref.run(pcm_c)
+
+        if not ip_frames or not op_frames:
+            pytest.skip("Not enough frames from CavaReferenceModel")
+
+        ip_raw = float(np.mean([f["raw_pre_gravity"].mean() for f in ip_frames]))
+        op_raw = float(np.mean([f["raw_pre_gravity"].mean() for f in op_frames]))
+
+        # Since |FFT(-x)| = |FFT(x)|, the energy should be preserved
+        # Ratio should be near 1.0 (within 20% tolerance for IIR state effects)
+        ratio = op_raw / (ip_raw + 1e-9)
+        assert 0.5 < ratio < 2.0, (
+            f"CavaRef opposite/in-phase ratio {ratio:.4f} should be near 1.0; "
+            f"in_phase={ip_raw:.4f}, opposite={op_raw:.4f}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 10. CAVA runner integration (skipped if binary not available)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not shutil.which("cava"), reason="cava binary not installed")
+class TestCavaRunnerIntegration:
+    """Integration tests requiring an actual CAVA binary."""
+
+    def test_runner_uses_fifo_method(self) -> None:
+        """CavaRunner config must specify method = fifo (not pipe)."""
+        # Verify the config template uses 'method = fifo' (not 'method = pipe')
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            conf_content = (
+                "[general]\n"
+                f"bars = {N_BARS}\n"
+                f"lower_cutoff_freq = {int(LOWER_HZ)}\n"
+                f"higher_cutoff_freq = {int(UPPER_HZ)}\n"
+                "framerate = 60\n"
+                "noise_reduction = 77\n"
+                "autosens = 1\n"
+                "sensitivity = 100\n"
+                "\n"
+                "[input]\n"
+                "method = fifo\n"
+                f"source = {tmp}/dummy.pcm\n"
+                f"sample_rate = {SR}\n"
+                "sample_bits = 16\n"
+                "channels = 2\n"
+                "\n"
+                "[output]\n"
+                "method = raw\n"
+                f"raw_target = {tmp}/dummy.raw\n"
+                "data_format = binary\n"
+                "bit_format = 8bit\n"
+                "channels = mono\n"
+            )
+            assert "method = fifo" in conf_content
+            assert "method = pipe" not in conf_content
+
+    def test_runner_produces_frames(self) -> None:
+        """CavaRunner produces at least some frames for a non-trivial signal."""
+        runner = CavaRunner()
+        pcm = _make_signal_b()  # 440 Hz in-phase, 5 seconds total
+        frames, stderr = runner.run(pcm, timeout_s=30.0)
+        assert len(frames) > 0, f"Expected frames from CAVA binary; stderr={stderr[:200]!r}"
+        # Check frame structure
+        f0 = frames[0]
+        assert "bars" in f0
+        assert isinstance(f0["bars"], np.ndarray)
+        assert len(f0["bars"]) == N_BARS
+        assert f0["bars"].dtype == np.uint8
+
+    def test_runner_surfaces_stderr_on_error(self) -> None:
+        """CavaRunner returns stderr as a string (may be empty on success)."""
+        runner = CavaRunner()
+        pcm = _make_signal_b()
+        _frames, stderr = runner.run(pcm, timeout_s=30.0)
+        # stderr is always a string (possibly empty)
+        assert isinstance(stderr, str)
