@@ -275,6 +275,10 @@ class PcmStft:
             self._buf = self._buf[self._hop:]
         return frames
 
+    def reset(self) -> None:
+        """Discard accumulated samples; clear STFT history for epoch transitions."""
+        self._buf = np.zeros(0, dtype=np.float32)
+
 
 # ---------------------------------------------------------------------------
 # PcmHpss — Harmonic-Percussive Source Separation

@@ -622,8 +622,8 @@ def test_airplay_activation_skips_squeezelite(tmp_path: Path) -> None:
     with (
         patch(f"{_pm}.list_entertainment_areas", new=AsyncMock(return_value=[fake_area])),
         patch(f"{_pm}.get_channel_infos", new=AsyncMock(return_value=[])),
-        patch(f"{_pm}.AirPlayPipeSource") as mock_src_cls,
-        patch(f"{_pm}.PcmAudioPipeline") as mock_analyser_cls,
+        patch(f"{_pm}.AirPlayPipeStereoSource") as mock_src_cls,
+        patch(f"{_pm}.PcmAudioPipelineV2") as mock_analyser_cls,
         patch(f"{_pm}.SyncEngine") as mock_engine_cls,
         patch(f"{_pm}.HueDriver") as mock_driver_cls,
     ):
@@ -648,7 +648,7 @@ def test_airplay_activation_skips_squeezelite(tmp_path: Path) -> None:
         "_activate_airplay must not spawn squeezelite"
     )
     assert manager._active.shm_source is mock_src, (
-        "_activate_airplay must assign AirPlayPipeSource to session.shm_source"
+        "_activate_airplay must assign AirPlayPipeStereoSource to session.shm_source"
     )
     mock_src.open.assert_called_once()
 
@@ -668,8 +668,8 @@ def test_airplay_activation_player_type_recorded(tmp_path: Path) -> None:
     with (
         patch(f"{_pm}.list_entertainment_areas", new=AsyncMock(return_value=[fake_area])),
         patch(f"{_pm}.get_channel_infos", new=AsyncMock(return_value=[])),
-        patch(f"{_pm}.AirPlayPipeSource", return_value=MagicMock()),
-        patch(f"{_pm}.PcmAudioPipeline", return_value=MagicMock()),
+        patch(f"{_pm}.AirPlayPipeStereoSource", return_value=MagicMock()),
+        patch(f"{_pm}.PcmAudioPipelineV2", return_value=MagicMock()),
         patch(f"{_pm}.SyncEngine") as mock_engine_cls,
         patch(f"{_pm}.HueDriver") as mock_driver_cls,
     ):
@@ -704,8 +704,8 @@ def test_airplay_activation_airplay_receiving_property(tmp_path: Path) -> None:
     with (
         patch(f"{_pm}.list_entertainment_areas", new=AsyncMock(return_value=[fake_area])),
         patch(f"{_pm}.get_channel_infos", new=AsyncMock(return_value=[])),
-        patch(f"{_pm}.AirPlayPipeSource", return_value=mock_src),
-        patch(f"{_pm}.PcmAudioPipeline", return_value=MagicMock()),
+        patch(f"{_pm}.AirPlayPipeStereoSource", return_value=mock_src),
+        patch(f"{_pm}.PcmAudioPipelineV2", return_value=MagicMock()),
         patch(f"{_pm}.SyncEngine") as mock_engine_cls,
         patch(f"{_pm}.HueDriver") as mock_driver_cls,
     ):

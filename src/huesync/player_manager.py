@@ -25,9 +25,9 @@ from .lms_discovery import discover_lms
 from .lms_follower import LmsFollower
 from .lms_status import query_lms_status, query_lms_sync_peers, unsync_player
 from .models import BridgeConfig, Controller, Coupling, Profile, VirtualPlayerType
-from .pcm_source import AirPlayPipeSource, PcmSource, SqueezeliteShmSource
+from .pcm_source import AirPlayPipeStereoSource, PcmSource, SqueezeliteShmSource
 from .storage import Storage
-from .sync_engine import PcmAudioPipeline, SyncEngine
+from .sync_engine import PcmAudioPipeline, PcmAudioPipelineV2, SyncEngine
 from .types import Colour, LatencyProbe
 from .util import generate_locally_administered_mac
 
@@ -186,7 +186,7 @@ class ActiveSession:
         self.task: asyncio.Task | None = None
         self.probe: LatencyProbe = NoLatencyProbe()
         self.poller_task: asyncio.Task | None = None
-        self.shm_source: PcmSource | None = None
+        self.shm_source: PcmSource | AirPlayPipeStereoSource | None = None
         self.follower: LmsFollower | None = None
         self.follower_task: asyncio.Task | None = None
         self.unsync_task: asyncio.Task | None = None
@@ -642,20 +642,22 @@ class PlayerManager:
         output_config: HueOutputConfig,
         channels: list[ChannelInfo],
     ) -> None:
-        """AirPlay path: pipe source + PcmAudioPipeline + Hue.
+        """AirPlay path: stereo pipe source + AudioCanonicalizer + PcmAudioPipelineV2 + Hue.
 
-        No squeezelite, no cava, no FIFO, no LMS follower.  PcmAudioPipeline
-        reads shairport-sync's named pipe and produces full AudioFeatures
-        (bars + onset) so all effects including spectrum_rgb and mono_pulse
-        work without modification.
+        Phase 3 native AirPlay path.  Uses the stereo decoded-source adapter
+        (AirPlayPipeStereoSource) and the canonical analysis pipeline
+        (PcmAudioPipelineV2) which performs phase-safe stereo STFT analysis.
+
+        No squeezelite, no cava, no FIFO, no LMS follower.  Exactly one ingress
+        reader owns the production AirPlay FIFO — AirPlayPipeStereoSource.
         """
         self._configure_shairport_name(profile.display_name or profile.player_name)
 
-        pipe_source = AirPlayPipeSource()
+        pipe_source = AirPlayPipeStereoSource()
         pipe_source.open()
         session.shm_source = pipe_source
 
-        pcm_analyser = PcmAudioPipeline(
+        pcm_analyser = PcmAudioPipelineV2(
             source=pipe_source,
             bars=profile.bars,
             lower_cutoff_freq=profile.lower_cutoff_freq,

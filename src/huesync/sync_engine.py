@@ -27,6 +27,13 @@ from collections import deque
 
 import numpy as np
 
+from .canonicalizer import (
+    AudioCanonicalizer,
+    CanonicalData,
+    EndOfStream,
+    StreamInvalidated,
+    TemporarilyNoData,
+)
 from .latency import NoLatencyProbe
 from .models import Profile
 from .pcm_source import WINDOW_SIZE, PcmHpss, PcmSource, PcmStft
@@ -500,6 +507,14 @@ class StftOnsetPipeline:
         """Process PCM samples; return *(onset, strength)* per STFT frame."""
         return [self._onset.process(frame.tolist()) for frame in self._stft.push(samples)]
 
+    def push_mag(self, mag_frames: list[np.ndarray]) -> list[tuple[bool, float]]:
+        """Process pre-computed magnitude frames; return *(onset, strength)* per frame.
+
+        Used by PcmAudioPipelineV2 which computes a stereo-combined magnitude
+        upstream and bypasses this pipeline's internal STFT.
+        """
+        return [self._onset.process(frame.tolist()) for frame in mag_frames]
+
 
 # ---------------------------------------------------------------------------
 # SuperfluxDetector — Böck & Widmer (2013) SuperFlux on STFT magnitude frames
@@ -606,6 +621,10 @@ class SuperfluxStftPipeline:
         """Process PCM samples; return *(onset, strength)* per STFT frame."""
         return [self._detector.process(frame) for frame in self._stft.push(samples)]
 
+    def push_mag(self, mag_frames: list[np.ndarray]) -> list[tuple[bool, float]]:
+        """Process pre-computed magnitude frames; return *(onset, strength)* per frame."""
+        return [self._detector.process(frame) for frame in mag_frames]
+
 
 # ---------------------------------------------------------------------------
 # MultibandOnsetDetector — per-band Dixon onset on STFT magnitude frames
@@ -681,6 +700,308 @@ class MultibandStftPipeline:
     ) -> list[tuple[tuple[bool, float], tuple[bool, float], tuple[bool, float]]]:
         """Process PCM samples; return per-frame (bass, mid, treble) onset results."""
         return [self._detector.process(frame) for frame in self._stft.push(samples)]
+
+    def push_mag(
+        self, mag_frames: list[np.ndarray]
+    ) -> list[tuple[tuple[bool, float], tuple[bool, float], tuple[bool, float]]]:
+        """Process pre-computed magnitude frames; return per-frame onset results."""
+        return [self._detector.process(frame) for frame in mag_frames]
+
+
+# ---------------------------------------------------------------------------
+# StereoMagStft — phase-safe stereo STFT magnitude combination
+# ---------------------------------------------------------------------------
+
+
+class StereoMagStft:
+    """Runs two PcmStft instances (one per channel) and combines magnitudes.
+
+    Computes the RMS-like stereo spectral magnitude defined by v1.2 §6:
+
+        M[k] = sqrt((|FFT(L)[k]|² + |FFT(R)[k]|²) / 2)
+
+    This is phase-safe: opposite-phase stereo (L=x, R=-x) produces the same
+    magnitude as in-phase stereo (L=x, R=x).  A mono downmix (L+R)/2 would
+    cancel to silence for opposite-phase signals — this does not.
+
+    Does NOT perform any downmix before or after the FFT.
+    """
+
+    def __init__(self, sample_rate: int) -> None:
+        self._stft_l = PcmStft(sample_rate)
+        self._stft_r = PcmStft(sample_rate)
+
+    @property
+    def hop(self) -> int:
+        return self._stft_l.hop
+
+    @property
+    def n_bins(self) -> int:
+        return self._stft_l.n_bins
+
+    def push(self, stereo: np.ndarray) -> list[np.ndarray]:
+        """Process stereo PCM; return combined RMS magnitude frames.
+
+        stereo: shape (n_frames, 2), dtype float32 — columns are L, R.
+        Returns a list of magnitude arrays, each shape (n_bins,), dtype float32.
+        Both channels accumulate independently; frame counts always match.
+        """
+        l_frames = self._stft_l.push(stereo[:, 0])
+        r_frames = self._stft_r.push(stereo[:, 1])
+        return [
+            np.sqrt((lf**2 + rf**2) * 0.5)
+            for lf, rf in zip(l_frames, r_frames, strict=True)
+        ]
+
+    def reset(self) -> None:
+        """Discard STFT history for both channels (epoch transition)."""
+        self._stft_l.reset()
+        self._stft_r.reset()
+
+
+# ---------------------------------------------------------------------------
+# PcmAudioPipelineV2 — canonical stereo AudioPipeline for native AirPlay
+# ---------------------------------------------------------------------------
+
+
+class PcmAudioPipelineV2:
+    """AudioPipeline that analyses canonical 48 kHz stereo PCM from a decoded-source adapter.
+
+    Phase 3 native AirPlay analysis path.  Replaces the legacy mono-downmix
+    AirPlayPipeSource + PcmAudioPipeline path for native AirPlay sessions.
+
+    Signal path:
+        source.read()            ← SourceReadResult (stereo S16LE decoded to float32)
+        AudioCanonicalizer        ← resamples to 48 kHz, stereo, epoch tracking
+        StereoMagStft             ← independent L/R STFT, RMS-combined magnitude
+        onset detectors           ← operate on combined magnitude (no downmix)
+        BandNormaliser            ← EMA AGC; dt = hop/48000 (sample-derived)
+        AudioFeatures             ← compatible with existing Effects
+
+    Phase-safety guarantee:
+        Opposite-phase stereo (L=x, R=-x) produces the same spectral magnitude
+        as in-phase stereo (L=x, R=x).  The structural (L+R)/2 cancellation bug
+        present in the legacy mono path cannot occur here.
+
+    Lifecycle:
+        - TEMPORARILY_NO_DATA: no reset, no silence insertion, no DSP advance
+        - StreamInvalidated: DSP state reset before next epoch begins
+        - EndOfStream: DSP reset; latest() returns None until next epoch
+        - Epoch transition detected via epoch_id change: DSP reset exactly once
+    """
+
+    _POLL_S: float = 0.005
+    _SAMPLE_RATE: int = AudioCanonicalizer.TARGET_RATE  # 48000
+
+    def __init__(
+        self,
+        source: object,  # duck-typed: requires .read() -> SourceReadResult, .running: bool
+        bars: int,
+        lower_cutoff_freq: int,
+        higher_cutoff_freq: int,
+        onset_method: str,
+        onset_delta: float,
+        onset_alpha: float,
+        superflux_mu: int,
+        superflux_lag: int,
+        bass_hz: int,
+        mid_hz: int,
+        exertion_clip: float = BandNormaliser.DEFAULT_EXERTION_CLIP,
+    ) -> None:
+        self._source = source
+        self._n_bars = bars
+        self._lower_hz = float(lower_cutoff_freq)
+        self._upper_hz = float(higher_cutoff_freq)
+        self._onset_method = onset_method
+        self._onset_delta = onset_delta
+        self._onset_alpha = onset_alpha
+        self._superflux_mu = superflux_mu
+        self._superflux_lag = superflux_lag
+        self._bass_hz = bass_hz
+        self._mid_hz = mid_hz
+        self._exertion_clip = exertion_clip
+        self._normaliser = BandNormaliser(exertion_clip=exertion_clip)
+        # dt = hop/sample_rate, sample-derived.  Constant for canonical 48 kHz.
+        self._bar_stft = StereoMagStft(self._SAMPLE_RATE)
+        self._normalise_dt: float = self._bar_stft.hop / self._SAMPLE_RATE
+        self._onset_pipeline: (
+            StftOnsetPipeline | MultibandStftPipeline | SuperfluxStftPipeline
+        ) = self._build_onset_pipeline()
+        self._canonicalizer = AudioCanonicalizer()
+        self._current_epoch_id: str | None = None
+        self._latest: AudioFeatures | None = None
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    @property
+    def normaliser(self) -> BandNormaliser:
+        return self._normaliser
+
+    def _build_onset_pipeline(
+        self,
+    ) -> StftOnsetPipeline | MultibandStftPipeline | SuperfluxStftPipeline:
+        sr = self._SAMPLE_RATE
+        if self._onset_method == "multiband":
+            return MultibandStftPipeline(
+                sr,
+                bass_hz=self._bass_hz,
+                mid_hz=self._mid_hz,
+                delta=self._onset_delta,
+                alpha=self._onset_alpha,
+            )
+        if self._onset_method == "superflux":
+            return SuperfluxStftPipeline(
+                sr,
+                mu=self._superflux_mu,
+                lag=self._superflux_lag,
+                delta=self._onset_delta,
+                alpha=self._onset_alpha,
+            )
+        return StftOnsetPipeline(sr, delta=self._onset_delta, alpha=self._onset_alpha)
+
+    def _reset_dsp(self) -> None:
+        """Reset all DSP state: STFT history, BandNormaliser EMA, onset history."""
+        self._bar_stft.reset()
+        self._normaliser = BandNormaliser(exertion_clip=self._exertion_clip)
+        self._onset_pipeline = self._build_onset_pipeline()
+        self._current_epoch_id = None
+
+    def _mag_to_bar_bytes(self, mag: np.ndarray) -> bytes:
+        """Average combined STFT magnitude bins into N log-spaced bars → bytes 0–255."""
+        sr = self._SAMPLE_RATE
+        n_bins = len(mag)
+        log_lo = math.log10(max(self._lower_hz, 1.0))
+        log_hi = math.log10(max(self._upper_hz, self._lower_hz + 1.0))
+        result = bytearray(self._n_bars)
+        for i in range(self._n_bars):
+            f_lo = 10.0 ** (log_lo + i / self._n_bars * (log_hi - log_lo))
+            f_hi = 10.0 ** (log_lo + (i + 1) / self._n_bars * (log_hi - log_lo))
+            bin_lo = max(0, round(f_lo * WINDOW_SIZE / sr))
+            bin_hi = min(n_bins, max(bin_lo + 1, round(f_hi * WINDOW_SIZE / sr)))
+            val = float(np.mean(mag[bin_lo:bin_hi])) if bin_hi > bin_lo else 0.0
+            result[i] = min(255, int(val))
+        return bytes(result)
+
+    def _process_canonical_frame(self, frame: object) -> None:
+        """Analyse one AnalysisPcmFrame and update _latest."""
+        # frame is AnalysisPcmFrame — accessed by attribute, not isinstance (no import loop).
+        epoch_id: str = frame.epoch_id  # type: ignore[union-attr]
+        samples: np.ndarray = frame.samples  # type: ignore[union-attr]
+
+        # Epoch transition: reset DSP exactly once before processing new epoch data.
+        if epoch_id != self._current_epoch_id:
+            self._reset_dsp()
+            self._current_epoch_id = epoch_id
+
+        # Stereo STFT → RMS-combined magnitude frames.
+        mag_frames = self._bar_stft.push(samples)
+
+        # Onset analysis on the same combined magnitude (no second STFT).
+        if self._onset_method == "multiband":
+            onset_frames = self._onset_pipeline.push_mag(mag_frames)  # type: ignore[union-attr]
+        else:
+            onset_frames = self._onset_pipeline.push_mag(mag_frames)  # type: ignore[union-attr]
+
+        for mag_frame, onset_result in zip(mag_frames, onset_frames, strict=True):
+            bar_bytes = self._mag_to_bar_bytes(mag_frame)
+            normed = self._normaliser.normalise(bar_bytes, self._normalise_dt)
+            bars = [v / 255.0 for v in normed]
+            total = sum(bars)
+            n = len(bars)
+            centroid = (
+                sum(idx * v for idx, v in enumerate(bars)) / total / n
+                if total > 1e-9
+                else 0.0
+            )
+
+            onset = False
+            onset_strength = 0.0
+            onset_bass = onset_mid = onset_treble = False
+            onset_bass_str = onset_mid_str = onset_treble_str = 0.0
+
+            if self._onset_method == "multiband":
+                (b_on, b_str), (m_on, m_str), (t_on, t_str) = onset_result
+                onset_bass, onset_bass_str = b_on, b_str
+                onset_mid, onset_mid_str = m_on, m_str
+                onset_treble, onset_treble_str = t_on, t_str
+                onset = b_on or m_on or t_on
+                onset_strength = max(b_str, m_str, t_str)
+            else:
+                onset, onset_strength = onset_result
+
+            if total < 1e-9:
+                onset = onset_bass = onset_mid = onset_treble = False
+                onset_strength = onset_bass_str = onset_mid_str = onset_treble_str = 0.0
+
+            full = _slice_avg(bars, 0.0, 1.0)
+            with self._lock:
+                self._latest = AudioFeatures(
+                    bars=bars,
+                    bass=_slice_avg(bars, 0.0, 0.20),
+                    mid=_slice_avg(bars, 0.0, 0.55),
+                    full=full,
+                    centroid=centroid,
+                    onset=onset,
+                    onset_strength=onset_strength,
+                    onset_bass=onset_bass,
+                    onset_mid=onset_mid,
+                    onset_treble=onset_treble,
+                    onset_bass_strength=onset_bass_str,
+                    onset_mid_strength=onset_mid_str,
+                    onset_treble_strength=onset_treble_str,
+                    # AirPlay native does not provide sustained_energy / HPSS in Phase 3.
+                    # Matches the existing AirPlay native path: sustained_energy=None,
+                    # hpss_active=False.  LayerMixer fallback (sustained_energy is None
+                    # → use full) remains active.
+                    sustained_energy=None,
+                    hpss_active=False,
+                    relative_exertion=full,
+                )
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            source_result = self._source.read()  # type: ignore[union-attr]
+            canonical_results = self._canonicalizer.push(source_result)
+
+            if not canonical_results:
+                # soxr accumulated input but produced no output yet; loop immediately.
+                continue
+
+            for cresult in canonical_results:
+                if isinstance(cresult, CanonicalData):
+                    self._process_canonical_frame(cresult.frame)
+                elif isinstance(cresult, TemporarilyNoData):
+                    # No data from pipe (EAGAIN).  Do not reset DSP or insert silence.
+                    # If source is not receiving audio, clear stale features.
+                    if not self._source.running:  # type: ignore[union-attr]
+                        with self._lock:
+                            self._latest = None
+                    self._stop.wait(self._POLL_S)
+                elif isinstance(cresult, StreamInvalidated):
+                    # Continuity broken: discard DSP history before next data.
+                    self._reset_dsp()
+                elif isinstance(cresult, EndOfStream):
+                    # iOS disconnected from shairport-sync.
+                    self._reset_dsp()
+                    with self._lock:
+                        self._latest = None
+                    # Drain the canonicalizer and allow reconnect.
+                    self._canonicalizer.reset()
+
+    def start(self) -> None:
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=2)
+
+    def latest(self) -> AudioFeatures | None:
+        with self._lock:
+            return self._latest
 
 
 # ---------------------------------------------------------------------------
