@@ -55,12 +55,17 @@ from phase2a_compare import (
     native_bar_edges,
 )
 from phase2a_r_compare import (
+    CAVA_BYTES_PER_CHUNK,
+    CAVA_BYTES_PER_FRAME,
+    CAVA_CHUNK_FRAMES,
+    CAVA_INPHASE_MIN_MEAN,
     CanonicalPcm,
     CavaReferenceModel,
     CavaRunner,
     _make_signal_b,
     _make_signal_c,
     log_bar_edges,
+    run_stereo_comparison,
 )
 from phase2a_r_compare import (
     NativeAnalyser as NativeAnalyserR,
@@ -640,7 +645,113 @@ class TestStereoSemantics:
 
 
 # ---------------------------------------------------------------------------
-# 10. CAVA runner integration (skipped if binary not available)
+# 10. CavaRunner harness correctness — no CAVA binary required
+# ---------------------------------------------------------------------------
+
+
+class TestCavaRunnerHarness:
+    """PCM pacing arithmetic and INVALID-result validation — no binary needed."""
+
+    def test_chunk_size_constants(self) -> None:
+        """CAVA_CHUNK_FRAMES × CAVA_BYTES_PER_FRAME == CAVA_BYTES_PER_CHUNK."""
+        assert CAVA_CHUNK_FRAMES == 4410        # 100 ms at 44100 Hz
+        assert CAVA_BYTES_PER_FRAME == 4         # stereo S16_LE
+        assert CAVA_BYTES_PER_CHUNK == 17640     # 4410 × 4
+        assert CAVA_CHUNK_FRAMES * CAVA_BYTES_PER_FRAME == CAVA_BYTES_PER_CHUNK
+        assert 0.0 < CAVA_INPHASE_MIN_MEAN < 10.0  # threshold is positive and sane
+
+    def test_pacing_target_no_drift(self) -> None:
+        """Absolute-deadline pacing: frames_written / SR accumulates no drift."""
+        from phase2a_r_compare import SR as _SR
+
+        frames_written = 0
+        total_frames = _SR * 5  # 5-second signal
+        targets: list[float] = []
+        while frames_written < total_frames:
+            chunk_frames = min(CAVA_CHUNK_FRAMES, total_frames - frames_written)
+            frames_written += chunk_frames
+            targets.append(frames_written / _SR)
+
+        assert abs(targets[-1] - 5.0) < 1e-9, f"last target {targets[-1]!r} != 5.0"
+        for i in range(1, len(targets)):
+            assert targets[i] > targets[i - 1], "targets must be strictly monotone"
+
+    def test_partial_write_loop_delivers_all_bytes(self) -> None:
+        """Inner partial-write loop delivers complete data even with tiny I/O."""
+        data = bytes(range(256)) * 70  # 17920 bytes
+        delivered = bytearray()
+        remaining = bytearray(data)
+        while remaining:
+            n = min(37, len(remaining))  # simulate 37-byte partial writes
+            delivered.extend(remaining[:n])
+            del remaining[:n]
+        assert bytes(delivered) == data
+        assert len(delivered) == len(data)
+
+    def test_zero_inphase_marked_invalid(self) -> None:
+        """run_stereo_comparison marks INVALID when cava_binary in-phase is all-zero."""
+
+        class _ZeroRunner:
+            def run(self, pcm, timeout_s: float = 60.0):
+                frames = [
+                    {"bars": np.zeros(N_BARS, dtype=np.uint8), "t_wall": i * 0.016}
+                    for i in range(100)
+                ]
+                return frames, ""
+
+        result = run_stereo_comparison(
+            _make_signal_b(),
+            _make_signal_c(),
+            "cava_binary",
+            cava_runner=_ZeroRunner(),
+        )
+        assert result["valid"] is False, "all-zero in-phase must be INVALID"
+        assert result["ratio_raw"] is None, "INVALID result must not carry a ratio"
+        assert "in-phase" in result["invalid_reason"]
+
+    def test_nonzero_inphase_marked_valid(self) -> None:
+        """run_stereo_comparison marks valid when in-phase has non-zero output."""
+
+        class _NonZeroRunner:
+            def run(self, pcm, timeout_s: float = 60.0):
+                frames = [
+                    {"bars": np.full(N_BARS, 10, dtype=np.uint8), "t_wall": i * 0.016}
+                    for i in range(100)
+                ]
+                return frames, ""
+
+        result = run_stereo_comparison(
+            _make_signal_b(),
+            _make_signal_c(),
+            "cava_binary",
+            cava_runner=_NonZeroRunner(),
+        )
+        assert result["valid"] is True
+        assert result["ratio_raw"] is not None
+
+    def test_native_backend_always_valid(self) -> None:
+        """native and cava_ref backends always return valid=True."""
+        result_native = run_stereo_comparison(
+            _make_signal_b(),
+            _make_signal_c(),
+            "native",
+            native_analyser=NativeAnalyserR(),
+        )
+        assert result_native["valid"] is True
+        assert result_native["ratio_raw"] is not None
+
+        result_ref = run_stereo_comparison(
+            _make_signal_b(),
+            _make_signal_c(),
+            "cava_ref",
+            cava_ref=CavaReferenceModel(),
+        )
+        assert result_ref["valid"] is True
+        assert result_ref["ratio_raw"] is not None
+
+
+# ---------------------------------------------------------------------------
+# 11. CAVA runner integration (skipped if binary not available)
 # ---------------------------------------------------------------------------
 
 

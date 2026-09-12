@@ -57,6 +57,12 @@ CAVA_FRAMERATE = 60
 CAVA_NOISE_REDUCTION = 77  # integer percent, per config.c default
 NATIVE_HOP_DT = round(SR * 0.010) / SR  # ≈ 0.010 s
 
+# CavaRunner PCM pacing constants (100 ms chunks, absolute-deadline timing)
+CAVA_CHUNK_FRAMES = 4410             # 100 ms at 44100 Hz
+CAVA_BYTES_PER_FRAME = 4             # stereo S16_LE (2 channels × 2 bytes)
+CAVA_BYTES_PER_CHUNK = CAVA_CHUNK_FRAMES * CAVA_BYTES_PER_FRAME  # 17640
+CAVA_INPHASE_MIN_MEAN = 0.5          # in-phase mean below this → INVALID result
+
 # BandNormaliser production defaults
 _ATTACK_TAU = BandNormaliser.DEFAULT_ATTACK_TAU_S
 _RELEASE_TAU = BandNormaliser.DEFAULT_RELEASE_TAU_S
@@ -611,8 +617,20 @@ class CavaRunner:
     def run(self, pcm: CanonicalPcm, timeout_s: float = 60.0) -> tuple[list[dict], str]:
         """Run actual CAVA binary.  Returns (frames, stderr_text).
 
-        Raises RuntimeError if binary not found.
-        frame dict: {"bars": np.ndarray[uint8], "t_wall": float}
+        PCM is fed at realtime pace: 100 ms chunks with absolute-deadline timing
+        (target_t = frames_written / SR).  This is required because CAVA is a
+        realtime audio analyser — dumping the entire file at OS speed causes its
+        autosens/noise-reduction to miscalibrate and output all-zero bars.
+
+        Startup synchronisation: the writer waits for both FIFOs to be connected
+        (go_event) before starting the paced feed, so timing begins from the
+        moment CAVA is ready to receive audio — not from process start.
+
+        Fails loudly (returns [], reason_string) if CAVA exits early, times out,
+        or produces no output frames.
+
+        Raises RuntimeError if the binary is not found.
+        frame dict: {"bars": np.ndarray[uint8, shape=(n_bars,)], "t_wall": float}
         """
         import shutil
 
@@ -652,10 +670,11 @@ class CavaRunner:
             )
             Path(conf_path).write_text(conf)
 
-            frames: list[dict] = []
-            stderr_lines: list[str] = []
+            # go_event: set after both FIFOs are connected; writer waits for it
+            # before starting the realtime-paced feed so timing is aligned.
+            go_event = threading.Event()
 
-            # Open output FIFO in a thread to avoid blocking main thread
+            # Thread: open output FIFO (blocks until CAVA opens it for writing)
             out_fd_holder: list[int] = []
 
             def open_out_fifo() -> None:
@@ -672,84 +691,132 @@ class CavaRunner:
                 stderr=subprocess.PIPE,
             )
 
-            # Write PCM to input FIFO in a separate thread
+            # Thread: drain stderr continuously so the pipe buffer never fills
+            stderr_buf: list[str] = []
+
+            def read_stderr() -> None:
+                assert proc.stderr is not None
+                for line in proc.stderr:
+                    stderr_buf.append(line.decode(errors="replace"))
+
+            stderr_reader = threading.Thread(target=read_stderr, daemon=True)
+            stderr_reader.start()
+
             raw_pcm = pcm.bytes_data
 
-            def write_pcm() -> None:
+            def write_pcm_paced() -> None:
+                """Feed PCM at realtime pace: 100 ms chunks, absolute deadlines."""
                 try:
+                    # Blocks until CAVA opens the input FIFO for reading
                     fd = os.open(in_fifo, os.O_WRONLY)
+                except OSError:
+                    return
+                # Wait for output FIFO to also connect before starting timing
+                go_event.wait(timeout=15.0)
+                if not go_event.is_set():
                     try:
-                        pos = 0
-                        while pos < len(raw_pcm):
-                            n = os.write(fd, raw_pcm[pos:])
-                            pos += n
-                    finally:
                         os.close(fd)
+                    except OSError:
+                        pass
+                    return
+                try:
+                    total_frames = len(raw_pcm) // CAVA_BYTES_PER_FRAME
+                    frames_written = 0
+                    t_start = time.monotonic()
+                    while frames_written < total_frames:
+                        chunk_frames = min(CAVA_CHUNK_FRAMES, total_frames - frames_written)
+                        byte_start = frames_written * CAVA_BYTES_PER_FRAME
+                        chunk_end = byte_start + chunk_frames * CAVA_BYTES_PER_FRAME
+                        chunk = raw_pcm[byte_start:chunk_end]
+                        # Partial-write safe inner loop
+                        written = 0
+                        while written < len(chunk):
+                            n = os.write(fd, chunk[written:])
+                            written += n
+                        frames_written += chunk_frames
+                        # Absolute-deadline pacing — no drift accumulation
+                        target_t = frames_written / SR
+                        sleep_t = target_t - (time.monotonic() - t_start)
+                        if sleep_t > 0:
+                            time.sleep(sleep_t)
                 except OSError:
                     pass
+                finally:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
 
-            writer = threading.Thread(target=write_pcm, daemon=True)
+            writer = threading.Thread(target=write_pcm_paced, daemon=True)
             writer.start()
 
-            # Wait for output FIFO to open (or timeout)
+            # Wait for CAVA to connect to output FIFO (confirms it is running)
             out_opener.join(timeout=10.0)
             if not out_fd_holder:
+                go_event.set()  # unblock writer so it can clean up
                 proc.terminate()
                 proc.wait()
                 writer.join(timeout=2.0)
+                stderr_reader.join(timeout=1.0)
                 return [], "Timed out waiting for CAVA to open output FIFO"
 
             out_fd = out_fd_holder[0]
+            go_event.set()  # release writer: realtime-paced feed begins now
+
+            frames: list[dict] = []
             buf = b""
             t_start = time.monotonic()
+
+            def _parse_buf(t_ref: float) -> None:
+                nonlocal buf
+                while len(buf) >= self._n_bars:
+                    fb = buf[: self._n_bars]
+                    buf = buf[self._n_bars :]
+                    arr = np.frombuffer(fb, dtype=np.uint8).copy()
+                    frames.append({"bars": arr, "t_wall": time.monotonic() - t_ref})
 
             try:
                 while True:
                     elapsed = time.monotonic() - t_start
                     if elapsed > timeout_s:
                         break
-                    remaining = timeout_s - elapsed
-                    ready, _, _ = select.select([out_fd], [], [], min(remaining, 0.1))
+
+                    ready, _, _ = select.select([out_fd], [], [], min(timeout_s - elapsed, 0.1))
                     if ready:
                         try:
-                            chunk = os.read(out_fd, 4096)
-                            if chunk:
-                                buf += chunk
-                                while len(buf) >= self._n_bars:
-                                    frame_bytes = buf[: self._n_bars]
-                                    buf = buf[self._n_bars :]
-                                    arr = np.frombuffer(frame_bytes, dtype=np.uint8).copy()
-                                    frames.append(
-                                        {
-                                            "bars": arr,
-                                            "t_wall": time.monotonic() - t_start,
-                                        }
-                                    )
+                            data = os.read(out_fd, 4096)
+                            if data:
+                                buf += data
+                                _parse_buf(t_start)
                         except BlockingIOError:
                             pass
-                    # Check if writer is done and CAVA has had time to flush
+
+                    # CAVA exited early — surface this
+                    if proc.poll() is not None:
+                        rc = proc.returncode
+                        if rc != 0:
+                            stderr_reader.join(timeout=0.5)
+                            err = "".join(stderr_buf)
+                            print(f"  [WARN] CAVA exited with code {rc}: {err[:200]!r}")
+                        break
+
+                    # Writer finished and CAVA has had at least 1 s to flush
                     if not writer.is_alive() and elapsed > pcm.duration_s + 1.0:
-                        # Give CAVA a short extra window to flush remaining frames
-                        extra_deadline = time.monotonic() + 0.5
-                        while time.monotonic() < extra_deadline:
-                            ready2, _, _ = select.select([out_fd], [], [], 0.05)
-                            if ready2:
-                                try:
-                                    chunk2 = os.read(out_fd, 4096)
-                                    if chunk2:
-                                        buf += chunk2
-                                        while len(buf) >= self._n_bars:
-                                            fb = buf[: self._n_bars]
-                                            buf = buf[self._n_bars :]
-                                            arr2 = np.frombuffer(fb, dtype=np.uint8).copy()
-                                            frames.append(
-                                                {
-                                                    "bars": arr2,
-                                                    "t_wall": time.monotonic() - t_start,
-                                                }
-                                            )
-                                except BlockingIOError:
-                                    pass
+                        break
+
+                # Drain any remaining buffered output
+                drain_deadline = time.monotonic() + 1.0
+                while time.monotonic() < drain_deadline:
+                    ready, _, _ = select.select([out_fd], [], [], 0.05)
+                    if not ready:
+                        break
+                    try:
+                        data = os.read(out_fd, 4096)
+                        if not data:
+                            break
+                        buf += data
+                        _parse_buf(t_start)
+                    except BlockingIOError:
                         break
             finally:
                 os.close(out_fd)
@@ -757,16 +824,9 @@ class CavaRunner:
             proc.terminate()
             proc.wait()
             writer.join(timeout=2.0)
+            stderr_reader.join(timeout=1.0)
 
-            # Collect stderr
-            if proc.stderr:
-                try:
-                    stderr_text = proc.stderr.read().decode(errors="replace")
-                except OSError:
-                    stderr_text = ""
-                stderr_lines.append(stderr_text)
-
-        return frames, "".join(stderr_lines)
+        return frames, "".join(stderr_buf)
 
 
 # ---------------------------------------------------------------------------
@@ -833,14 +893,28 @@ def run_stereo_comparison(
     else:
         raise ValueError(f"Unknown backend: {backend!r}")
 
+    # Validate (cava_binary only): in-phase control must be non-zero.
+    # All-zero in-phase bars mean CAVA did not process audio (e.g. pacing bug).
+    # Do not report a ratio when both numerator and denominator are zero.
+    valid = True
+    invalid_reason = ""
+    if backend == "cava_binary" and ip_raw < CAVA_INPHASE_MIN_MEAN:
+        valid = False
+        invalid_reason = (
+            f"in-phase mean {ip_raw:.4f} < threshold {CAVA_INPHASE_MIN_MEAN}; "
+            f"CAVA received audio but output all-zero bars — check PCM pacing"
+        )
+
     return {
         "backend": backend,
         "in_phase_mean_raw": ip_raw,
         "opp_phase_mean_raw": op_raw,
-        "ratio_raw": op_raw / (ip_raw + 1e-9),
+        "ratio_raw": op_raw / (ip_raw + 1e-9) if valid else None,
         "in_phase_mean_normed": ip_normed,
         "opp_phase_mean_normed": op_normed,
-        "ratio_normed": op_normed / (ip_normed + 1e-9),
+        "ratio_normed": op_normed / (ip_normed + 1e-9) if valid else None,
+        "valid": valid,
+        "invalid_reason": invalid_reason,
     }
 
 
@@ -1161,26 +1235,81 @@ def main() -> None:
         raw_key="raw_pre_gravity", normed_key="bars", time_key="t_sample_start"
     )
 
-    # --- Optional: real CAVA binary ---
+    # --- Optional: real CAVA binary (signals B, C, D, E) ---
     cava_binary_stereo: dict | None = None
     if args.cava:
-        print("\n=== Real CAVA binary run ===")
+        print("\n=== Real CAVA binary run (B, C, D, E) ===")
         runner = CavaRunner(cava_binary=args.cava_binary)
+
+        def _cava_stats(sig_frames: list[dict]) -> dict:
+            if not sig_frames:
+                return {"frames": 0, "nonzero_frames": 0, "max_bar": 0,
+                        "mean": 0.0, "dominant_bar": -1}
+            stk = np.stack([f["bars"].astype(float) for f in sig_frames])
+            return {
+                "frames": len(sig_frames),
+                "nonzero_frames": int(np.sum(np.any(stk > 0, axis=1))),
+                "max_bar": int(stk.max()),
+                "mean": float(stk.mean()),
+                "dominant_bar": int(np.argmax(stk.mean(axis=0))),
+            }
+
         try:
             ip_frames_bin, ip_stderr = runner.run(signals["B"])
             op_frames_bin, op_stderr = runner.run(signals["C"])
-            print(f"  B (in-phase): {len(ip_frames_bin)} frames")
-            print(f"  C (opposite): {len(op_frames_bin)} frames")
-            if ip_stderr.strip():
-                print(f"  stderr (B): {ip_stderr[:200]}")
-            cava_binary_stereo = run_stereo_comparison(
-                signals["B"], signals["C"], "cava_binary", cava_runner=runner
-            )
-            print(
-                f"  in-phase mean={cava_binary_stereo['in_phase_mean_raw']:.4f}, "
-                f"opp-phase mean={cava_binary_stereo['opp_phase_mean_raw']:.4f}, "
-                f"ratio={cava_binary_stereo['ratio_raw']:.4f}"
-            )
+            d_frames_bin, d_stderr = runner.run(signals["D"])
+            e_frames_bin, e_stderr = runner.run(signals["E"])
+
+            for sig_label, sig_frames, sig_stderr in [
+                ("B (in-phase 440 Hz) ", ip_frames_bin, ip_stderr),
+                ("C (opp-phase 440 Hz)", op_frames_bin, op_stderr),
+                ("D (80 Hz)           ", d_frames_bin, d_stderr),
+                ("E (11025 Hz)        ", e_frames_bin, e_stderr),
+            ]:
+                st = _cava_stats(sig_frames)
+                print(
+                    f"  {sig_label}: frames={st['frames']}, nonzero={st['nonzero_frames']}, "
+                    f"max={st['max_bar']}, mean={st['mean']:.4f}, dom_bar={st['dominant_bar']}"
+                )
+                if sig_stderr.strip():
+                    print(f"    stderr: {sig_stderr[:200]!r}")
+
+            # Stereo comparison computed from pre-collected frames (avoids re-running B and C)
+            ip_raw = (float(np.mean([f["bars"].astype(float).mean() for f in ip_frames_bin]))
+                      if ip_frames_bin else 0.0)
+            op_raw = (float(np.mean([f["bars"].astype(float).mean() for f in op_frames_bin]))
+                      if op_frames_bin else 0.0)
+            valid_stereo = ip_raw >= CAVA_INPHASE_MIN_MEAN
+            print()
+            if valid_stereo:
+                ratio = op_raw / ip_raw
+                cava_binary_stereo = {
+                    "backend": "cava_binary",
+                    "valid": True,
+                    "invalid_reason": "",
+                    "in_phase_mean_raw": ip_raw,
+                    "opp_phase_mean_raw": op_raw,
+                    "ratio_raw": ratio,
+                }
+                print(
+                    f"  stereo (B vs C): in-phase={ip_raw:.4f}, "
+                    f"opp-phase={op_raw:.4f}, ratio={ratio:.4f}"
+                )
+            else:
+                invalid_reason = (
+                    f"in-phase mean {ip_raw:.4f} < threshold {CAVA_INPHASE_MIN_MEAN}; "
+                    f"CAVA output all-zero bars — check PCM pacing"
+                )
+                cava_binary_stereo = {
+                    "backend": "cava_binary",
+                    "valid": False,
+                    "invalid_reason": invalid_reason,
+                    "in_phase_mean_raw": ip_raw,
+                    "opp_phase_mean_raw": op_raw,
+                    "ratio_raw": None,
+                }
+                print(f"  stereo (B vs C): INVALID — {invalid_reason}")
+
         except RuntimeError as exc:
             print(f"  CAVA binary error: {exc}")
 
