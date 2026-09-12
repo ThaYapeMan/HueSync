@@ -1010,6 +1010,14 @@ class PlayerManager:
         shairport-sync reads its name only at startup, so SIGHUP is not enough —
         a full service restart is required.  Failures are logged as warnings so
         that activation can proceed even if systemctl is unavailable (e.g. tests).
+
+        TECHNICAL DEBT: HueSync currently owns and overwrites the global
+        shairport-sync configuration file on every AirPlay activation solely to
+        update the advertised receiver name.  This couples VirtualPlayer identity
+        to a single shared shairport-sync instance in a way that does not scale.
+        Reconsidering this together with the semantics of one global
+        shairport-sync instance versus per-VirtualPlayer AirPlay receivers is
+        deferred to a later phase.
         """
         conf = (
             'general = {\n'
@@ -1019,7 +1027,7 @@ class PlayerManager:
             'pipe = {\n'
             '  name = "/run/huesync/airplay.pcm";\n'
             '  output_rate = 44100;\n'
-            '  output_format = "S16";\n'
+            '  output_format = "S16_LE";\n'
             '  output_channels = 2;\n'
             '}\n'
         )

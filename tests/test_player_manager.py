@@ -742,5 +742,5 @@ def test_configure_shairport_name_includes_explicit_format(tmp_path: Path) -> No
     text = conf_path.read_text()
     assert 'name = "My AirPlay"' in text
     assert "output_rate = 44100" in text
-    assert 'output_format = "S16"' in text
+    assert 'output_format = "S16_LE"' in text
     assert "output_channels = 2" in text

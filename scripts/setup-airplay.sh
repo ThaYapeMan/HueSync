@@ -199,7 +199,7 @@ general = {
 pipe = {
   name = "/run/huesync/airplay.pcm";
   output_rate = 44100;
-  output_format = "S16";
+  output_format = "S16_LE";
   output_channels = 2;
 }
 EOF
