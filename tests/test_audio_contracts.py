@@ -5,7 +5,6 @@ import pytest
 
 from huesync.canonicalizer import (
     AnalysisPcmFrame,
-    AudioCanonicalizer,
     CanonicalData,
     DataResult,
     DecodedSourceFrame,
@@ -617,18 +616,3 @@ def test_spectrum_layout_bass_gt_mid_rejected():
         SpectrumLayout(bass_boundary_hz=2000.0, mid_boundary_hz=250.0)
 
 
-# ---------------------------------------------------------------------------
-# AudioCanonicalizer stub
-# ---------------------------------------------------------------------------
-
-
-def test_canonicalizer_push_raises():
-    ac = AudioCanonicalizer()
-    with pytest.raises(NotImplementedError):
-        ac.push(TemporarilyNoData())
-
-
-def test_canonicalizer_reset_raises():
-    ac = AudioCanonicalizer()
-    with pytest.raises(NotImplementedError):
-        ac.reset()

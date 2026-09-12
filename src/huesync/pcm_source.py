@@ -24,6 +24,16 @@ from typing import Protocol, runtime_checkable
 import numpy as np
 import numpy.lib.stride_tricks
 
+from huesync.canonicalizer import (
+    DataResult,
+    DecodedSourceFrame,
+    EndOfStream,
+    InvalidationCause,
+    SourceReadResult,
+    StreamInvalidated,
+    TemporarilyNoData,
+)
+
 _log = logging.getLogger(__name__)
 
 
@@ -432,6 +442,274 @@ class AirPlayPipeSource:
         return (samples[0::2].astype(np.float32) + samples[1::2].astype(np.float32)) / (
             2.0 * 32768.0
         )
+
+
+# ---------------------------------------------------------------------------
+# SqueezeliteShmStereoSource — new stereo decoded-source adapter
+# ---------------------------------------------------------------------------
+
+
+class SqueezeliteShmStereoSource:
+    """Reads stereo decoded float32 PCM from squeezelite's visualiser SHM.
+
+    Alongside (not replacing) the legacy SqueezeliteShmSource.  Returns
+    SourceReadResult with a stereo DecodedSourceFrame rather than a mono array.
+
+    L and R channels are preserved separately — no (L+R)/2 downmix.
+
+    Lifecycle:
+    - n_new == 0 → TemporarilyNoData
+    - torn read (writer moved during copy) → TemporarilyNoData (discard, retry)
+    - n_new > VIS_BUF_SIZE // 2 (fell too far behind) → StreamInvalidated(UNKNOWN)
+    - valid read → DataResult(DecodedSourceFrame)
+
+    source_sample_pos is always None: the SHM buf_index is modular and cannot
+    reconstruct an absolute timeline position.
+    """
+
+    def __init__(self) -> None:
+        self._mm: mmap.mmap | None = None
+        self._prev_index: int = 0
+        self._source_id: str = ""
+
+    def open(self, mac: str, *, _path: Path | None = None) -> None:
+        """Map /dev/shm/squeezelite-{mac}.  ``_path`` overrides for tests."""
+        path = _path if _path is not None else Path(f"/dev/shm/squeezelite-{mac}")
+        fd = path.open("rb")
+        try:
+            self._mm = mmap.mmap(fd.fileno(), _MMAP_SIZE, access=mmap.ACCESS_READ)
+        finally:
+            fd.close()
+        self._source_id = f"lms:{mac}"
+        self._prev_index = self._read_header()[1]
+
+    def close(self) -> None:
+        if self._mm is not None:
+            self._mm.close()
+            self._mm = None
+
+    def _read_header(self) -> tuple[int, int, bool, int, int]:
+        if self._mm is None:
+            raise RuntimeError("call open() before reading")
+        self._mm.seek(_HDR_OFFSET)
+        raw = self._mm.read(_HDR_SIZE)
+        buf_size, buf_index, running_byte, rate, updated = struct.unpack(_HDR_FMT, raw)
+        return buf_size, buf_index, bool(running_byte), rate, updated
+
+    @property
+    def sample_rate(self) -> int:
+        return self._read_header()[3]
+
+    @property
+    def running(self) -> bool:
+        return self._read_header()[2]
+
+    @property
+    def source_id(self) -> str:
+        return self._source_id
+
+    def read(self) -> SourceReadResult:
+        """Return a SourceReadResult representing the latest available samples.
+
+        Stereo layout: samples[:, 0] = L, samples[:, 1] = R.
+        """
+        _, buf_index, _, rate, _ = self._read_header()
+
+        n_new = (buf_index - self._prev_index) % VIS_BUF_SIZE
+        self._prev_index = buf_index
+
+        if n_new == 0:
+            return TemporarilyNoData()
+
+        # Fell too far behind: continuity is no longer trustworthy.
+        # Cannot prove an exact overrun, so known_lost_samples stays None.
+        if n_new > VIS_BUF_SIZE // 2:
+            _log.warning(
+                "SHM stereo source fell behind: %d new samples (buffer %d); "
+                "epoch invalidated.",
+                n_new,
+                VIS_BUF_SIZE,
+            )
+            return StreamInvalidated(cause=InvalidationCause.UNKNOWN, known_lost_samples=None)
+
+        # Round down to complete stereo frames (2 scalar s16 samples per frame).
+        n_new -= n_new % 2
+        if n_new == 0:
+            return TemporarilyNoData()
+
+        start = (buf_index - n_new) % VIS_BUF_SIZE
+
+        assert self._mm is not None
+        if start + n_new <= VIS_BUF_SIZE:
+            self._mm.seek(_BUF_OFFSET + start * 2)
+            raw = self._mm.read(n_new * 2)
+        else:
+            tail = VIS_BUF_SIZE - start
+            self._mm.seek(_BUF_OFFSET + start * 2)
+            raw_tail = self._mm.read(tail * 2)
+            self._mm.seek(_BUF_OFFSET)
+            raw_head = self._mm.read((n_new - tail) * 2)
+            raw = raw_tail + raw_head
+
+        # Seqlock-style consistency check: if the writer moved during our copy,
+        # discard this block.  This is a transient race, not a proven continuity
+        # break, so TemporarilyNoData is the correct result.
+        _, buf_index_after, _, _, _ = self._read_header()
+        if buf_index_after != buf_index:
+            _log.debug(
+                "SHM stereo source: torn read (buf_index %d → %d), discarding.",
+                buf_index,
+                buf_index_after,
+            )
+            return TemporarilyNoData()
+
+        s16 = np.frombuffer(raw, dtype=np.int16)
+        # Interleaved stereo s16: even indices = L, odd = R.
+        # Scale to float32 in [−1.0, +1.0] by dividing each channel by 32768.
+        # L and R are preserved separately — no downmix.
+        left = s16[0::2].astype(np.float32) / 32768.0
+        right = s16[1::2].astype(np.float32) / 32768.0
+        stereo = np.column_stack([left, right])  # shape (n_frames, 2)
+
+        # Check for non-finite values (s16 → float32 cannot produce NaN/Inf in
+        # practice, but we validate for correctness).
+        if not np.all(np.isfinite(stereo)):
+            _log.warning("SHM stereo source: non-finite samples detected; invalidating epoch.")
+            return StreamInvalidated(cause=InvalidationCause.UNKNOWN, known_lost_samples=None)
+
+        over_range = bool(np.any(np.abs(stereo) >= 1.0))
+        wall_ns = time.time_ns()
+
+        frame = DecodedSourceFrame(
+            samples=stereo,
+            sample_rate=rate,
+            channels=2,
+            source_id=self._source_id,
+            source_sample_pos=None,
+            over_range=over_range,
+            wall_ns=wall_ns,
+        )
+        return DataResult(frame=frame)
+
+
+# ---------------------------------------------------------------------------
+# AirPlayPipeStereoSource — new stereo decoded-source adapter
+# ---------------------------------------------------------------------------
+
+
+class AirPlayPipeStereoSource:
+    """Reads stereo decoded float32 PCM from shairport-sync's named pipe.
+
+    Alongside (not replacing) the legacy AirPlayPipeSource.  Returns
+    SourceReadResult with a stereo DecodedSourceFrame.
+
+    Source contract: 44100 Hz, S16_LE, 2 channels (stereo).
+    L and R are preserved separately — no (L+R)/2 downmix.
+
+    IMPORTANT — one ingress reader:
+    Only one instance may read from the production FIFO at a time.  A FIFO
+    is not broadcast.  Do not instantiate both this class and AirPlayPipeSource
+    against the same path simultaneously.
+
+    Lifecycle:
+    - EAGAIN (no data) → TemporarilyNoData
+    - EOF (write-end closed, iOS disconnected) → EndOfStream
+    - Valid read → DataResult(DecodedSourceFrame)
+
+    Partial-byte carry: sub-frame bytes from one read are prepended to the next
+    so that L/R alignment is always preserved across read boundaries.
+    """
+
+    def __init__(self, path: Path = AIRPLAY_PIPE) -> None:
+        self._path = path
+        self._fd: int | None = None
+        self._last_data_t: float | None = None
+        self._remainder: bytes = b""
+        self._source_id: str = f"airplay:{path}"
+
+    def open(self) -> None:
+        """Open the pipe non-blocking.  Raises OSError if it does not exist."""
+        self._fd = os.open(self._path, os.O_RDONLY | os.O_NONBLOCK)
+        self._last_data_t = None
+        self._remainder = b""
+
+    def close(self) -> None:
+        if self._fd is not None:
+            try:
+                os.close(self._fd)
+            except OSError:
+                pass
+            self._fd = None
+
+    @property
+    def sample_rate(self) -> int:
+        return AIRPLAY_SAMPLE_RATE
+
+    @property
+    def running(self) -> bool:
+        if self._last_data_t is None:
+            return False
+        return time.monotonic() - self._last_data_t < _AIRPLAY_STALE_S
+
+    @property
+    def source_id(self) -> str:
+        return self._source_id
+
+    def read(self) -> SourceReadResult:
+        """Return a SourceReadResult from the AirPlay pipe.
+
+        Stereo layout: samples[:, 0] = L, samples[:, 1] = R.
+        """
+        if self._fd is None:
+            return TemporarilyNoData()
+
+        try:
+            raw = os.read(self._fd, 65536)
+        except OSError as exc:
+            if exc.errno == errno.EAGAIN:
+                return TemporarilyNoData()
+            raise
+
+        if not raw:
+            # EOF: the write-end was closed (iOS disconnected from shairport-sync).
+            return EndOfStream()
+
+        # Prepend sub-frame carry from previous read to preserve L/R alignment.
+        combined = self._remainder + raw
+        n_frames = len(combined) // AIRPLAY_BYTES_PER_FRAME
+        if n_frames == 0:
+            self._remainder = combined
+            return TemporarilyNoData()
+
+        self._remainder = combined[n_frames * AIRPLAY_BYTES_PER_FRAME :]
+        self._last_data_t = time.monotonic()
+
+        s16 = np.frombuffer(combined[: n_frames * AIRPLAY_BYTES_PER_FRAME], dtype=np.int16)
+        # Interleaved stereo S16_LE: even indices = L, odd = R.
+        # Scale to float32 in [−1.0, +1.0] by dividing each channel by 32768.
+        # L and R are preserved separately — no downmix.
+        left = s16[0::2].astype(np.float32) / 32768.0
+        right = s16[1::2].astype(np.float32) / 32768.0
+        stereo = np.column_stack([left, right])  # shape (n_frames, 2)
+
+        # Validate (s16 → float32 cannot produce NaN/Inf in practice).
+        if not np.all(np.isfinite(stereo)):
+            _log.warning("AirPlay stereo source: non-finite samples; invalidating epoch.")
+            return StreamInvalidated(cause=InvalidationCause.UNKNOWN, known_lost_samples=None)
+
+        over_range = bool(np.any(np.abs(stereo) >= 1.0))
+        wall_ns = time.time_ns()
+
+        frame = DecodedSourceFrame(
+            samples=stereo,
+            sample_rate=AIRPLAY_SAMPLE_RATE,
+            channels=2,
+            source_id=self._source_id,
+            source_sample_pos=None,
+            over_range=over_range,
+            wall_ns=wall_ns,
+        )
+        return DataResult(frame=frame)
 
 
 if __name__ == "__main__":

@@ -16,11 +16,13 @@ See docs/audio-architecture-v1.md §§5–9, §11–14 for the authoritative spe
 from __future__ import annotations
 
 import math
+import uuid
 from dataclasses import dataclass
 from enum import Enum
 from typing import ClassVar
 
 import numpy as np
+import soxr
 
 # ---------------------------------------------------------------------------
 # Invalidation cause
@@ -324,32 +326,223 @@ class SpectrumLayout:
 
 
 # ---------------------------------------------------------------------------
-# AudioCanonicalizer — Phase 1 API boundary stub
+# Stereo conversion helper
+# ---------------------------------------------------------------------------
+
+
+def _to_stereo(samples: np.ndarray) -> np.ndarray:
+    """Return a (n, 2) float32 view/copy: stereo passes through; mono duplicates to L=R.
+
+    Never performs (L+R)/2.  Mono input produces identical L and R channels.
+    Input must have shape (n, 1) or (n, 2) and dtype float32.
+    """
+    if samples.shape[1] == 2:
+        return samples
+    col = samples[:, 0]
+    return np.column_stack([col, col])
+
+
+# ---------------------------------------------------------------------------
+# AudioCanonicalizer — Phase 2 implementation
 # ---------------------------------------------------------------------------
 
 
 class AudioCanonicalizer:
     """Converts source PCM lifecycle results to canonical 48 kHz stereo frames.
 
-    Receives SourceReadResult from a decoded-source adapter.
-    Emits CanonicalReadResult for consumption by PcmAudioPipeline.
+    Receives ``SourceReadResult`` from a decoded-source adapter.
+    Returns a list of ``CanonicalReadResult`` — zero or more items per call.
+    An empty list means the resampler buffered the input but has not yet
+    produced output; call again with the next source result.
 
-    Canonicaliser responsibilities (Phase 2 implementation):
+    Responsibilities:
     - Mono → stereo duplication (L=R)
-    - Stereo L/R preservation
-    - Other-rate → 48 kHz resampling (library selected in Phase 2)
-    - Epoch assignment and epoch_id generation
-    - Canonical sample_pos tracking (accumulated across chunks; not rounded per chunk)
-    - Canonical over_range aggregation (source flag OR resampler overshoot)
-    - Lifecycle propagation with exactly one DSP reset per epoch transition
+    - Stereo L/R preservation; never performs (L+R)/2
+    - Other-rate → 48 kHz resampling via soxr (stateful, chunk-independent)
+    - Epoch assignment and epoch_id generation (uuid4)
+    - Epoch-local canonical sample_pos derived from actual emitted frames only
+    - Canonical over_range aggregation: source flag OR resampler overshoot
+    - Lifecycle propagation: exactly one DSP reset per epoch transition
+    - Clean EOS drain of valid resampler tail before EndOfStream
+    - Unexpected rate-change detection: synthetic StreamInvalidated
 
-    Phase 1: API boundary stub only.  Implementation in Phase 2.
+    Does NOT:
+    - Decode bytes or integers
+    - Perform AGC, loudness normalisation, or peak normalisation
+    - Downmix stereo
+    - Run any spectral analysis
     """
 
-    def push(self, result: SourceReadResult) -> CanonicalReadResult:
-        """Process one source result and return the corresponding canonical result."""
-        raise NotImplementedError
+    TARGET_RATE: ClassVar[int] = 48000
+    _SOXR_QUALITY: ClassVar[str] = "HQ"
+
+    def __init__(self, quality: str = "HQ") -> None:
+        self._quality = quality
+        # Resampler (soxr.ResampleStream); None when no active epoch.
+        self._stream: soxr.ResampleStream | None = None
+        # Source rate of the current epoch's resampler.
+        self._current_rate: int | None = None
+        # source_id of the current epoch.
+        self._current_source_id: str | None = None
+        # Epoch identity assigned when the epoch starts; committed to _epoch_id
+        # on the first canonical output frame.  Pending = epoch started but no
+        # output emitted yet (resampler still accumulating).
+        self._pending_epoch_id: str | None = None
+        # Committed epoch id — None until the first CanonicalData is emitted.
+        self._epoch_id: str | None = None
+        # Canonical sample_pos for the next AnalysisPcmFrame.
+        self._sample_pos: int = 0
+        # Accumulated source over_range from DataResults since the last output.
+        self._over_range_acc: bool = False
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def push(self, result: SourceReadResult) -> list[CanonicalReadResult]:
+        """Process one source result; return zero or more canonical results.
+
+        Empty list: resampler buffered the input, no output yet.
+        Caller must continue feeding source results to advance the epoch.
+        """
+        if isinstance(result, DataResult):
+            return self._process_data(result.frame)
+        if isinstance(result, TemporarilyNoData):
+            return [TemporarilyNoData()]
+        if isinstance(result, StreamInvalidated):
+            # Terminate current epoch without draining resampler tail.
+            self._invalidate()
+            return [result]
+        if isinstance(result, EndOfStream):
+            return self._drain_and_end()
+        return []  # unreachable; satisfies type checker
 
     def reset(self) -> None:
-        """Reset all internal state (resampler history, epoch tracking)."""
-        raise NotImplementedError
+        """Reset all internal state: resampler history, epoch tracking."""
+        self._invalidate()
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _invalidate(self) -> None:
+        """Discard resampler state and epoch identity.  No tail drain."""
+        if self._stream is not None:
+            self._stream.clear()
+            self._stream = None
+        self._current_rate = None
+        self._current_source_id = None
+        self._pending_epoch_id = None
+        self._epoch_id = None
+        self._sample_pos = 0
+        self._over_range_acc = False
+
+    def _start_epoch(self, source_rate: int, source_id: str) -> None:
+        """Initialise resampler and pending epoch identity for a new epoch."""
+        self._current_rate = source_rate
+        self._current_source_id = source_id
+        self._pending_epoch_id = str(uuid.uuid4())
+        self._epoch_id = None
+        self._sample_pos = 0
+        self._over_range_acc = False
+        self._stream = soxr.ResampleStream(
+            source_rate,
+            self.TARGET_RATE,
+            2,
+            quality=self._quality,
+            dtype="float32",
+        )
+
+    def _process_data(self, frame: DecodedSourceFrame) -> list[CanonicalReadResult]:
+        results: list[CanonicalReadResult] = []
+
+        # Unexpected rate change between consecutive DataResults: generate a
+        # synthetic invalidation, then process the new frame as a new epoch.
+        if self._current_rate is not None and self._current_rate != frame.sample_rate:
+            self._invalidate()
+            results.append(
+                StreamInvalidated(cause=InvalidationCause.RATE_CHANGE, known_lost_samples=None)
+            )
+
+        # First DataResult (or first after reset/invalidation): start a new epoch.
+        if self._stream is None:
+            self._start_epoch(frame.sample_rate, frame.source_id)
+
+        # Accumulate source over_range before the resampler produces output.
+        self._over_range_acc = self._over_range_acc or frame.over_range
+
+        # Expand mono → stereo (L=R); stereo preserved unchanged.
+        stereo = _to_stereo(frame.samples)
+
+        # Feed to soxr.  Output may be empty if the filter hasn't filled yet.
+        canonical: np.ndarray = self._stream.resample_chunk(stereo, last=False)
+
+        if len(canonical) == 0:
+            # Epoch identity remains pending.  Return any synthetic invalidation
+            # that was prepended, but no CanonicalData yet.
+            return results
+
+        # Safety: non-finite canonical samples must not contaminate DSP state.
+        if not np.all(np.isfinite(canonical)):
+            self._invalidate()
+            results.append(
+                StreamInvalidated(cause=InvalidationCause.UNKNOWN, known_lost_samples=None)
+            )
+            return results
+
+        # Commit epoch on first canonical output.
+        if self._epoch_id is None:
+            self._epoch_id = self._pending_epoch_id
+
+        # Aggregate over_range: accumulated source flags + resampler overshoot.
+        resampler_over = bool(np.any(np.abs(canonical) >= 1.0))
+        over_range = self._over_range_acc or resampler_over
+        self._over_range_acc = False
+
+        af = AnalysisPcmFrame(
+            samples=canonical,
+            sample_pos=self._sample_pos,
+            epoch_id=self._epoch_id,
+            source_id=self._current_source_id,
+            over_range=over_range,
+        )
+        self._sample_pos += len(canonical)
+        results.append(CanonicalData(frame=af))
+        return results
+
+    def _drain_and_end(self) -> list[CanonicalReadResult]:
+        """Flush valid resampler tail, then emit EndOfStream."""
+        results: list[CanonicalReadResult] = []
+        epoch_for_drain = self._epoch_id or self._pending_epoch_id
+
+        if self._stream is not None and epoch_for_drain is not None:
+            # Flush soxr internal filter buffer.
+            tail: np.ndarray = self._stream.resample_chunk(
+                np.zeros((0, 2), dtype=np.float32), last=True
+            )
+
+            if len(tail) > 0:
+                if not np.all(np.isfinite(tail)):
+                    # Discard non-finite drain rather than poisoning state.
+                    tail = np.zeros_like(tail)
+
+                # Commit pending epoch if this is the very first output.
+                if self._epoch_id is None:
+                    self._epoch_id = epoch_for_drain
+                    self._sample_pos = 0
+
+                over_range = self._over_range_acc or bool(np.any(np.abs(tail) >= 1.0))
+                self._over_range_acc = False
+                drain_f = AnalysisPcmFrame(
+                    samples=tail,
+                    sample_pos=self._sample_pos,
+                    epoch_id=self._epoch_id,
+                    source_id=self._current_source_id,
+                    over_range=over_range,
+                )
+                self._sample_pos += len(tail)
+                results.append(CanonicalData(frame=drain_f))
+
+        self._invalidate()
+        results.append(EndOfStream())
+        return results
