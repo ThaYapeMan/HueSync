@@ -173,14 +173,28 @@ make -j"$(nproc)"
 make install
 
 # ---------------------------------------------------------------------------
-# Phase 4: runtime directory
+# Phase 4: runtime directory and AirPlay FIFO
 # /run/ is tmpfs and is cleared on every reboot. This tmpfiles.d entry
-# recreates /run/huesync at boot so the pipe path survives restarts.
-# HueSync's own FIFOs use /tmp/huesync (player_manager._RUN_DIR) — this
-# directory is solely for the AirPlay pipe.
+# recreates /run/huesync and pre-creates the AirPlay FIFO at every boot.
+#
+# Both entries are needed:
+#   d  — directory, so shairport-sync can write the FIFO into it
+#   p  — named pipe (FIFO), pre-created so HueSync can open it before
+#         an iOS client connects.  shairport-sync opens the existing FIFO
+#         for writing when a session starts; no mkfifo from shairport-sync
+#         is required.
+#
+# Without the 'p' entry the FIFO is created only when iOS connects, which
+# means HueSync's pipe_source.open() (O_RDONLY|O_NONBLOCK) raises OSError
+# if a coupling is activated before the first iOS AirPlay session.
+#
+# Ownership: both huesync user — shairport-sync runs as huesync (drop-in),
+# HueSync runs as huesync.  Mode 0600 restricts access to that user only.
+# HueSync's own cava FIFOs use /tmp/huesync (player_manager._RUN_DIR);
+# /run/huesync is solely for the AirPlay pipe.
 # ---------------------------------------------------------------------------
-echo "==> [4/6] Configuring runtime directory..."
-echo 'd /run/huesync 0755 huesync huesync -' \
+echo "==> [4/6] Configuring runtime directory and AirPlay FIFO..."
+printf 'd /run/huesync             0755 huesync huesync -\np /run/huesync/airplay.pcm 0600 huesync huesync -\n' \
     > /etc/tmpfiles.d/huesync-run.conf
 systemd-tmpfiles --create /etc/tmpfiles.d/huesync-run.conf
 
@@ -243,7 +257,8 @@ echo "  version:          $SPS_VERSION"
 if [[ -p "$PIPE" ]]; then
     echo "  pipe:             $PIPE  [FIFO — ready]"
 else
-    echo "  pipe:             $PIPE  [not yet created — appears when iOS connects]"
+    echo "  pipe:             $PIPE  [ERROR — expected FIFO not found after tmpfiles setup]" >&2
+    exit 1
 fi
 
 if [[ "$NQPTP_STATUS" != "active" || "$SPS_STATUS" != "active" ]]; then

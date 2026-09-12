@@ -9,6 +9,7 @@ User=huesync
 Group=huesync
 WorkingDirectory=/opt/huesync
 Environment=HUESYNC_CONFIG=/etc/huesync/config.json
+
 # Remove any /dev/shm/squeezelite-* segments before the service starts.
 # Runs as root so it can remove files created during manual debugging or
 # prior runs under a different user (sticky bit on /dev/shm means the

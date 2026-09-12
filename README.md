@@ -317,12 +317,26 @@ plays from the LXC.
 ```bash
 # On the LXC / target machine, as root:
 cd /opt/huesync
-git pull && .venv/bin/pip install . && systemctl restart huesync
+bash scripts/update.sh
 ```
 
-`pip install .` is required (not just `systemctl restart`) because the web UI
-bundle is embedded in the Python package — a restart without reinstalling
-serves the old bundle.
+This pulls the latest committed code, synchronizes Python dependencies declared
+in `pyproject.toml` (including `soxr`), and restarts the HueSync service.
+It is safe to re-run.
+
+After updating, verify the deployment:
+
+```bash
+bash scripts/validate.sh
+```
+
+This checks Python imports, service status, Shairport PCM contract, runtime
+directory ownership, and FIFO state without consuming PCM from the AirPlay pipe.
+
+> **Why `pip install` is required after every update:** `pyproject.toml` may
+> declare new dependencies between releases, and the Python package embeds the
+> current git commit hash into `_commit.py` so `/api/status` reports the right
+> build. A plain `systemctl restart` without reinstalling leaves both stale.
 
 ---
 
