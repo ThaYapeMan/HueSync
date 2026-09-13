@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fcntl
+import math
 import os
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -902,3 +903,241 @@ def _run_one_canonical_patch(self, cresult):
 
 # Monkey-patch onto the class for the reset tests above.
 PcmAudioPipelineV2._run_one_canonical = _run_one_canonical_patch
+
+
+# ---------------------------------------------------------------------------
+# Defect characterisation: silence gate vs. raw STFT bar byte scale
+# ---------------------------------------------------------------------------
+# These tests document an open defect with the ORIGINAL gate=5.0.
+# They pass in the current (unpatched) state and describe the production
+# symptom: non-silent PCM → non-zero STFT magnitudes → bar_byte_mean < 5.0
+# → BandNormaliser gate fires → all bars = 0.0.
+#
+# The gate value (5.0) is BandNormaliser.DEFAULT_GATE, which was designed for
+# cava's integer 0-255 byte output. _mag_to_bar_bytes converts raw FFT
+# magnitudes with int(mean(mag[bin_lo:bin_hi])), giving values that can fall
+# well below 5.0 for broadband signals at moderate amplitude.
+
+
+def test_v2_bar_byte_mean_for_broadband_sigma01():
+    """Characterisation: mean bar byte from _mag_to_bar_bytes for σ=0.1 broadband
+    stereo noise is below BandNormaliser.DEFAULT_GATE=5.0.
+
+    This is the first zero boundary: PCM is non-silent, STFT magnitudes are
+    non-zero, but int(mean(mag_bins)) < 5.0 per bar (for σ=0.1 broadband noise),
+    so the gate fires and returns bytes(n_bars) on every frame.
+
+    The test asserts the defect is present (bar_byte_mean < DEFAULT_GATE),
+    not that it is correct. Remove or invert when the path is recalibrated.
+    """
+    from huesync.sync_engine import BandNormaliser
+
+    pipeline = _make_pipeline()
+    rng = np.random.default_rng(0)
+    n = _WINDOW * 100  # 100 STFT windows — stable mean estimate
+    noise = rng.standard_normal(n).astype(np.float32) * 0.1
+    stereo = np.column_stack([noise, noise])
+
+    stft = StereoMagStft(_CANONICAL_RATE)
+    mag_frames = stft.push(stereo)
+
+    assert mag_frames, "Must produce STFT magnitude frames"
+    bar_byte_means = [
+        sum(pipeline._mag_to_bar_bytes(f)) / pipeline._n_bars
+        for f in mag_frames
+    ]
+    mean_bar_byte = sum(bar_byte_means) / len(bar_byte_means)
+
+    # Defect: bar_byte_mean < DEFAULT_GATE for this broadband signal level.
+    # With WINDOW_SIZE=2048 and Hamming window, E[|X_k|] ≈ σ * 25.
+    # For σ=0.1: E[|X_k|] ≈ 2.5 per bin; mean_bar_byte ≈ 2-3 < 5.0.
+    assert mean_bar_byte < BandNormaliser.DEFAULT_GATE, (
+        f"Defect present: mean_bar_byte={mean_bar_byte:.3f} is NOT below "
+        f"DEFAULT_GATE={BandNormaliser.DEFAULT_GATE}. Gate would not fire — "
+        f"re-examine the defect hypothesis."
+    )
+
+
+def test_v2_exact_digital_silence_zero_bars():
+    """gate=0.0 safety: exact digital silence produces zero bars, no NaN/Inf.
+
+    gate condition is sum(frame)/n < 0.0 → 0.0 < 0.0 = False → never fires.
+    Zero bar bytes → exertion = 0 / max(ema, 1.0) = 0 → result = 0.
+    EMA seeds at 0.0 and stays there.  No division by zero due to max(ema,1.0).
+    """
+    p = _make_pipeline()
+    silence = _silence_stereo(n=3 * _CANONICAL_RATE)
+    _feed_pipeline(p, silence, epoch_id="ep-silence")
+    _feed_pipeline(p, silence, epoch_id="ep-silence")
+    features = p.latest()
+    if features is not None:
+        for i, b in enumerate(features.bars):
+            assert math.isfinite(b), f"Bar {i} is non-finite after silence: {b}"
+            assert b < 1e-9, f"Bar {i} must be zero after silence; got {b:.6f}"
+    # EMA must remain at 0.0 (or None if no frames processed).
+    if p._normaliser._ema is not None:
+        for i, v in enumerate(p._normaliser._ema):
+            assert math.isfinite(v), f"EMA band {i} non-finite: {v}"
+            assert v < 1e-9, f"EMA band {i} must be 0 after silence; got {v:.6f}"
+
+
+def test_v2_quiet_signal_nonzero_bars_gate_disabled():
+    """gate=0.0 fix: σ=0.1 broadband noise (below DEFAULT_GATE=5.0) must produce
+    non-zero bars now that the CAVA-calibrated gate is disabled.
+
+    Verifies all three conditions simultaneously:
+    - pre-normaliser bar bytes are non-zero (STFT produces signal)
+    - mean bar byte is below DEFAULT_GATE (confirms we were in the defect zone)
+    - final bars are non-zero (gate no longer suppresses them)
+    """
+    from huesync.sync_engine import BandNormaliser
+
+    p = _make_pipeline()
+    rng = np.random.default_rng(0)
+    n = 2 * _CANONICAL_RATE
+    noise = rng.standard_normal(n).astype(np.float32) * 0.1
+    sig = np.column_stack([noise, noise])
+
+    # Confirm we are still in the sub-DEFAULT_GATE amplitude zone.
+    stft = StereoMagStft(_CANONICAL_RATE)
+    mag_frames = stft.push(sig)
+    assert mag_frames, "STFT must produce frames"
+    bar_byte_means = [
+        sum(p._mag_to_bar_bytes(f)) / p._n_bars for f in mag_frames
+    ]
+    mean_bar_byte = sum(bar_byte_means) / len(bar_byte_means)
+    assert mean_bar_byte < BandNormaliser.DEFAULT_GATE, (
+        f"Test precondition: σ=0.1 bar_byte_mean={mean_bar_byte:.3f} must be "
+        f"< DEFAULT_GATE={BandNormaliser.DEFAULT_GATE} — still in defect zone"
+    )
+    assert mean_bar_byte > 0.0, "Pre-normaliser bar bytes must be non-zero"
+
+    # With gate=0.0, bars must now be non-zero.
+    bars = _warmup_and_measure(p, sig)
+    assert bars, "Pipeline must produce bars"
+    assert max(bars) > 0.0, (
+        f"gate=0.0: σ=0.1 noise must produce non-zero bars; max={max(bars):.6f}"
+    )
+
+
+def test_full_airplay_path_quiet_signal_nonzero_bars():
+    """Full path: 44100 S16LE σ=0.1 noise → decode → soxr → PcmAudioPipelineV2
+    must now produce non-zero bars with gate=0.0.
+
+    This is the inverse of the former defect-reproduction test: the same signal
+    that previously gave all-zero bars must now give non-zero bars.
+    """
+    src, w_fd = _make_airplay_stereo_pipe()
+    canon = AudioCanonicalizer()
+    pipeline = _make_pipeline(source=src)
+
+    sr = AIRPLAY_SAMPLE_RATE  # 44100
+    rng = np.random.default_rng(3)
+    n_total = sr * 3  # 3 seconds at 44100 Hz
+    noise = rng.standard_normal(n_total).astype(np.float32) * 0.1
+    payload = _s16le_stereo(noise, noise)
+
+    chunk_bytes = 4096
+    offset = 0
+    while offset < len(payload):
+        end = min(offset + chunk_bytes, len(payload))
+        os.write(w_fd, payload[offset:end])
+        result = src.read()
+        for cresult in canon.push(result):
+            if isinstance(cresult, CanonicalData):
+                pipeline._process_canonical_frame(cresult.frame)
+        offset = end
+
+    os.close(w_fd)
+    src.close()
+
+    features = pipeline.latest()
+    assert features is not None, (
+        "Pipeline must produce AudioFeatures for 3 s of σ=0.1 noise"
+    )
+    assert max(features.bars) > 0.0, (
+        f"gate=0.0: full AirPlay path must produce non-zero bars for σ=0.1 noise; "
+        f"max={max(features.bars):.6f}"
+    )
+
+
+def test_v2_epoch_reset_uses_v2_gate_policy():
+    """After _reset_dsp(), the new BandNormaliser must use gate=0.0, not DEFAULT_GATE.
+
+    Epoch transitions and StreamInvalidated both call _reset_dsp().  If _reset_dsp
+    reverted to DEFAULT_GATE=5.0, quiet audio would re-zero immediately after any
+    track change or seek — the same defect as at startup.
+    """
+    from huesync.sync_engine import BandNormaliser
+
+    p = _make_pipeline()
+    # Initial state.
+    assert p._normaliser.gate == 0.0, (
+        f"PcmAudioPipelineV2 must init with gate=0.0; got {p._normaliser.gate}"
+    )
+
+    # Trigger _reset_dsp via epoch change.
+    sig_a = _sine_stereo(440, 440, 0.5, 0.5, n=_CANONICAL_RATE)
+    _feed_pipeline(p, sig_a, epoch_id="epoch-A")
+    _feed_pipeline(p, _silence_stereo(n=100), epoch_id="epoch-B")  # triggers reset
+
+    assert p._normaliser.gate == 0.0, (
+        f"_reset_dsp must preserve gate=0.0; got {p._normaliser.gate} "
+        f"(DEFAULT_GATE={BandNormaliser.DEFAULT_GATE})"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Static audit: gate=0.0 is isolated to PcmAudioPipelineV2
+# ---------------------------------------------------------------------------
+
+
+def test_static_audit_default_gate_unchanged():
+    """BandNormaliser.DEFAULT_GATE must remain 5.0 — it is correct for cava output."""
+    from huesync.sync_engine import BandNormaliser
+
+    assert BandNormaliser.DEFAULT_GATE == 5.0, (
+        f"DEFAULT_GATE changed from 5.0 to {BandNormaliser.DEFAULT_GATE} — "
+        "this breaks CavaPipeline and legacy PcmAudioPipeline"
+    )
+
+
+def test_static_audit_cava_pipeline_uses_default_gate():
+    """CavaPipeline must continue to use DEFAULT_GATE (not gate=0.0)."""
+    import inspect
+
+    from huesync.sync_engine import CavaPipeline
+
+    src = inspect.getsource(CavaPipeline.__init__)
+    assert "gate=0.0" not in src, (
+        "CavaPipeline must not use gate=0.0 — cava outputs 0-255 integers "
+        "and the gate is correctly calibrated for that scale"
+    )
+
+
+def test_static_audit_legacy_pcm_pipeline_uses_default_gate():
+    """Legacy PcmAudioPipeline must continue to use DEFAULT_GATE (not gate=0.0)."""
+    import inspect
+
+    from huesync.sync_engine import PcmAudioPipeline
+
+    src = inspect.getsource(PcmAudioPipeline.__init__)
+    assert "gate=0.0" not in src, (
+        "PcmAudioPipeline must not use gate=0.0 — its scale calibration is "
+        "separate from PcmAudioPipelineV2 and was not analysed"
+    )
+
+
+def test_static_audit_mag_to_bar_bytes_no_rescaling():
+    """_mag_to_bar_bytes must not rescale or normalise magnitudes before returning.
+
+    The fix for zero-bars is gate removal, not amplitude rescaling.
+    Rescaling would change the DSP semantics and is explicitly out of scope.
+    """
+    import inspect
+
+    src = inspect.getsource(PcmAudioPipelineV2._mag_to_bar_bytes)
+    for forbidden in ("/ 32768", "* 255", "/ 255", "normalise", "rescale"):
+        assert forbidden not in src, (
+            f"_mag_to_bar_bytes must not rescale magnitudes (found: {forbidden!r})"
+        )

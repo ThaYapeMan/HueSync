@@ -820,7 +820,13 @@ class PcmAudioPipelineV2:
         self._bass_hz = bass_hz
         self._mid_hz = mid_hz
         self._exertion_clip = exertion_clip
-        self._normaliser = BandNormaliser(exertion_clip=exertion_clip)
+        # gate=0.0: disable the CAVA-calibrated silence gate for the native PCM path.
+        # _mag_to_bar_bytes produces raw FFT magnitudes (not CAVA's 0-255 scale);
+        # exact digital silence gives bar_bytes=0 → exertion=0 → result=0 naturally
+        # without a gate.  DEFAULT_GATE=5.0 fires on all broadband audio below
+        # ~σ=0.20 amplitude and is incompatible with this path.  CAVA and legacy
+        # PcmAudioPipeline are unaffected; they continue to use DEFAULT_GATE=5.0.
+        self._normaliser = BandNormaliser(exertion_clip=exertion_clip, gate=0.0)
         # dt = hop/sample_rate, sample-derived.  Constant for canonical 48 kHz.
         self._bar_stft = StereoMagStft(self._SAMPLE_RATE)
         self._normalise_dt: float = self._bar_stft.hop / self._SAMPLE_RATE
@@ -833,6 +839,7 @@ class PcmAudioPipelineV2:
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._diag_pcm_frame: int = 0  # bounded diagnostic counter (remove after fix confirmed)
 
     @property
     def normaliser(self) -> BandNormaliser:
@@ -863,7 +870,9 @@ class PcmAudioPipelineV2:
     def _reset_dsp(self) -> None:
         """Reset all DSP state: STFT history, BandNormaliser EMA, onset history."""
         self._bar_stft.reset()
-        self._normaliser = BandNormaliser(exertion_clip=self._exertion_clip)
+        # gate=0.0: same policy as __init__ — CAVA-calibrated gate is not valid
+        # for raw FFT magnitudes.  Epoch resets must not revert to DEFAULT_GATE=5.0.
+        self._normaliser = BandNormaliser(exertion_clip=self._exertion_clip, gate=0.0)
         self._onset_pipeline = self._build_onset_pipeline()
         self._current_epoch_id = None
 
@@ -905,6 +914,22 @@ class PcmAudioPipelineV2:
 
         for mag_frame, onset_result in zip(mag_frames, onset_frames, strict=True):
             bar_bytes = self._mag_to_bar_bytes(mag_frame)
+            # TEMPORARY DIAGNOSTIC: log raw magnitudes and gate status every 50 frames.
+            # Remove once zero-bars bug is confirmed fixed on LXC.
+            self._diag_pcm_frame += 1
+            if self._diag_pcm_frame % 50 == 0:
+                raw_mag_mean = float(np.mean(mag_frame))
+                bar_byte_mean = sum(bar_bytes) / len(bar_bytes) if bar_bytes else 0.0
+                gate_fires = bar_byte_mean < self._normaliser.gate
+                log.info(
+                    "[pcm-v2 diag] frame=%d raw_mag_mean=%.3f bar_byte_mean=%.3f "
+                    "gate=%.2f gate_fires=%s",
+                    self._diag_pcm_frame,
+                    raw_mag_mean,
+                    bar_byte_mean,
+                    self._normaliser.gate,
+                    gate_fires,
+                )
             normed = self._normaliser.normalise(bar_bytes, self._normalise_dt)
             bars = [v / 255.0 for v in normed]
             total = sum(bars)
