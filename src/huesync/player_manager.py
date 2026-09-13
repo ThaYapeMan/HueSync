@@ -1007,19 +1007,23 @@ class PlayerManager:
     _SHAIRPORT_CONF = Path("/usr/local/etc/shairport-sync.conf")
 
     def _configure_shairport_name(self, name: str) -> None:
-        """Rewrite shairport-sync's config with a new advertised name and restart the service.
+        """Ensure shairport-sync is configured with the given advertised name.
+
+        Computes the desired managed config deterministically and compares it to
+        the existing file.  If identical, returns immediately — no write, no
+        restart.  If different (name changed, file absent, or content differs),
+        writes the file and restarts the service exactly once.
 
         shairport-sync reads its name only at startup, so SIGHUP is not enough —
-        a full service restart is required.  Failures are logged as warnings so
-        that activation can proceed even if systemctl is unavailable (e.g. tests).
+        a full service restart is required when the config changes.  Failures are
+        logged as warnings so that activation can proceed even if systemctl is
+        unavailable (e.g. tests).
 
-        TECHNICAL DEBT: HueSync currently owns and overwrites the global
-        shairport-sync configuration file on every AirPlay activation solely to
-        update the advertised receiver name.  This couples VirtualPlayer identity
-        to a single shared shairport-sync instance in a way that does not scale.
-        Reconsidering this together with the semantics of one global
-        shairport-sync instance versus per-VirtualPlayer AirPlay receivers is
-        deferred to a later phase.
+        TECHNICAL DEBT: HueSync currently owns and manages the global
+        shairport-sync configuration file as a single managed unit tied to the
+        active VirtualPlayer's advertised name.  Reconsidering the semantics of
+        one global shairport-sync instance versus per-VirtualPlayer AirPlay
+        receivers is deferred to a later phase.
         """
         conf = (
             'general = {\n'
@@ -1033,6 +1037,13 @@ class PlayerManager:
             '  output_channels = 2;\n'
             '}\n'
         )
+        try:
+            existing = self._SHAIRPORT_CONF.read_text()
+        except OSError:
+            existing = None
+        if existing == conf:
+            log.debug("shairport-sync config unchanged for name %r — skipping restart", name)
+            return
         try:
             self._SHAIRPORT_CONF.write_text(conf)
         except OSError as exc:

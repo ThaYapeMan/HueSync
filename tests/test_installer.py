@@ -131,6 +131,164 @@ def test_shairport_config_idempotent(tmp_path: Path) -> None:
     assert text1 == text2, "Config must be identical on repeated calls with the same name"
 
 
+# ---------------------------------------------------------------------------
+# Idempotent restart — regression tests for the no-restart-on-identical-config fix
+# ---------------------------------------------------------------------------
+
+
+def test_shairport_no_restart_on_identical_config(tmp_path: Path) -> None:
+    """Second call with same name must not invoke systemctl restart."""
+    from huesync.player_manager import PlayerManager
+    from huesync.storage import Storage
+
+    storage = Storage(tmp_path / "config.json")
+    manager = PlayerManager(storage)
+    manager._SHAIRPORT_CONF = tmp_path / "shairport-sync.conf"
+
+    with patch("subprocess.run") as mock_run:
+        manager._configure_shairport_name("HueSync")
+        assert mock_run.call_count == 1, "First call (config absent) must restart"
+        manager._configure_shairport_name("HueSync")
+        assert mock_run.call_count == 1, "Identical config must not restart"
+
+
+def test_shairport_restart_on_advertised_name_change(tmp_path: Path) -> None:
+    """Changing the advertised name must write config and restart exactly once per change."""
+    from huesync.player_manager import PlayerManager
+    from huesync.storage import Storage
+
+    storage = Storage(tmp_path / "config.json")
+    manager = PlayerManager(storage)
+    manager._SHAIRPORT_CONF = tmp_path / "shairport-sync.conf"
+
+    with patch("subprocess.run") as mock_run:
+        manager._configure_shairport_name("HueSync")
+        assert mock_run.call_count == 1
+
+        manager._configure_shairport_name("Living Room")  # name changed
+        assert mock_run.call_count == 2, "Name change must trigger one restart"
+
+        manager._configure_shairport_name("Living Room")  # same name repeated
+        assert mock_run.call_count == 2, "Repeated same name must not restart again"
+
+
+def test_shairport_no_file_rewrite_on_identical_config(tmp_path: Path) -> None:
+    """File is not rewritten (mtime unchanged) when config already matches desired."""
+    import time
+
+    from huesync.player_manager import PlayerManager
+    from huesync.storage import Storage
+
+    storage = Storage(tmp_path / "config.json")
+    manager = PlayerManager(storage)
+    conf_path = tmp_path / "shairport-sync.conf"
+    manager._SHAIRPORT_CONF = conf_path
+
+    with patch("subprocess.run"):
+        manager._configure_shairport_name("HueSync")
+
+    mtime_ns = conf_path.stat().st_mtime_ns
+    time.sleep(0.05)  # ensure any rewrite would update mtime
+
+    with patch("subprocess.run"):
+        manager._configure_shairport_name("HueSync")  # should skip write
+
+    assert conf_path.stat().st_mtime_ns == mtime_ns, (
+        "File must not be rewritten when config is already identical"
+    )
+
+
+def test_shairport_systemctl_failure_graceful_no_retry(tmp_path: Path) -> None:
+    """systemctl failure logs a warning and does not retry; no exception raised."""
+    import subprocess as _sp
+
+    from huesync.player_manager import PlayerManager
+    from huesync.storage import Storage
+
+    storage = Storage(tmp_path / "config.json")
+    manager = PlayerManager(storage)
+    manager._SHAIRPORT_CONF = tmp_path / "shairport-sync.conf"
+
+    call_count = 0
+
+    def failing_run(cmd, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        raise _sp.CalledProcessError(1, cmd)
+
+    with patch("subprocess.run", side_effect=failing_run):
+        manager._configure_shairport_name("HueSync")  # must not raise
+
+    assert call_count == 1, "systemctl must be called exactly once, not retried"
+
+
+def test_shairport_pcm_contract_preserved_after_idempotent_skip(tmp_path: Path) -> None:
+    """After an idempotent skip, the on-disk config still contains the correct PCM contract."""
+    from huesync.player_manager import PlayerManager
+    from huesync.storage import Storage
+
+    storage = Storage(tmp_path / "config.json")
+    manager = PlayerManager(storage)
+    conf_path = tmp_path / "shairport-sync.conf"
+    manager._SHAIRPORT_CONF = conf_path
+
+    with patch("subprocess.run"):
+        manager._configure_shairport_name("HueSync")
+        manager._configure_shairport_name("HueSync")  # idempotent skip
+
+    text = conf_path.read_text()
+    assert f"output_rate = {_EXPECTED_RATE}" in text
+    assert f'output_format = "{_EXPECTED_FORMAT}"' in text
+    assert f"output_channels = {_EXPECTED_CHANNELS}" in text
+    assert _EXPECTED_FIFO in text
+    assert 'output_backend = "pipe"' in text
+
+
+def test_shairport_coupling_reactivation_no_restart(tmp_path: Path) -> None:
+    """Re-activating an AirPlay coupling with unchanged advertised name does not restart.
+
+    Models the scenario: user activates coupling → shairport configured → user
+    deactivates and re-activates the same coupling without changing the name →
+    the second activation must not restart shairport-sync.
+    """
+    from huesync.player_manager import PlayerManager
+    from huesync.storage import Storage
+
+    storage = Storage(tmp_path / "config.json")
+    manager = PlayerManager(storage)
+    manager._SHAIRPORT_CONF = tmp_path / "shairport-sync.conf"
+
+    with patch("subprocess.run") as mock_run:
+        manager._configure_shairport_name("HueSync")  # first activation
+        assert mock_run.call_count == 1
+
+        manager._configure_shairport_name("HueSync")  # re-activation, same name
+        assert mock_run.call_count == 1, (
+            "Re-activating AirPlay coupling with unchanged name must not restart shairport"
+        )
+
+
+def test_shairport_configure_is_synchronous_asyncio_safe() -> None:
+    """_configure_shairport_name must be synchronous (no await) for asyncio-level atomicity.
+
+    Within asyncio's cooperative scheduling model, a synchronous function runs to
+    completion before any other coroutine proceeds — making the read-compare-write
+    sequence effectively atomic without an explicit lock.
+    """
+    import inspect
+
+    from huesync.player_manager import PlayerManager
+
+    assert not inspect.iscoroutinefunction(PlayerManager._configure_shairport_name), (
+        "_configure_shairport_name must remain synchronous (not async def)"
+    )
+    src = inspect.getsource(PlayerManager._configure_shairport_name)
+    assert "await " not in src, (
+        "_configure_shairport_name must not contain await — synchronicity is "
+        "relied upon for atomicity in asyncio's cooperative model"
+    )
+
+
 def test_setup_airplay_sh_pcm_contract() -> None:
     """setup-airplay.sh must write the canonical PCM contract to shairport-sync.conf."""
     script = (ROOT / "scripts" / "setup-airplay.sh").read_text()
@@ -270,3 +428,42 @@ def test_validate_script_no_fifo_reads() -> None:
         assert forbidden not in script, (
             f"scripts/validate.sh must not consume FIFO content (found: {forbidden!r})"
         )
+
+
+def test_setup_airplay_version_uses_absolute_path() -> None:
+    """setup-airplay.sh version detection must use the absolute binary path.
+
+    The installed binary is /usr/local/bin/shairport-sync, which may not be on
+    PATH when the script runs.  Using the bare name 'shairport-sync' causes a
+    'command not found' error and 'unknown' version output.
+    """
+    script = (ROOT / "scripts" / "setup-airplay.sh").read_text()
+    assert "/usr/local/bin/shairport-sync --version" in script, (
+        "setup-airplay.sh must use /usr/local/bin/shairport-sync (absolute path) "
+        "for version detection, not the bare command name"
+    )
+    # The bare name must not appear in the version detection line.
+    for line in script.splitlines():
+        if "--version" in line and "shairport-sync" in line:
+            assert line.lstrip().startswith("#") or "/usr/local/bin/" in line, (
+                f"Version detection line must use absolute path: {line!r}"
+            )
+
+
+def test_validate_script_fd_zero_is_allowed() -> None:
+    """validate.sh FD audit must treat 0 open FDs as acceptable (idle AirPlay).
+
+    0 open FDs is normal when no AirPlay coupling is active.  The script must
+    not label this as a failure or claim writer+reader are expected when the
+    validator cannot know whether the AirPlay path is active.
+    """
+    script = (ROOT / "scripts" / "validate.sh").read_text()
+    # Must not emit a FAIL or misleading "expected: writer + reader" when N==0.
+    assert "expected: shairport-sync writer + huesync reader" not in script, (
+        "validate.sh must not claim writer+reader are expected — "
+        "0 FDs is valid when no AirPlay session is active"
+    )
+    # Must explicitly handle the 0 case as INFO or similar non-failure.
+    assert "no active AirPlay session" in script, (
+        "validate.sh must explain that 0 open FDs is expected when idle"
+    )
