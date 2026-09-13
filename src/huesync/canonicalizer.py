@@ -521,11 +521,7 @@ class AudioCanonicalizer:
                 np.zeros((0, 2), dtype=np.float32), last=True
             )
 
-            if len(tail) > 0:
-                if not np.all(np.isfinite(tail)):
-                    # Discard non-finite drain rather than poisoning state.
-                    tail = np.zeros_like(tail)
-
+            if len(tail) > 0 and np.all(np.isfinite(tail)):
                 # Commit pending epoch if this is the very first output.
                 if self._epoch_id is None:
                     self._epoch_id = epoch_for_drain
@@ -542,6 +538,11 @@ class AudioCanonicalizer:
                 )
                 self._sample_pos += len(tail)
                 results.append(CanonicalData(frame=drain_f))
+            elif len(tail) > 0:
+                # Non-finite drain tail: discard without publishing.
+                # Consistent with _process_data(): non-finite output is not canonical.
+                # EndOfStream follows below; no CanonicalData emitted for this tail.
+                pass
 
         self._invalidate()
         results.append(EndOfStream())

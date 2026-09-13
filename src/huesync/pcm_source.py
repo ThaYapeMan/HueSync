@@ -463,7 +463,7 @@ class SqueezeliteShmStereoSource:
 
     Lifecycle:
     - n_new == 0 → TemporarilyNoData
-    - torn read (writer moved during copy) → TemporarilyNoData (discard, retry)
+    - torn read (writer moved during copy) → StreamInvalidated(UNKNOWN)
     - n_new > VIS_BUF_SIZE // 2 (fell too far behind) → StreamInvalidated(UNKNOWN)
     - valid read → DataResult(DecodedSourceFrame)
 
@@ -556,16 +556,18 @@ class SqueezeliteShmStereoSource:
             raw = raw_tail + raw_head
 
         # Seqlock-style consistency check: if the writer moved during our copy,
-        # discard this block.  This is a transient race, not a proven continuity
-        # break, so TemporarilyNoData is the correct result.
+        # the bytes we read span two write passes and represent a real audio gap.
+        # Signal StreamInvalidated so the downstream epoch is reset rather than
+        # silently joining the discontinuous intervals.
         _, buf_index_after, _, _, _ = self._read_header()
         if buf_index_after != buf_index:
             _log.debug(
-                "SHM stereo source: torn read (buf_index %d → %d), discarding.",
+                "SHM stereo source: torn read (buf_index %d → %d); "
+                "audio gap, invalidating epoch.",
                 buf_index,
                 buf_index_after,
             )
-            return TemporarilyNoData()
+            return StreamInvalidated(cause=InvalidationCause.UNKNOWN, known_lost_samples=None)
 
         s16 = np.frombuffer(raw, dtype=np.int16)
         # Interleaved stereo s16: even indices = L, odd = R.
@@ -676,6 +678,9 @@ class AirPlayPipeStereoSource:
 
         if not raw:
             # EOF: the write-end was closed (iOS disconnected from shairport-sync).
+            # Discard any partial-byte carry: it belongs to the just-ended stream
+            # and must not prefix the next reconnect's audio.
+            self._remainder = b""
             return EndOfStream()
 
         # Prepend sub-frame carry from previous read to preserve L/R alignment.

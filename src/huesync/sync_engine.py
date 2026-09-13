@@ -930,9 +930,15 @@ class PcmAudioPipelineV2:
         epoch_id: str = frame.epoch_id  # type: ignore[union-attr]
         samples: np.ndarray = frame.samples  # type: ignore[union-attr]
 
-        # Epoch transition: reset DSP exactly once before processing new epoch data.
+        # Epoch transition: guard against double-reset when _run() already called
+        # _reset_dsp() on StreamInvalidated (which sets _current_epoch_id = None).
+        # Any epoch change also clears the published snapshot so old-epoch features
+        # cannot leak into the new epoch's STFT warmup window.
         if epoch_id != self._current_epoch_id:
-            self._reset_dsp()
+            if self._current_epoch_id is not None:
+                self._reset_dsp()
+            with self._lock:
+                self._latest = None
             self._current_epoch_id = epoch_id
 
         # Stereo STFT → RMS-combined magnitude frames.
@@ -1051,34 +1057,44 @@ class PcmAudioPipelineV2:
                 )
 
     def _run(self) -> None:
-        while not self._stop.is_set():
-            source_result = self._source.read()  # type: ignore[union-attr]
-            canonical_results = self._canonicalizer.push(source_result)
+        try:
+            while not self._stop.is_set():
+                source_result = self._source.read()  # type: ignore[union-attr]
+                canonical_results = self._canonicalizer.push(source_result)
 
-            if not canonical_results:
-                # soxr accumulated input but produced no output yet; loop immediately.
-                continue
+                if not canonical_results:
+                    # soxr accumulated input but produced no output yet; loop immediately.
+                    continue
 
-            for cresult in canonical_results:
-                if isinstance(cresult, CanonicalData):
-                    self._process_canonical_frame(cresult.frame)
-                elif isinstance(cresult, TemporarilyNoData):
-                    # No data from pipe (EAGAIN).  Do not reset DSP or insert silence.
-                    # If source is not receiving audio, clear stale features.
-                    if not self._source.running:  # type: ignore[union-attr]
+                for cresult in canonical_results:
+                    if isinstance(cresult, CanonicalData):
+                        self._process_canonical_frame(cresult.frame)
+                    elif isinstance(cresult, TemporarilyNoData):
+                        # No data from pipe (EAGAIN).  Do not reset DSP or insert silence.
+                        # If source is not receiving audio, clear stale features.
+                        if not self._source.running:  # type: ignore[union-attr]
+                            with self._lock:
+                                self._latest = None
+                        self._stop.wait(self._POLL_S)
+                    elif isinstance(cresult, StreamInvalidated):
+                        # Continuity broken: discard DSP history and stale snapshot.
+                        self._reset_dsp()
                         with self._lock:
                             self._latest = None
-                    self._stop.wait(self._POLL_S)
-                elif isinstance(cresult, StreamInvalidated):
-                    # Continuity broken: discard DSP history before next data.
-                    self._reset_dsp()
-                elif isinstance(cresult, EndOfStream):
-                    # iOS disconnected from shairport-sync.
-                    self._reset_dsp()
-                    with self._lock:
-                        self._latest = None
-                    # Drain the canonicalizer and allow reconnect.
-                    self._canonicalizer.reset()
+                    elif isinstance(cresult, EndOfStream):
+                        # iOS disconnected from shairport-sync.
+                        self._reset_dsp()
+                        with self._lock:
+                            self._latest = None
+                        # Reset canonicalizer so the next reconnect starts a fresh epoch.
+                        self._canonicalizer.reset()
+                        # Avoid a tight busy-loop: the FIFO returns EOF on every read
+                        # while no writer is attached.
+                        self._stop.wait(self._POLL_S)
+        except Exception:
+            log.exception("PcmAudioPipelineV2 worker crashed; clearing stale features")
+            with self._lock:
+                self._latest = None
 
     def start(self) -> None:
         self._stop.clear()
