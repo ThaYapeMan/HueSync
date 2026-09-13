@@ -906,59 +906,56 @@ PcmAudioPipelineV2._run_one_canonical = _run_one_canonical_patch
 
 
 # ---------------------------------------------------------------------------
-# Defect characterisation: silence gate vs. raw STFT bar byte scale
+# V2 bar computation: linear float path + squelch gate characterisation
 # ---------------------------------------------------------------------------
-# These tests document an open defect with the ORIGINAL gate=5.0.
-# They pass in the current (unpatched) state and describe the production
-# symptom: non-silent PCM → non-zero STFT magnitudes → bar_byte_mean < 5.0
-# → BandNormaliser gate fires → all bars = 0.0.
-#
-# The gate value (5.0) is BandNormaliser.DEFAULT_GATE, which was designed for
-# cava's integer 0-255 byte output. _mag_to_bar_bytes converts raw FFT
-# magnitudes with int(mean(mag[bin_lo:bin_hi])), giving values that can fall
-# well below 5.0 for broadband signals at moderate amplitude.
 
 
-def test_v2_bar_byte_mean_for_broadband_sigma01():
-    """Characterisation: mean bar byte from _mag_to_bar_bytes for σ=0.1 broadband
-    stereo noise is above BandNormaliser.DEFAULT_GATE=5.0 (dB encoding is in effect).
-
-    With the dB encoding fix, E[|X_k|] ≈ 2.5 per bin → 20*log10(2.5)+64 ≈ 72,
-    which is well above DEFAULT_GATE=5.0.  This confirms the fix: the old int()
-    path gave byte≈2 (< DEFAULT_GATE, so gate fired), the new dB path gives
-    byte≈72 (gate never fires even for CAVA calibration scale).
-    """
+def test_v2_mag_to_bar_floats_above_squelch():
+    """σ=0.1 broadband noise (per-bar means ≈ 2.5) is well above _V2_NOISE_FLOOR=1e-3."""
     pipeline = _make_pipeline()
     rng = np.random.default_rng(0)
-    n = _WINDOW * 100  # 100 STFT windows — stable mean estimate
-    noise = rng.standard_normal(n).astype(np.float32) * 0.1
+    noise = rng.standard_normal(_WINDOW * 4).astype(np.float32) * 0.1
     stereo = np.column_stack([noise, noise])
-
     stft = StereoMagStft(_CANONICAL_RATE)
     mag_frames = stft.push(stereo)
-
     assert mag_frames, "Must produce STFT magnitude frames"
-    bar_byte_means = [
-        sum(pipeline._mag_to_bar_bytes(f)) / pipeline._n_bars
-        for f in mag_frames
-    ]
-    mean_bar_byte = sum(bar_byte_means) / len(bar_byte_means)
+    floats = pipeline._mag_to_bar_floats(mag_frames[0])
+    assert max(floats) > 0.0, "σ=0.1 noise must produce non-zero bar floats"
 
-    # dB encoding: E[|X_k|]≈2.5 → byte≈72. Verify non-zero and in expected range.
-    assert mean_bar_byte > 0.0, (
-        f"dB encoding: σ=0.1 noise must produce non-zero bar bytes; got {mean_bar_byte:.3f}"
-    )
-    assert 50 < mean_bar_byte < 120, (
-        f"dB encoding: σ=0.1 noise bar bytes should be ~72; got {mean_bar_byte:.3f}"
+
+def test_v2_mag_to_bar_floats_silence_zero():
+    """Exact silence (all-zero mag) → all-zero bar floats (squelch gate)."""
+    p = _make_pipeline()
+    mag = np.zeros(1025, dtype=np.float32)
+    floats = p._mag_to_bar_floats(mag)
+    assert all(f == 0.0 for f in floats), f"Silence must squelch to 0; got {floats[:4]}"
+
+
+def test_v2_mag_to_bar_floats_squelch_at_noise_floor():
+    """Values at 90% of _V2_NOISE_FLOOR are squelched to zero."""
+    p = _make_pipeline()
+    mag = np.full(1025, p._V2_NOISE_FLOOR * 0.9, dtype=np.float32)
+    floats = p._mag_to_bar_floats(mag)
+    assert all(f == 0.0 for f in floats), "Values below noise floor must be gated"
+
+
+def test_v2_mag_to_bar_floats_spectral_shape_preserved():
+    """Strong low-frequency bins produce higher bar floats than weak high-freq bins."""
+    p = _make_pipeline()
+    mag = np.zeros(1025, dtype=np.float32)
+    mag[:43] = 0.5    # ≲1000 Hz — strong
+    mag[43:] = 0.01   # ≳1000 Hz — weak but above noise floor
+    floats = p._mag_to_bar_floats(mag)
+    assert floats[0] > floats[-1], (
+        f"Low-freq bar ({floats[0]:.4f}) must exceed high-freq bar ({floats[-1]:.4f})"
     )
 
 
 def test_v2_exact_digital_silence_zero_bars():
-    """gate=0.0 safety: exact digital silence produces zero bars, no NaN/Inf.
+    """Exact digital silence → all bars zero, no NaN/Inf.
 
-    gate condition is sum(frame)/n < 0.0 → 0.0 < 0.0 = False → never fires.
-    Zero bar bytes → exertion = 0 / max(ema, 1.0) = 0 → result = 0.
-    EMA seeds at 0.0 and stays there.  No division by zero due to max(ema,1.0).
+    All bar mags are squelched (< _V2_NOISE_FLOOR); peak = 0;
+    ref clamped to _V2_NOISE_FLOOR; bars = 0 / ref = 0.
     """
     p = _make_pipeline()
     silence = _silence_stereo(n=3 * _CANONICAL_RATE)
@@ -969,39 +966,27 @@ def test_v2_exact_digital_silence_zero_bars():
         for i, b in enumerate(features.bars):
             assert math.isfinite(b), f"Bar {i} is non-finite after silence: {b}"
             assert b < 1e-9, f"Bar {i} must be zero after silence; got {b:.6f}"
-    # EMA must remain at 0.0 (or None if no frames processed).
-    if p._normaliser._ema is not None:
-        for i, v in enumerate(p._normaliser._ema):
-            assert math.isfinite(v), f"EMA band {i} non-finite: {v}"
-            assert v < 1e-9, f"EMA band {i} must be 0 after silence; got {v:.6f}"
 
 
-def test_v2_quiet_signal_nonzero_bars_gate_disabled():
-    """gate=0.0 + dB encoding: σ=0.1 broadband noise must produce non-zero bars.
-
-    With the dB encoding fix, pre-normaliser bar bytes are ~72 (non-zero and
-    well above the old DEFAULT_GATE=5.0).  gate=0.0 ensures they are never
-    suppressed.  Verifies the two fixes work together end-to-end.
-    """
+def test_v2_broadband_signal_nonzero_bars():
+    """σ=0.1 broadband noise produces non-zero bars via linear float path + global peak EMA."""
     p = _make_pipeline()
     rng = np.random.default_rng(0)
     n = 2 * _CANONICAL_RATE
     noise = rng.standard_normal(n).astype(np.float32) * 0.1
     sig = np.column_stack([noise, noise])
 
+    # Verify per-bar floats are non-zero before normalisation.
     stft = StereoMagStft(_CANONICAL_RATE)
     mag_frames = stft.push(sig)
     assert mag_frames, "STFT must produce frames"
-    bar_byte_means = [
-        sum(p._mag_to_bar_bytes(f)) / p._n_bars for f in mag_frames
-    ]
-    mean_bar_byte = sum(bar_byte_means) / len(bar_byte_means)
-    assert mean_bar_byte > 0.0, "dB encoding: pre-normaliser bar bytes must be non-zero"
+    floats = p._mag_to_bar_floats(mag_frames[0])
+    assert max(floats) > 0.0, "σ=0.1 noise per-bar floats must be non-zero above squelch"
 
     bars = _warmup_and_measure(p, sig)
     assert bars, "Pipeline must produce bars"
     assert max(bars) > 0.0, (
-        f"gate=0.0 + dB encoding: σ=0.1 noise must produce non-zero bars; max={max(bars):.6f}"
+        f"σ=0.1 noise must produce non-zero normalised bars; max={max(bars):.6f}"
     )
 
 
@@ -1046,29 +1031,25 @@ def test_full_airplay_path_quiet_signal_nonzero_bars():
     )
 
 
-def test_v2_epoch_reset_uses_v2_gate_policy():
-    """After _reset_dsp(), the new BandNormaliser must use gate=0.0, not DEFAULT_GATE.
-
-    Epoch transitions and StreamInvalidated both call _reset_dsp().  If _reset_dsp
-    reverted to DEFAULT_GATE=5.0, quiet audio would re-zero immediately after any
-    track change or seek — the same defect as at startup.
-    """
+def test_v2_epoch_reset_clears_peak_ema():
+    """After _reset_dsp(), _v2_peak_ema is reset to None (fresh reference on next epoch)."""
     from huesync.sync_engine import BandNormaliser
 
     p = _make_pipeline()
-    # Initial state.
-    assert p._normaliser.gate == 0.0, (
-        f"PcmAudioPipelineV2 must init with gate=0.0; got {p._normaliser.gate}"
-    )
+    assert p._normaliser.gate == 0.0, "BandNormaliser instance must keep gate=0.0"
+    assert p._v2_peak_ema is None, "Initial _v2_peak_ema must be None"
 
-    # Trigger _reset_dsp via epoch change.
+    # Prime the pipeline so _v2_peak_ema is set.
     sig_a = _sine_stereo(440, 440, 0.5, 0.5, n=_CANONICAL_RATE)
     _feed_pipeline(p, sig_a, epoch_id="epoch-A")
-    _feed_pipeline(p, _silence_stereo(n=100), epoch_id="epoch-B")  # triggers reset
+    assert p._v2_peak_ema is not None, "_v2_peak_ema must be set after first audio"
 
+    # Epoch change triggers _reset_dsp.
+    _feed_pipeline(p, _silence_stereo(n=100), epoch_id="epoch-B")
+    assert p._v2_peak_ema is None, "_reset_dsp must clear _v2_peak_ema"
     assert p._normaliser.gate == 0.0, (
-        f"_reset_dsp must preserve gate=0.0; got {p._normaliser.gate} "
-        f"(DEFAULT_GATE={BandNormaliser.DEFAULT_GATE})"
+        f"BandNormaliser gate must remain 0.0 after reset; "
+        f"got {p._normaliser.gate} (DEFAULT_GATE={BandNormaliser.DEFAULT_GATE})"
     )
 
 
@@ -1113,113 +1094,54 @@ def test_static_audit_legacy_pcm_pipeline_uses_default_gate():
     )
 
 
-def test_static_audit_mag_to_bar_bytes_no_rescaling():
-    """_mag_to_bar_bytes must not use linear rescaling or normalisation patterns."""
+def test_static_audit_v2_uses_float_path_not_bytes():
+    """V2 bar path must use _mag_to_bar_floats, not a byte-conversion method."""
     import inspect
 
-    src = inspect.getsource(PcmAudioPipelineV2._mag_to_bar_bytes)
-    for forbidden in ("/ 32768", "* 255", "/ 255", "normalise", "rescale"):
-        assert forbidden not in src, (
-            f"_mag_to_bar_bytes must not rescale magnitudes (found: {forbidden!r})"
-        )
+    # _mag_to_bar_floats must exist.
+    assert hasattr(PcmAudioPipelineV2, "_mag_to_bar_floats"), (
+        "PcmAudioPipelineV2 must have _mag_to_bar_floats (float linear path)"
+    )
+    # _mag_to_bar_bytes must not exist (it was the broken dB-byte encoding).
+    assert not hasattr(PcmAudioPipelineV2, "_mag_to_bar_bytes"), (
+        "PcmAudioPipelineV2 must not have _mag_to_bar_bytes (byte domain removed)"
+    )
+    # _process_canonical_frame must not call BandNormaliser.normalise().
+    src = inspect.getsource(PcmAudioPipelineV2._process_canonical_frame)
+    assert "normaliser.normalise" not in src, (
+        "V2 _process_canonical_frame must not call BandNormaliser.normalise() "
+        "(global peak EMA owns V2 conditioning)"
+    )
+    # Global peak EMA must be used.
+    assert "_v2_peak_ema" in src, (
+        "_process_canonical_frame must use _v2_peak_ema for adaptive reference"
+    )
 
 
 # ---------------------------------------------------------------------------
-# dB magnitude encoding — regression tests for actual live AirPlay range
+# Global peak EMA normalisation — contrast and live-range regression tests
 # ---------------------------------------------------------------------------
-# These tests reproduce the ACTUAL production failure: iOS AirPlay at moderate
-# volume delivers raw FFT bar means of 0.002–0.014 (float amplitude units).
-# With the old int() encoding: int(0.007) = 0 → all bars zero.
-# With the dB encoding: 20*log10(0.007)+64 ≈ 10 → byte=10 (non-zero).
-
-
-def test_v2_mag_to_bar_bytes_live_range_nonzero():
-    """val in the actual live AirPlay range (0.002–0.014) must produce byte ≥ 1.
-
-    Before the dB fix: int(0.002)=0, int(0.014)=0 → all bytes zero.
-    After:  20*log10(0.002)+64≈10, 20*log10(0.014)+64≈27 → bytes 10/27 (non-zero).
-    """
-    p = _make_pipeline()
-    for val in (0.002, 0.007, 0.014):
-        mag = np.full(1025, val, dtype=np.float32)
-        bar_bytes = p._mag_to_bar_bytes(mag)
-        assert max(bar_bytes) >= 1, (
-            f"val={val}: all bar bytes are zero — dB encoding did not take effect"
-        )
-
-
-def test_v2_mag_to_bar_bytes_exact_silence_zero():
-    """val=0.0 (exact digital silence) must map to byte 0."""
-    p = _make_pipeline()
-    mag = np.zeros(1025, dtype=np.float32)
-    bar_bytes = p._mag_to_bar_bytes(mag)
-    assert all(b == 0 for b in bar_bytes), (
-        f"Exact silence must map to byte 0; got {list(bar_bytes[:5])}"
-    )
-
-
-def test_v2_mag_to_bar_bytes_no_clipping():
-    """Full-scale magnitude (val≈553, peak Hamming sinusoid A=1.0) must not clip.
-
-    For A=1.0 on-bin sinusoid: peak mag ≈ A × sum(hamming(2048)) / 2 ≈ 553.
-    20*log10(553)+64 ≈ 118.9 → byte=118 (well below 255).
-    """
-    p = _make_pipeline()
-    mag = np.full(1025, 553.0, dtype=np.float32)
-    bar_bytes = p._mag_to_bar_bytes(mag)
-    assert max(bar_bytes) <= 130, (
-        f"Full-scale must not clip; expected ≤130, got {max(bar_bytes)}"
-    )
-    assert max(bar_bytes) >= 100, (
-        f"Full-scale byte too low; expected ≥100, got {max(bar_bytes)}"
-    )
-
-
-def test_v2_mag_to_bar_bytes_spectral_shape_preserved():
-    """Larger magnitude → larger byte: spectral ordering is preserved by dB encoding."""
-    p = _make_pipeline()
-    # Low bins strong (0.1), high bins weak (0.005) — verify bar ordering survives.
-    mag = np.zeros(1025, dtype=np.float32)
-    # 1000 Hz → bin ≈ round(1000 * 2048 / 48000) = 43
-    mag[:43] = 0.1
-    mag[43:] = 0.005
-    bar_bytes = p._mag_to_bar_bytes(mag)
-    # First bar (lowest freq, covering low bins) must exceed last bar (high freq).
-    assert bar_bytes[0] > bar_bytes[-1], (
-        f"Spectral shape must be preserved: bar[0]={bar_bytes[0]} bar[-1]={bar_bytes[-1]}"
-    )
-
-
-def test_v2_mag_to_bar_bytes_db_values_correct():
-    """Spot-check exact dB encoding values for observed live magnitudes."""
-    p = _make_pipeline()
-    # val=0.002: 20*log10(0.002)+64 = -53.98+64 = 10.02 → byte=10
-    # val=0.014: 20*log10(0.014)+64 = -37.07+64 = 26.93 → byte=26
-    for val, expected_byte in ((0.002, 10), (0.014, 26)):
-        mag = np.full(1025, val, dtype=np.float32)
-        bar_bytes = p._mag_to_bar_bytes(mag)
-        # All bars cover the same uniform mag — any bar value is representative.
-        got = bar_bytes[0]
-        assert got == expected_byte, (
-            f"val={val}: expected byte={expected_byte}, got={got}"
-        )
+# The V2 path: linear float mags → per-bar squelch → global peak EMA → 0..1 bars.
+# Key properties to verify:
+#  - Low-amplitude AirPlay signal (raw_mag ≈ 0.002–0.014) produces non-zero bars.
+#  - Spectral contrast is preserved (bass-dominant → bass bars > treble bars).
+#  - Quiet passages visibly lower than loud passages (peak EMA decays).
+#  - Exact silence remains zero.
 
 
 def test_v2_full_airplay_path_low_amplitude_nonzero_bars():
-    """Full AirPlay path at actual live amplitude (A≈0.003) must produce non-zero bars.
+    """Full AirPlay path at actual live amplitude (A≈0.003) produces non-zero bars.
 
-    This reproduces the ACTUAL production failure: iOS AirPlay at moderate volume
-    delivers S16LE values around ±98 (amplitude≈0.003 float).  Before the dB fix,
-    raw FFT bar means of 0.002–0.014 → int()=0 → all bars zero → lights dead.
+    Per-bar linear magnitude ≈ 0.01-1.0 at 440 Hz bin (well above _V2_NOISE_FLOOR),
+    global peak EMA adapts, normalised bars are non-zero.
     """
     src, w_fd = _make_airplay_stereo_pipe()
     canon = AudioCanonicalizer()
     pipeline = _make_pipeline(source=src)
 
-    sr = AIRPLAY_SAMPLE_RATE  # 44100
+    sr = AIRPLAY_SAMPLE_RATE
     n_total = sr * 3
     t = np.arange(n_total, dtype=np.float32) / sr
-    # Amplitude 0.003 ≈ S16 value ±98 — within observed live AirPlay range
     sig = (np.sin(2 * np.pi * 440 * t) * 0.003).astype(np.float32)
     payload = _s16le_stereo(sig, sig)
 
@@ -1238,10 +1160,67 @@ def test_v2_full_airplay_path_low_amplitude_nonzero_bars():
     src.close()
 
     features = pipeline.latest()
-    assert features is not None, (
-        "Pipeline must produce AudioFeatures for 3 s of low-amplitude audio (A=0.003)"
-    )
+    assert features is not None, "Pipeline must produce AudioFeatures for 3 s at A=0.003"
     assert max(features.bars) > 0.0, (
-        f"dB fix: low-amplitude AirPlay (A=0.003) must produce non-zero bars; "
+        f"Low-amplitude AirPlay (A=0.003) must produce non-zero bars; "
         f"max={max(features.bars):.6f}"
+    )
+
+
+def test_v2_spectral_contrast_bass_vs_treble():
+    """Bass-only signal: bass bars clearly dominate treble bars (spectral shape preserved).
+
+    With per-bar independent EMA (old path): all bars at ~0.33 simultaneously.
+    With global peak EMA (new path): bars near 100 Hz approach 1.0; treble bars ≈ 0.
+    """
+    p = _make_pipeline()
+    # Pure 100 Hz sine — energy only in the bass bar region, treble at quantization noise.
+    t = np.arange(3 * _CANONICAL_RATE, dtype=np.float32) / _CANONICAL_RATE
+    sig = (np.sin(2 * np.pi * 100 * t) * 0.5).astype(np.float32)
+    stereo = np.column_stack([sig, sig])
+    _feed_pipeline(p, stereo, epoch_id="ep-bass")
+
+    features = p.latest()
+    assert features is not None
+    bars = features.bars
+    n = len(bars)
+
+    # First 20% of bars cover the bass region (50–~200 Hz for 30 log-spaced bars).
+    bass_region = bars[:max(1, n // 5)]
+    treble_region = bars[n * 2 // 3:]
+
+    assert max(bass_region) > 0.5, (
+        f"Bass region must be strongly active for 100 Hz signal; "
+        f"max_bass={max(bass_region):.3f}"
+    )
+    assert max(bass_region) > max(treble_region) * 5, (
+        f"Bass ({max(bass_region):.3f}) must dominate treble ({max(treble_region):.3f}) "
+        f"for pure bass signal — spectral contrast requires this"
+    )
+
+
+def test_v2_global_peak_ema_gives_contrast_not_wall():
+    """Global peak EMA: bars_max clearly higher than bars_mean (no constant-mush floor).
+
+    With per-bar independent EMA (old path): bars_max ≈ bars_mean ≈ 0.33 always.
+    With global peak EMA: active spectral region near 1.0, inactive regions near 0.
+    """
+    p = _make_pipeline()
+    # 440 Hz sine — energy concentrated in one spectral region.
+    t = np.arange(3 * _CANONICAL_RATE, dtype=np.float32) / _CANONICAL_RATE
+    sig = (np.sin(2 * np.pi * 440 * t) * 0.5).astype(np.float32)
+    stereo = np.column_stack([sig, sig])
+    _feed_pipeline(p, stereo, epoch_id="ep-440")
+
+    features = p.latest()
+    assert features is not None
+    bars = features.bars
+    bars_max = max(bars)
+    bars_mean = sum(bars) / len(bars)
+
+    assert bars_max > 0.5, f"Dominant bar must be clearly active; bars_max={bars_max:.3f}"
+    # Contrast ratio: with old path this was ≈ 1.0-1.2; target is > 3× for a tone.
+    assert bars_max > bars_mean * 3, (
+        f"bars_max ({bars_max:.3f}) must be >> bars_mean ({bars_mean:.3f}); "
+        f"ratio={bars_max/bars_mean:.1f}x — if ratio ≤ 3 the mush problem remains"
     )

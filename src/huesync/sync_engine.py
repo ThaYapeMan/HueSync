@@ -792,12 +792,16 @@ class PcmAudioPipelineV2:
 
     _POLL_S: float = 0.005
     _SAMPLE_RATE: int = AudioCanonicalizer.TARGET_RATE  # 48000
-    # dB offset for byte encoding of raw FFT magnitudes (V2 path only).
-    # S16 quantization floor = 1/32768 ≈ 3.05e-5 amplitude; for broadband
-    # signal at that level E[|X_k|] ≈ 7.7e-4; 20*log10(7.7e-4) ≈ -62.3 dB.
-    # Offset 64 maps this to byte ≈ 2, giving ~2 dB headroom above the
-    # quantization noise floor.  Derived from S16 ADC resolution, not tuned.
-    _V2_MAG_DB_OFFSET: int = 64
+    # Per-bar squelch gate in linear STFT magnitude units.
+    # Derived from S16 ADC quantization floor: 1/32768 ≈ 3.05e-5 amplitude;
+    # for broadband signal at that level E[|X_k|] ≈ 7.7e-4.  Bars below this
+    # floor contain quantization noise rather than musical content.
+    _V2_NOISE_FLOOR: float = 1e-3
+    # Release time-constant for the global peak-EMA reference.
+    # Fast attack (BandNormaliser.DEFAULT_ATTACK_TAU_S = 5 ms) + slow fall so
+    # that a loud transient raises the reference immediately but lets it decay
+    # over ~1.5 s rather than chasing every quiet gap.
+    _V2_PEAK_RELEASE_TAU_S: float = 1.5
 
     def __init__(
         self,
@@ -845,6 +849,7 @@ class PcmAudioPipelineV2:
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._v2_peak_ema: float | None = None   # global peak reference for V2 normalisation
         self._diag_pcm_frame: int = 0  # bounded diagnostic counter (remove after fix confirmed)
 
     @property
@@ -874,33 +879,36 @@ class PcmAudioPipelineV2:
         return StftOnsetPipeline(sr, delta=self._onset_delta, alpha=self._onset_alpha)
 
     def _reset_dsp(self) -> None:
-        """Reset all DSP state: STFT history, BandNormaliser EMA, onset history."""
+        """Reset all DSP state: STFT history, peak EMA, onset history."""
         self._bar_stft.reset()
-        # gate=0.0: same policy as __init__ — CAVA-calibrated gate is not valid
-        # for raw FFT magnitudes.  Epoch resets must not revert to DEFAULT_GATE=5.0.
+        self._v2_peak_ema = None
+        # Keep the BandNormaliser instance for CAVA-compatibility tests and the
+        # gate=0.0 assertion; its normalise() is NOT called in the V2 bar path.
         self._normaliser = BandNormaliser(exertion_clip=self._exertion_clip, gate=0.0)
         self._onset_pipeline = self._build_onset_pipeline()
         self._current_epoch_id = None
 
-    def _mag_to_bar_bytes(self, mag: np.ndarray) -> bytes:
-        """Average combined STFT magnitude bins into N log-spaced bars → bytes 0–255."""
+    def _mag_to_bar_floats(self, mag: np.ndarray) -> list[float]:
+        """Average STFT magnitude bins into N log-spaced bars → linear floats.
+
+        Bars below _V2_NOISE_FLOOR are zeroed (squelch gate): they contain
+        only S16 quantization noise, not musical content.  No log encoding.
+        One clear owner of dynamic-range conditioning: the global peak EMA in
+        _process_canonical_frame.
+        """
         sr = self._SAMPLE_RATE
         n_bins = len(mag)
         log_lo = math.log10(max(self._lower_hz, 1.0))
         log_hi = math.log10(max(self._upper_hz, self._lower_hz + 1.0))
-        result = bytearray(self._n_bars)
+        result: list[float] = []
         for i in range(self._n_bars):
             f_lo = 10.0 ** (log_lo + i / self._n_bars * (log_hi - log_lo))
             f_hi = 10.0 ** (log_lo + (i + 1) / self._n_bars * (log_hi - log_lo))
             bin_lo = max(0, round(f_lo * WINDOW_SIZE / sr))
             bin_hi = min(n_bins, max(bin_lo + 1, round(f_hi * WINDOW_SIZE / sr)))
             val = float(np.mean(mag[bin_lo:bin_hi])) if bin_hi > bin_lo else 0.0
-            if val <= 0.0:
-                result[i] = 0
-            else:
-                db = 20.0 * math.log10(val) + self._V2_MAG_DB_OFFSET
-                result[i] = max(0, min(255, int(db)))
-        return bytes(result)
+            result.append(val if val > self._V2_NOISE_FLOOR else 0.0)
+        return result
 
     def _process_canonical_frame(self, frame: object) -> None:
         """Analyse one AnalysisPcmFrame and update _latest."""
@@ -923,25 +931,45 @@ class PcmAudioPipelineV2:
             onset_frames = self._onset_pipeline.push_mag(mag_frames)  # type: ignore[union-attr]
 
         for mag_frame, onset_result in zip(mag_frames, onset_frames, strict=True):
-            bar_bytes = self._mag_to_bar_bytes(mag_frame)
-            # TEMPORARY DIAGNOSTIC: log raw magnitudes and gate status every 50 frames.
-            # Remove once zero-bars bug is confirmed fixed on LXC.
+            # Linear per-bar magnitudes with per-bar squelch gate.
+            bar_mags = self._mag_to_bar_floats(mag_frame)
+
+            # Global peak EMA — fast attack, slow release (WLED-style AGC).
+            # One adaptive reference for all bars: preserves spectral shape
+            # (bass ≠ treble), temporal contrast (transients punch through),
+            # and source independence (no fixed scale calibrated to iOS volume).
+            peak = max(bar_mags) if bar_mags else 0.0
+            dt = self._normalise_dt
+            if self._v2_peak_ema is None:
+                self._v2_peak_ema = max(peak, self._V2_NOISE_FLOOR)
+            else:
+                a = 1.0 - math.exp(
+                    -dt / (BandNormaliser.DEFAULT_ATTACK_TAU_S if peak > self._v2_peak_ema
+                           else self._V2_PEAK_RELEASE_TAU_S)
+                )
+                self._v2_peak_ema += a * (peak - self._v2_peak_ema)
+
+            ref = max(self._v2_peak_ema, self._V2_NOISE_FLOOR)
+            bars = [min(m / ref, 1.0) for m in bar_mags]
+
+            # TEMPORARY DIAGNOSTIC: log linear magnitudes and normalised output every 50 frames.
+            # Remove once mushy-output defect is confirmed fixed on LXC.
             self._diag_pcm_frame += 1
             if self._diag_pcm_frame % 50 == 0:
                 raw_mag_mean = float(np.mean(mag_frame))
-                bar_byte_mean = sum(bar_bytes) / len(bar_bytes) if bar_bytes else 0.0
-                gate_fires = bar_byte_mean < self._normaliser.gate
+                bar_float_mean = sum(bar_mags) / len(bar_mags) if bar_mags else 0.0
+                bars_mean_v = sum(bars) / len(bars) if bars else 0.0
+                bars_max_v = max(bars) if bars else 0.0
                 log.info(
-                    "[pcm-v2 diag] frame=%d raw_mag_mean=%.3f bar_byte_mean=%.3f "
-                    "gate=%.2f gate_fires=%s",
+                    "[pcm-v2 diag] frame=%d raw_mag_mean=%.4f bar_float_mean=%.4f "
+                    "peak_ema=%.4f bars_mean=%.3f bars_max=%.3f",
                     self._diag_pcm_frame,
                     raw_mag_mean,
-                    bar_byte_mean,
-                    self._normaliser.gate,
-                    gate_fires,
+                    bar_float_mean,
+                    self._v2_peak_ema,
+                    bars_mean_v,
+                    bars_max_v,
                 )
-            normed = self._normaliser.normalise(bar_bytes, self._normalise_dt)
-            bars = [v / 255.0 for v in normed]
             total = sum(bars)
             n = len(bars)
             centroid = (
