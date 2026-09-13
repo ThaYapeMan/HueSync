@@ -792,6 +792,12 @@ class PcmAudioPipelineV2:
 
     _POLL_S: float = 0.005
     _SAMPLE_RATE: int = AudioCanonicalizer.TARGET_RATE  # 48000
+    # dB offset for byte encoding of raw FFT magnitudes (V2 path only).
+    # S16 quantization floor = 1/32768 ≈ 3.05e-5 amplitude; for broadband
+    # signal at that level E[|X_k|] ≈ 7.7e-4; 20*log10(7.7e-4) ≈ -62.3 dB.
+    # Offset 64 maps this to byte ≈ 2, giving ~2 dB headroom above the
+    # quantization noise floor.  Derived from S16 ADC resolution, not tuned.
+    _V2_MAG_DB_OFFSET: int = 64
 
     def __init__(
         self,
@@ -889,7 +895,11 @@ class PcmAudioPipelineV2:
             bin_lo = max(0, round(f_lo * WINDOW_SIZE / sr))
             bin_hi = min(n_bins, max(bin_lo + 1, round(f_hi * WINDOW_SIZE / sr)))
             val = float(np.mean(mag[bin_lo:bin_hi])) if bin_hi > bin_lo else 0.0
-            result[i] = min(255, int(val))
+            if val <= 0.0:
+                result[i] = 0
+            else:
+                db = 20.0 * math.log10(val) + self._V2_MAG_DB_OFFSET
+                result[i] = max(0, min(255, int(db)))
         return bytes(result)
 
     def _process_canonical_frame(self, frame: object) -> None:

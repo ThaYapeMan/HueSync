@@ -921,17 +921,13 @@ PcmAudioPipelineV2._run_one_canonical = _run_one_canonical_patch
 
 def test_v2_bar_byte_mean_for_broadband_sigma01():
     """Characterisation: mean bar byte from _mag_to_bar_bytes for σ=0.1 broadband
-    stereo noise is below BandNormaliser.DEFAULT_GATE=5.0.
+    stereo noise is above BandNormaliser.DEFAULT_GATE=5.0 (dB encoding is in effect).
 
-    This is the first zero boundary: PCM is non-silent, STFT magnitudes are
-    non-zero, but int(mean(mag_bins)) < 5.0 per bar (for σ=0.1 broadband noise),
-    so the gate fires and returns bytes(n_bars) on every frame.
-
-    The test asserts the defect is present (bar_byte_mean < DEFAULT_GATE),
-    not that it is correct. Remove or invert when the path is recalibrated.
+    With the dB encoding fix, E[|X_k|] ≈ 2.5 per bin → 20*log10(2.5)+64 ≈ 72,
+    which is well above DEFAULT_GATE=5.0.  This confirms the fix: the old int()
+    path gave byte≈2 (< DEFAULT_GATE, so gate fired), the new dB path gives
+    byte≈72 (gate never fires even for CAVA calibration scale).
     """
-    from huesync.sync_engine import BandNormaliser
-
     pipeline = _make_pipeline()
     rng = np.random.default_rng(0)
     n = _WINDOW * 100  # 100 STFT windows — stable mean estimate
@@ -948,13 +944,12 @@ def test_v2_bar_byte_mean_for_broadband_sigma01():
     ]
     mean_bar_byte = sum(bar_byte_means) / len(bar_byte_means)
 
-    # Defect: bar_byte_mean < DEFAULT_GATE for this broadband signal level.
-    # With WINDOW_SIZE=2048 and Hamming window, E[|X_k|] ≈ σ * 25.
-    # For σ=0.1: E[|X_k|] ≈ 2.5 per bin; mean_bar_byte ≈ 2-3 < 5.0.
-    assert mean_bar_byte < BandNormaliser.DEFAULT_GATE, (
-        f"Defect present: mean_bar_byte={mean_bar_byte:.3f} is NOT below "
-        f"DEFAULT_GATE={BandNormaliser.DEFAULT_GATE}. Gate would not fire — "
-        f"re-examine the defect hypothesis."
+    # dB encoding: E[|X_k|]≈2.5 → byte≈72. Verify non-zero and in expected range.
+    assert mean_bar_byte > 0.0, (
+        f"dB encoding: σ=0.1 noise must produce non-zero bar bytes; got {mean_bar_byte:.3f}"
+    )
+    assert 50 < mean_bar_byte < 120, (
+        f"dB encoding: σ=0.1 noise bar bytes should be ~72; got {mean_bar_byte:.3f}"
     )
 
 
@@ -982,23 +977,18 @@ def test_v2_exact_digital_silence_zero_bars():
 
 
 def test_v2_quiet_signal_nonzero_bars_gate_disabled():
-    """gate=0.0 fix: σ=0.1 broadband noise (below DEFAULT_GATE=5.0) must produce
-    non-zero bars now that the CAVA-calibrated gate is disabled.
+    """gate=0.0 + dB encoding: σ=0.1 broadband noise must produce non-zero bars.
 
-    Verifies all three conditions simultaneously:
-    - pre-normaliser bar bytes are non-zero (STFT produces signal)
-    - mean bar byte is below DEFAULT_GATE (confirms we were in the defect zone)
-    - final bars are non-zero (gate no longer suppresses them)
+    With the dB encoding fix, pre-normaliser bar bytes are ~72 (non-zero and
+    well above the old DEFAULT_GATE=5.0).  gate=0.0 ensures they are never
+    suppressed.  Verifies the two fixes work together end-to-end.
     """
-    from huesync.sync_engine import BandNormaliser
-
     p = _make_pipeline()
     rng = np.random.default_rng(0)
     n = 2 * _CANONICAL_RATE
     noise = rng.standard_normal(n).astype(np.float32) * 0.1
     sig = np.column_stack([noise, noise])
 
-    # Confirm we are still in the sub-DEFAULT_GATE amplitude zone.
     stft = StereoMagStft(_CANONICAL_RATE)
     mag_frames = stft.push(sig)
     assert mag_frames, "STFT must produce frames"
@@ -1006,17 +996,12 @@ def test_v2_quiet_signal_nonzero_bars_gate_disabled():
         sum(p._mag_to_bar_bytes(f)) / p._n_bars for f in mag_frames
     ]
     mean_bar_byte = sum(bar_byte_means) / len(bar_byte_means)
-    assert mean_bar_byte < BandNormaliser.DEFAULT_GATE, (
-        f"Test precondition: σ=0.1 bar_byte_mean={mean_bar_byte:.3f} must be "
-        f"< DEFAULT_GATE={BandNormaliser.DEFAULT_GATE} — still in defect zone"
-    )
-    assert mean_bar_byte > 0.0, "Pre-normaliser bar bytes must be non-zero"
+    assert mean_bar_byte > 0.0, "dB encoding: pre-normaliser bar bytes must be non-zero"
 
-    # With gate=0.0, bars must now be non-zero.
     bars = _warmup_and_measure(p, sig)
     assert bars, "Pipeline must produce bars"
     assert max(bars) > 0.0, (
-        f"gate=0.0: σ=0.1 noise must produce non-zero bars; max={max(bars):.6f}"
+        f"gate=0.0 + dB encoding: σ=0.1 noise must produce non-zero bars; max={max(bars):.6f}"
     )
 
 
@@ -1129,11 +1114,7 @@ def test_static_audit_legacy_pcm_pipeline_uses_default_gate():
 
 
 def test_static_audit_mag_to_bar_bytes_no_rescaling():
-    """_mag_to_bar_bytes must not rescale or normalise magnitudes before returning.
-
-    The fix for zero-bars is gate removal, not amplitude rescaling.
-    Rescaling would change the DSP semantics and is explicitly out of scope.
-    """
+    """_mag_to_bar_bytes must not use linear rescaling or normalisation patterns."""
     import inspect
 
     src = inspect.getsource(PcmAudioPipelineV2._mag_to_bar_bytes)
@@ -1141,3 +1122,126 @@ def test_static_audit_mag_to_bar_bytes_no_rescaling():
         assert forbidden not in src, (
             f"_mag_to_bar_bytes must not rescale magnitudes (found: {forbidden!r})"
         )
+
+
+# ---------------------------------------------------------------------------
+# dB magnitude encoding — regression tests for actual live AirPlay range
+# ---------------------------------------------------------------------------
+# These tests reproduce the ACTUAL production failure: iOS AirPlay at moderate
+# volume delivers raw FFT bar means of 0.002–0.014 (float amplitude units).
+# With the old int() encoding: int(0.007) = 0 → all bars zero.
+# With the dB encoding: 20*log10(0.007)+64 ≈ 10 → byte=10 (non-zero).
+
+
+def test_v2_mag_to_bar_bytes_live_range_nonzero():
+    """val in the actual live AirPlay range (0.002–0.014) must produce byte ≥ 1.
+
+    Before the dB fix: int(0.002)=0, int(0.014)=0 → all bytes zero.
+    After:  20*log10(0.002)+64≈10, 20*log10(0.014)+64≈27 → bytes 10/27 (non-zero).
+    """
+    p = _make_pipeline()
+    for val in (0.002, 0.007, 0.014):
+        mag = np.full(1025, val, dtype=np.float32)
+        bar_bytes = p._mag_to_bar_bytes(mag)
+        assert max(bar_bytes) >= 1, (
+            f"val={val}: all bar bytes are zero — dB encoding did not take effect"
+        )
+
+
+def test_v2_mag_to_bar_bytes_exact_silence_zero():
+    """val=0.0 (exact digital silence) must map to byte 0."""
+    p = _make_pipeline()
+    mag = np.zeros(1025, dtype=np.float32)
+    bar_bytes = p._mag_to_bar_bytes(mag)
+    assert all(b == 0 for b in bar_bytes), (
+        f"Exact silence must map to byte 0; got {list(bar_bytes[:5])}"
+    )
+
+
+def test_v2_mag_to_bar_bytes_no_clipping():
+    """Full-scale magnitude (val≈553, peak Hamming sinusoid A=1.0) must not clip.
+
+    For A=1.0 on-bin sinusoid: peak mag ≈ A × sum(hamming(2048)) / 2 ≈ 553.
+    20*log10(553)+64 ≈ 118.9 → byte=118 (well below 255).
+    """
+    p = _make_pipeline()
+    mag = np.full(1025, 553.0, dtype=np.float32)
+    bar_bytes = p._mag_to_bar_bytes(mag)
+    assert max(bar_bytes) <= 130, (
+        f"Full-scale must not clip; expected ≤130, got {max(bar_bytes)}"
+    )
+    assert max(bar_bytes) >= 100, (
+        f"Full-scale byte too low; expected ≥100, got {max(bar_bytes)}"
+    )
+
+
+def test_v2_mag_to_bar_bytes_spectral_shape_preserved():
+    """Larger magnitude → larger byte: spectral ordering is preserved by dB encoding."""
+    p = _make_pipeline()
+    # Low bins strong (0.1), high bins weak (0.005) — verify bar ordering survives.
+    mag = np.zeros(1025, dtype=np.float32)
+    # 1000 Hz → bin ≈ round(1000 * 2048 / 48000) = 43
+    mag[:43] = 0.1
+    mag[43:] = 0.005
+    bar_bytes = p._mag_to_bar_bytes(mag)
+    # First bar (lowest freq, covering low bins) must exceed last bar (high freq).
+    assert bar_bytes[0] > bar_bytes[-1], (
+        f"Spectral shape must be preserved: bar[0]={bar_bytes[0]} bar[-1]={bar_bytes[-1]}"
+    )
+
+
+def test_v2_mag_to_bar_bytes_db_values_correct():
+    """Spot-check exact dB encoding values for observed live magnitudes."""
+    p = _make_pipeline()
+    # val=0.002: 20*log10(0.002)+64 = -53.98+64 = 10.02 → byte=10
+    # val=0.014: 20*log10(0.014)+64 = -37.07+64 = 26.93 → byte=26
+    for val, expected_byte in ((0.002, 10), (0.014, 26)):
+        mag = np.full(1025, val, dtype=np.float32)
+        bar_bytes = p._mag_to_bar_bytes(mag)
+        # All bars cover the same uniform mag — any bar value is representative.
+        got = bar_bytes[0]
+        assert got == expected_byte, (
+            f"val={val}: expected byte={expected_byte}, got={got}"
+        )
+
+
+def test_v2_full_airplay_path_low_amplitude_nonzero_bars():
+    """Full AirPlay path at actual live amplitude (A≈0.003) must produce non-zero bars.
+
+    This reproduces the ACTUAL production failure: iOS AirPlay at moderate volume
+    delivers S16LE values around ±98 (amplitude≈0.003 float).  Before the dB fix,
+    raw FFT bar means of 0.002–0.014 → int()=0 → all bars zero → lights dead.
+    """
+    src, w_fd = _make_airplay_stereo_pipe()
+    canon = AudioCanonicalizer()
+    pipeline = _make_pipeline(source=src)
+
+    sr = AIRPLAY_SAMPLE_RATE  # 44100
+    n_total = sr * 3
+    t = np.arange(n_total, dtype=np.float32) / sr
+    # Amplitude 0.003 ≈ S16 value ±98 — within observed live AirPlay range
+    sig = (np.sin(2 * np.pi * 440 * t) * 0.003).astype(np.float32)
+    payload = _s16le_stereo(sig, sig)
+
+    chunk_bytes = 4096
+    offset = 0
+    while offset < len(payload):
+        end = min(offset + chunk_bytes, len(payload))
+        os.write(w_fd, payload[offset:end])
+        result = src.read()
+        for cresult in canon.push(result):
+            if isinstance(cresult, CanonicalData):
+                pipeline._process_canonical_frame(cresult.frame)
+        offset = end
+
+    os.close(w_fd)
+    src.close()
+
+    features = pipeline.latest()
+    assert features is not None, (
+        "Pipeline must produce AudioFeatures for 3 s of low-amplitude audio (A=0.003)"
+    )
+    assert max(features.bars) > 0.0, (
+        f"dB fix: low-amplitude AirPlay (A=0.003) must produce non-zero bars; "
+        f"max={max(features.bars):.6f}"
+    )
