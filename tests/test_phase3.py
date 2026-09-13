@@ -1047,6 +1047,7 @@ def test_v2_epoch_reset_clears_peak_ema():
     # Epoch change triggers _reset_dsp.
     _feed_pipeline(p, _silence_stereo(n=100), epoch_id="epoch-B")
     assert p._v2_peak_ema is None, "_reset_dsp must clear _v2_peak_ema"
+    assert p._bar_smooth is None, "_reset_dsp must clear _bar_smooth"
     assert p._normaliser.gate == 0.0, (
         f"BandNormaliser gate must remain 0.0 after reset; "
         f"got {p._normaliser.gate} (DEFAULT_GATE={BandNormaliser.DEFAULT_GATE})"
@@ -1223,4 +1224,88 @@ def test_v2_global_peak_ema_gives_contrast_not_wall():
     assert bars_max > bars_mean * 3, (
         f"bars_max ({bars_max:.3f}) must be >> bars_mean ({bars_mean:.3f}); "
         f"ratio={bars_max/bars_mean:.1f}x — if ratio ≤ 3 the mush problem remains"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Frequency-response compensation: np.max prevents bin-count bass bias
+# ---------------------------------------------------------------------------
+
+
+def test_v2_freq_response_equal_tones_similar_bars():
+    """Equal-amplitude tones at 100 Hz and 8000 Hz must produce similar bar magnitudes.
+
+    With np.mean (old): a 8 kHz tone appears 58× dimmer than 100 Hz (bar 28 has 58 bins,
+    bar 3 has 1 bin).  With np.max (new): both tones produce the same peak-bin magnitude
+    regardless of how many surrounding bins are empty, so the ratio must be < 5×.
+    """
+    sr = _CANONICAL_RATE
+    n = _WINDOW * 8
+    t = np.arange(n, dtype=np.float32) / sr
+    amplitude = 0.3
+
+    p = _make_pipeline()
+
+    low_stereo = np.column_stack([
+        (np.sin(2 * np.pi * 100 * t) * amplitude).astype(np.float32),
+        (np.sin(2 * np.pi * 100 * t) * amplitude).astype(np.float32),
+    ])
+    stft_low = StereoMagStft(sr)
+    mag_low = stft_low.push(low_stereo)[-1]
+    bars_low = p._mag_to_bar_floats(mag_low)
+
+    high_stereo = np.column_stack([
+        (np.sin(2 * np.pi * 8000 * t) * amplitude).astype(np.float32),
+        (np.sin(2 * np.pi * 8000 * t) * amplitude).astype(np.float32),
+    ])
+    stft_high = StereoMagStft(sr)
+    mag_high = stft_high.push(high_stereo)[-1]
+    bars_high = p._mag_to_bar_floats(mag_high)
+
+    max_low = max(bars_low)
+    max_high = max(bars_high)
+
+    assert max_low > 0.0, "100 Hz tone must produce non-zero bar float"
+    assert max_high > 0.0, "8000 Hz tone must produce non-zero bar float"
+    ratio = max_low / max_high if max_high > 0 else float("inf")
+    assert ratio < 5.0, (
+        f"Frequency response bias too large: 100 Hz ({max_low:.1f}) vs "
+        f"8 kHz ({max_high:.1f}) ratio={ratio:.1f}× — target < 5× (was ~58× with np.mean)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Per-bar falloff: bars decay gradually, not instantly, after signal drops
+# ---------------------------------------------------------------------------
+
+
+def test_v2_per_bar_falloff_holds_after_silence():
+    """After signal stops, bars retain > 50% of peak for at least 100 ms.
+
+    Without falloff: bars snap to 0 on the first silent STFT frame.
+    With falloff (tau=0.3 s): after 100 ms (10 frames × 10 ms), decay factor
+    = e^(-0.1/0.3) ≈ 0.72, so bars must remain above 50% of the active peak.
+    """
+    p = _make_pipeline()
+    sig = _sine_stereo(440, 440, 0.5, 0.5, n=2 * _CANONICAL_RATE)
+    _feed_pipeline(p, sig, epoch_id="ep-1")
+
+    features_active = p.latest()
+    assert features_active is not None
+    bar_peak = max(features_active.bars)
+    assert bar_peak > 0.5, f"Active signal must produce high bars; peak={bar_peak:.3f}"
+
+    # Feed ~100 ms of silence (4800 samples at 48000 Hz = 10 STFT hops).
+    silence_100ms = _silence_stereo(n=4800)
+    _feed_pipeline(p, silence_100ms, epoch_id="ep-1")
+
+    features_after = p.latest()
+    assert features_after is not None
+    peak_after = max(features_after.bars)
+
+    # Without falloff: peak_after would be 0 (bars drop instantly).
+    assert peak_after > bar_peak * 0.5, (
+        f"Falloff must hold bars above 50% after 100 ms of silence; "
+        f"peak_before={bar_peak:.3f} peak_after={peak_after:.3f} — "
+        f"if peak_after ≈ 0, per-bar falloff is not applied"
     )

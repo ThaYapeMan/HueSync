@@ -802,6 +802,12 @@ class PcmAudioPipelineV2:
     # that a loud transient raises the reference immediately but lets it decay
     # over ~1.5 s rather than chasing every quiet gap.
     _V2_PEAK_RELEASE_TAU_S: float = 1.5
+    # Per-bar fast-attack / slow-release decay time constant.
+    # Bars rise instantly (take new value if it exceeds the held value) and decay
+    # exponentially at ~0.3 s (37% at tau).  Matches WLED AudioReactive and
+    # CAVA's fall_off_weight behaviour: the eye can track a transient without
+    # bars snapping to zero the moment the signal dips for one frame.
+    _V2_BAR_FALL_TAU_S: float = 0.3
 
     def __init__(
         self,
@@ -850,6 +856,7 @@ class PcmAudioPipelineV2:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._v2_peak_ema: float | None = None   # global peak reference for V2 normalisation
+        self._bar_smooth: list[float] | None = None  # per-bar falloff state (V2)
         self._diag_pcm_frame: int = 0  # bounded diagnostic counter (remove after fix confirmed)
 
     @property
@@ -879,9 +886,10 @@ class PcmAudioPipelineV2:
         return StftOnsetPipeline(sr, delta=self._onset_delta, alpha=self._onset_alpha)
 
     def _reset_dsp(self) -> None:
-        """Reset all DSP state: STFT history, peak EMA, onset history."""
+        """Reset all DSP state: STFT history, peak EMA, per-bar falloff, onset history."""
         self._bar_stft.reset()
         self._v2_peak_ema = None
+        self._bar_smooth = None
         # Keep the BandNormaliser instance for CAVA-compatibility tests and the
         # gate=0.0 assertion; its normalise() is NOT called in the V2 bar path.
         self._normaliser = BandNormaliser(exertion_clip=self._exertion_clip, gate=0.0)
@@ -889,11 +897,17 @@ class PcmAudioPipelineV2:
         self._current_epoch_id = None
 
     def _mag_to_bar_floats(self, mag: np.ndarray) -> list[float]:
-        """Average STFT magnitude bins into N log-spaced bars → linear floats.
+        """Map STFT magnitude bins into N log-spaced bars → linear floats.
 
-        Bars below _V2_NOISE_FLOOR are zeroed (squelch gate): they contain
-        only S16 quantization noise, not musical content.  No log encoding.
-        One clear owner of dynamic-range conditioning: the global peak EMA in
+        Uses np.max (not np.mean) within each bar's bin range.  Derivation:
+        musical signals are tonal — each note occupies a single FFT bin.
+        np.mean divides that bin's energy by n_bins, creating systematic
+        n_bins× attenuation for high-frequency bars (1 bin at 50 Hz vs 69 bins
+        at 10 kHz).  np.max takes the peak energy in the bar regardless of
+        bin count, matching hardware spectrum analysers and WLED AudioReactive.
+
+        Bars below _V2_NOISE_FLOOR are zeroed (squelch gate).  No log encoding.
+        Dynamic-range conditioning is owned entirely by the global peak EMA in
         _process_canonical_frame.
         """
         sr = self._SAMPLE_RATE
@@ -906,7 +920,7 @@ class PcmAudioPipelineV2:
             f_hi = 10.0 ** (log_lo + (i + 1) / self._n_bars * (log_hi - log_lo))
             bin_lo = max(0, round(f_lo * WINDOW_SIZE / sr))
             bin_hi = min(n_bins, max(bin_lo + 1, round(f_hi * WINDOW_SIZE / sr)))
-            val = float(np.mean(mag[bin_lo:bin_hi])) if bin_hi > bin_lo else 0.0
+            val = float(np.max(mag[bin_lo:bin_hi])) if bin_hi > bin_lo else 0.0
             result.append(val if val > self._V2_NOISE_FLOOR else 0.0)
         return result
 
@@ -952,20 +966,34 @@ class PcmAudioPipelineV2:
             ref = max(self._v2_peak_ema, self._V2_NOISE_FLOOR)
             bars = [min(m / ref, 1.0) for m in bar_mags]
 
+            # Per-bar fast-attack / slow-release falloff (WLED/CAVA style).
+            # Instant attack: take the new value if it exceeds the held value.
+            # Exponential decay: held value × fall_factor each frame.
+            # Prevents bars from snapping to zero on a single quiet frame.
+            fall_factor = math.exp(-dt / self._V2_BAR_FALL_TAU_S)
+            if self._bar_smooth is None:
+                self._bar_smooth = list(bars)
+            else:
+                self._bar_smooth = [
+                    max(s * fall_factor, b)
+                    for s, b in zip(self._bar_smooth, bars, strict=True)
+                ]
+            bars = self._bar_smooth
+
             # TEMPORARY DIAGNOSTIC: log linear magnitudes and normalised output every 50 frames.
             # Remove once mushy-output defect is confirmed fixed on LXC.
             self._diag_pcm_frame += 1
             if self._diag_pcm_frame % 50 == 0:
                 raw_mag_mean = float(np.mean(mag_frame))
-                bar_float_mean = sum(bar_mags) / len(bar_mags) if bar_mags else 0.0
+                bar_float_max = max(bar_mags) if bar_mags else 0.0
                 bars_mean_v = sum(bars) / len(bars) if bars else 0.0
                 bars_max_v = max(bars) if bars else 0.0
                 log.info(
-                    "[pcm-v2 diag] frame=%d raw_mag_mean=%.4f bar_float_mean=%.4f "
-                    "peak_ema=%.4f bars_mean=%.3f bars_max=%.3f",
+                    "[pcm-v2 diag] frame=%d raw_mag_mean=%.4f bar_float_max=%.4f "
+                    "peak_ema=%.4f bars_smooth_mean=%.3f bars_smooth_max=%.3f",
                     self._diag_pcm_frame,
                     raw_mag_mean,
-                    bar_float_mean,
+                    bar_float_max,
                     self._v2_peak_ema,
                     bars_mean_v,
                     bars_max_v,
