@@ -28,6 +28,13 @@ from .models import BridgeConfig, Controller, Coupling, Profile, VirtualPlayerTy
 from .pcm_source import AirPlayPipeStereoSource, PcmSource, SqueezeliteShmSource
 from .storage import Storage
 from .sync_engine import PcmAudioPipeline, PcmAudioPipelineV2, SyncEngine
+
+try:
+    from .cavacore import is_cavacore_available as _is_cavacore_available
+    from .cavacore_pipeline import make_cavacore_pipeline as _make_cavacore_pipeline
+    _CAVACORE_AVAILABLE: bool = _is_cavacore_available()
+except Exception:
+    _CAVACORE_AVAILABLE = False
 from .types import Colour, LatencyProbe
 from .util import generate_locally_administered_mac
 
@@ -91,6 +98,7 @@ def _build_engine_profile(coupling: Coupling, storage: Storage) -> Profile | Non
         superflux_lag=ac.superflux_lag,
         use_hpss_separation=ac.use_hpss_separation,
         bars_source=ac.bars_source,
+        spectrum_backend=ac.spectrum_backend,
         bars=ac.bars,
         lower_cutoff_freq=ac.lower_cutoff_freq,
         higher_cutoff_freq=ac.higher_cutoff_freq,
@@ -475,6 +483,7 @@ class PlayerManager:
             superflux_mu=ac.superflux_mu,
             superflux_lag=ac.superflux_lag,
             use_hpss_separation=ac.use_hpss_separation,
+            spectrum_backend=ac.spectrum_backend,
             bars=ac.bars,
             lower_cutoff_freq=ac.lower_cutoff_freq,
             higher_cutoff_freq=ac.higher_cutoff_freq,
@@ -657,20 +666,29 @@ class PlayerManager:
         pipe_source.open()
         session.shm_source = pipe_source
 
-        pcm_analyser = PcmAudioPipelineV2(
-            source=pipe_source,
-            bars=profile.bars,
-            lower_cutoff_freq=profile.lower_cutoff_freq,
-            higher_cutoff_freq=profile.higher_cutoff_freq,
-            onset_method=profile.onset_method,
-            onset_delta=profile.onset_delta,
-            onset_alpha=profile.onset_alpha,
-            superflux_mu=profile.superflux_mu,
-            superflux_lag=profile.superflux_lag,
-            bass_hz=profile.bass_hz,
-            mid_hz=profile.mid_hz,
-            exertion_clip=profile.exertion_clip,
-        )
+        if profile.spectrum_backend == "cavacore":
+            if not _CAVACORE_AVAILABLE:
+                raise RuntimeError(
+                    "spectrum_backend='cavacore' requested but cavacore native library is "
+                    "not available.  Run: pip install .  (requires libfftw3-dev)"
+                )
+            log.info("AirPlay coupling %s using cavacore spectrum backend", profile.name)
+            pcm_analyser = _make_cavacore_pipeline(pipe_source, profile)
+        else:
+            pcm_analyser = PcmAudioPipelineV2(
+                source=pipe_source,
+                bars=profile.bars,
+                lower_cutoff_freq=profile.lower_cutoff_freq,
+                higher_cutoff_freq=profile.higher_cutoff_freq,
+                onset_method=profile.onset_method,
+                onset_delta=profile.onset_delta,
+                onset_alpha=profile.onset_alpha,
+                superflux_mu=profile.superflux_mu,
+                superflux_lag=profile.superflux_lag,
+                bass_hz=profile.bass_hz,
+                mid_hz=profile.mid_hz,
+                exertion_clip=profile.exertion_clip,
+            )
 
         engine = SyncEngine(
             None, profile, probe=session.probe,

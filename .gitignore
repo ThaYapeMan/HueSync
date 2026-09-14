@@ -28,3 +28,7 @@ web/node_modules/
 .claude/
 test-results/
 web/test-results/
+tests/tmp_accept/
+
+# cavacore native build artefact — compiled by hatch_build.py during pip install
+src/huesync/cavacore/_libcavacore.so

@@ -62,6 +62,46 @@ PYCHECK
     else
         _fail "Phase 3 import failed — run: bash scripts/update.sh"
     fi
+
+    # cavacore native library
+    _SO="$REPO_DIR/src/huesync/cavacore/_libcavacore.so"
+    if [[ -f "$_SO" ]]; then
+        _pass "cavacore native library present: $_SO"
+
+        # ldd: verify FFTW resolves at load time
+        if command -v ldd &>/dev/null; then
+            _LDD=$(ldd "$_SO" 2>/dev/null || true)
+            _FFTW_LINE=$(echo "$_LDD" | grep -i "fftw" || true)
+            if [[ -z "$_FFTW_LINE" ]]; then
+                _warn "ldd output contains no fftw entry — unexpected (library may be statically linked)"
+            elif echo "$_FFTW_LINE" | grep -q "not found"; then
+                _fail "libfftw3.so not resolved: $_FFTW_LINE"
+                _info "  Fix: apt install libfftw3-3 && bash scripts/update.sh"
+            else
+                _pass "FFTW resolves: $(echo "$_FFTW_LINE" | sed 's/^[[:space:]]*//')"
+            fi
+        else
+            _warn "ldd not found — cannot verify FFTW runtime linkage"
+        fi
+
+        # Python import check + native smoke test (init + idempotent close)
+        if "$VENV/bin/python" - 2>/dev/null <<'PYCHECK'
+from huesync.cavacore import CavaCoreBackend, is_cavacore_available
+assert is_cavacore_available(), "is_cavacore_available() returned False"
+b = CavaCoreBackend(n_bars=30, rate=48000, channels=2)
+b.close()
+b.close()  # idempotent
+print("OK")
+PYCHECK
+        then
+            _pass "CavaCoreBackend native smoke test passed"
+        else
+            _fail "CavaCoreBackend native smoke test failed — run: bash scripts/update.sh"
+        fi
+    else
+        _fail "cavacore native library not found: $_SO"
+        _info "  Fix: bash scripts/update.sh  (installs libfftw3-dev, then pip install rebuilds)"
+    fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -174,10 +214,12 @@ if [[ -p "$FIFO" ]]; then
         N=$(echo "$CONSUMERS" | grep -c . 2>/dev/null || true; echo 0)
         # Normalize: grep -c returns 1 on empty, so clamp to 0.
         [[ -z "$CONSUMERS" ]] && N=0
-        if [[ "$N" -le 2 ]]; then
-            _pass "FIFO has $N open file descriptor(s) (expected: shairport-sync writer + huesync reader)"
+        if [[ "$N" -eq 0 ]]; then
+            _info "FIFO has 0 open FDs — no active AirPlay session (expected when idle)"
+        elif [[ "$N" -le 2 ]]; then
+            _pass "FIFO has $N open FD(s) — AirPlay path active"
         else
-            _fail "FIFO has $N open file descriptors — possible duplicate reader"
+            _fail "FIFO has $N open FDs — possible duplicate reader"
             echo "$CONSUMERS" | head -5
         fi
     else
@@ -189,10 +231,12 @@ if [[ -p "$FIFO" ]]; then
                 [[ "$target" == "$FIFO_REAL" ]] && echo 1
             done
         done | wc -l)
-        if [[ "$N" -le 2 ]]; then
-            _pass "FIFO has $N open file descriptor(s) (/proc inspection)"
+        if [[ "$N" -eq 0 ]]; then
+            _info "FIFO has 0 open FDs — no active AirPlay session (/proc inspection)"
+        elif [[ "$N" -le 2 ]]; then
+            _pass "FIFO has $N open FD(s) — AirPlay path active (/proc inspection)"
         else
-            _fail "FIFO has $N open file descriptors — possible duplicate reader"
+            _fail "FIFO has $N open FDs — possible duplicate reader (/proc inspection)"
         fi
     fi
 else

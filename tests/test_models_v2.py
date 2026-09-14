@@ -442,3 +442,32 @@ def test_storage_backfill_migrates_players_key_to_virtual_players():
     assert players[0].player_mac == "aa:bb:cc:dd:ee:ff"
     assert not hasattr(players[0], "name")
     assert players[0].player_mac == "aa:bb:cc:dd:ee:ff"
+
+
+# ---------------------------------------------------------------------------
+# Analyser.spectrum_backend validation
+# ---------------------------------------------------------------------------
+
+
+def test_analyser_default_spectrum_backend_is_v2() -> None:
+    a = Analyser()
+    assert a.spectrum_backend == "v2"
+
+
+def test_analyser_cavacore_backend_accepted() -> None:
+    a = Analyser(spectrum_backend="cavacore")
+    assert a.spectrum_backend == "cavacore"
+
+
+def test_analyser_invalid_spectrum_backend_raises() -> None:
+    import pytest
+
+    with pytest.raises(ValueError, match="spectrum_backend"):
+        Analyser(spectrum_backend="unknown_backend")
+
+
+def test_analyser_from_dict_rejects_invalid_spectrum_backend() -> None:
+    import pytest
+
+    with pytest.raises(ValueError, match="spectrum_backend"):
+        Analyser.from_dict({"spectrum_backend": "bogus"})

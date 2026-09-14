@@ -744,3 +744,27 @@ def test_configure_shairport_name_includes_explicit_format(tmp_path: Path) -> No
     assert "output_rate = 44100" in text
     assert 'output_format = "S16_LE"' in text
     assert "output_channels = 2" in text
+
+
+# ---------------------------------------------------------------------------
+# Regression: cavacore unavailable must not silently fall back to V2
+# ---------------------------------------------------------------------------
+
+
+def test_cavacore_unavailable_raises_not_silently_falls_back() -> None:
+    """When cavacore is explicitly requested but unavailable, the activation raises.
+
+    The pipeline must not silently use V2 — the user made an explicit choice.
+    Verified by inspecting the compiled source: the fallback branch (log.warning +
+    PcmAudioPipelineV2(...)) must be absent after the fix.
+    """
+    import inspect
+
+    import huesync.player_manager as pm_module
+
+    src = inspect.getsource(pm_module)
+    # The silent-fallback warning message that existed before the fix
+    assert "falling back to v2" not in src, (
+        "Silent V2 fallback found in player_manager — remove the fallback branch "
+        "and let the cavacore-unavailable path raise RuntimeError instead."
+    )

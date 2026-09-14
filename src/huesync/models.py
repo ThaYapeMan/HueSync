@@ -10,6 +10,7 @@ import logging
 import uuid
 from dataclasses import dataclass, field, fields
 from enum import StrEnum
+from typing import ClassVar
 
 log = logging.getLogger(__name__)
 
@@ -204,6 +205,10 @@ class Profile:
     # CPU cost ~1 ms/frame at 100 Hz on a Proxmox LXC (2 vCPU) — opt-in only.
     use_hpss_separation: bool = False
     bars_source: str = "cava"
+    # Spectrum backend for the PCM pipeline path (AirPlay / native PCM).
+    # "v2"      — HueSync PcmAudioPipelineV2 (Hamming STFT, np.max aggregation)
+    # "cavacore" — upstream cavacore via ctypes (Hann, dual FFT, bandwidth-normalised mean)
+    spectrum_backend: str = "v2"
 
     # Three-layer loudness pipeline:
     #   1. exertion_clip (HERE): sets "maximally loud" in relative terms.
@@ -433,6 +438,19 @@ class Analyser:
     # "pcm_pipeline": bypass cava; use PcmAudioPipeline on the squeezelite SHM
     #   segment directly — same pipeline as AirPlay, lower latency, no FIFO.
     bars_source: str = "cava"
+    # Spectrum backend for native PCM analysis (AirPlay path).
+    # "v2"      — PcmAudioPipelineV2: HueSync Hamming STFT, np.max, peak EMA AGC
+    # "cavacore" — upstream cavacore: Hann dual-FFT, bandwidth-normalised mean, autosens
+    spectrum_backend: str = "v2"
+
+    _VALID_SPECTRUM_BACKENDS: ClassVar[frozenset[str]] = frozenset({"v2", "cavacore"})
+
+    def __post_init__(self) -> None:
+        if self.spectrum_backend not in self._VALID_SPECTRUM_BACKENDS:
+            raise ValueError(
+                f"Invalid spectrum_backend {self.spectrum_backend!r}; "
+                f"must be one of {sorted(self._VALID_SPECTRUM_BACKENDS)}"
+            )
 
     def to_dict(self) -> dict:
         return {
@@ -448,6 +466,7 @@ class Analyser:
             "higher_cutoff_freq": self.higher_cutoff_freq,
             "use_hpss_separation": self.use_hpss_separation,
             "bars_source": self.bars_source,
+            "spectrum_backend": self.spectrum_backend,
         }
 
     @classmethod
