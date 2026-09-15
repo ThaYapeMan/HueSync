@@ -247,7 +247,7 @@ echo "==> Verification"
 
 NQPTP_STATUS=$(systemctl is-active nqptp 2>/dev/null || echo "failed")
 SPS_STATUS=$(systemctl is-active shairport-sync 2>/dev/null || echo "failed")
-SPS_VERSION=$(shairport-sync --version 2>&1 | head -1 || echo "unknown")
+SPS_VERSION=$(/usr/local/bin/shairport-sync --version 2>&1 | head -1 || echo "unknown")
 PIPE=/run/huesync/airplay.pcm
 
 echo "  nqptp:            $NQPTP_STATUS"

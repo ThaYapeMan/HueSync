@@ -412,3 +412,179 @@ def test_is_cavacore_available_returns_true_when_so_built() -> None:
     from huesync.cavacore import is_cavacore_available
 
     assert is_cavacore_available() is True
+
+
+# ---------------------------------------------------------------------------
+# Regression: onset PCM fan-out — all frames reach STFT regardless of cavacore
+# ---------------------------------------------------------------------------
+
+
+def test_onset_fanout_two_half_blocks() -> None:
+    """Two 240-frame inputs: all 480 frames reach onset STFT; cavacore executes once.
+
+    cavacore's carry-buffer buffers the first 240 frames (returns None) and only
+    produces bars on the second call (480 total).  The STFT must be pushed on BOTH
+    calls — onset analysis must not be skipped when cavacore returns None.
+    """
+    p = _make_cava_pipeline()
+
+    stft_call_count = [0]
+    stft_total_frames = [0]
+    orig_stft = p._bar_stft.push
+
+    def tracked_stft(samples: np.ndarray) -> list:
+        stft_call_count[0] += 1
+        stft_total_frames[0] += len(samples)
+        return orig_stft(samples)
+
+    p._bar_stft.push = tracked_stft  # type: ignore[method-assign]
+
+    cava_none = [0]
+    cava_hit = [0]
+    orig_exec = p._cava.execute
+
+    def tracked_execute(samples: np.ndarray):  # type: ignore[return]
+        result = orig_exec(samples)
+        (cava_hit if result is not None else cava_none)[0] += 1
+        return result
+
+    p._cava.execute = tracked_execute  # type: ignore[method-assign]
+
+    half = np.zeros((240, 2), dtype=np.float32)
+    p._process_canonical_frame(_make_canonical_frame(half, sample_pos=0))
+    p._process_canonical_frame(_make_canonical_frame(half, sample_pos=240))
+
+    assert stft_call_count[0] == 2, f"STFT push called {stft_call_count[0]}× (expected 2)"
+    assert stft_total_frames[0] == 480, (
+        f"STFT received {stft_total_frames[0]} frames (expected 480)"
+    )
+    assert cava_none[0] == 1, (
+        f"cavacore returned None {cava_none[0]}× (expected 1 — first half-block)"
+    )
+    assert cava_hit[0] == 1, (
+        f"cavacore produced bars {cava_hit[0]}× (expected 1 — second half-block)"
+    )
+
+
+def test_onset_identical_pcm_reaches_both_branches() -> None:
+    """Canonical PCM passed to onset STFT and cavacore must be the same samples."""
+    p = _make_cava_pipeline()
+
+    stft_received: list[np.ndarray] = []
+    orig_stft = p._bar_stft.push
+
+    def capture_stft(s: np.ndarray) -> list:
+        stft_received.append(s.copy())
+        return orig_stft(s)
+
+    p._bar_stft.push = capture_stft  # type: ignore[method-assign]
+
+    cava_received: list[np.ndarray] = []
+    orig_exec = p._cava.execute
+
+    def capture_exec(s: np.ndarray):  # type: ignore[return]
+        cava_received.append(s.copy())
+        return orig_exec(s)
+
+    p._cava.execute = capture_exec  # type: ignore[method-assign]
+
+    pcm = _sine_stereo(440.0, _HOP)
+    p._process_canonical_frame(_make_canonical_frame(pcm))
+
+    assert len(stft_received) == 1 and len(cava_received) == 1
+    np.testing.assert_array_equal(
+        stft_received[0],
+        cava_received[0],
+        err_msg="STFT and cavacore received different PCM samples",
+    )
+
+
+def test_arbitrary_chunk_segmentation_delivers_all_pcm_to_stft() -> None:
+    """STFT receives all 480 frames regardless of arbitrary transport chunk sizes."""
+    p = _make_cava_pipeline()
+
+    total_stft_frames = [0]
+    orig_stft = p._bar_stft.push
+
+    def counting_stft(s: np.ndarray) -> list:
+        total_stft_frames[0] += len(s)
+        return orig_stft(s)
+
+    p._bar_stft.push = counting_stft  # type: ignore[method-assign]
+
+    for chunk_size in [73, 100, 50, 200, 57]:
+        p._process_canonical_frame(
+            _make_canonical_frame(np.zeros((chunk_size, 2), dtype=np.float32))
+        )
+
+    assert total_stft_frames[0] == 480, (
+        f"STFT received {total_stft_frames[0]} frames; expected 480"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Regression: clean-EOS tail flush
+# ---------------------------------------------------------------------------
+
+
+def test_clean_eos_tail_flushed() -> None:
+    """Non-silent partial audio in cavacore carry buffer is processed at clean EOS."""
+    p = _make_cava_pipeline()
+
+    pcm = _sine_stereo(440.0, 239)
+    p._process_canonical_frame(_make_canonical_frame(pcm))
+    assert p._cava.pending_frames == 239
+
+    p._flush_eos_tail()
+
+    assert p._cava.pending_frames == 0, "carry buffer must be empty after EOS flush"
+
+
+def test_invalidated_stream_discards_pending_without_flush() -> None:
+    """StreamInvalidated: _reset_dsp() discards pending frames (does not flush)."""
+    p = _make_cava_pipeline()
+
+    pcm = _sine_stereo(440.0, 239)
+    p._process_canonical_frame(_make_canonical_frame(pcm))
+    assert p._cava.pending_frames == 239
+
+    p._reset_dsp()
+
+    assert p._cava.pending_frames == 0, "new backend after reset must have no pending frames"
+
+
+def test_pending_onset_cleared_on_epoch_reset() -> None:
+    """_reset_dsp() must clear accumulated pending onset results."""
+    p = _make_cava_pipeline()
+
+    _feed(p, _sine_stereo(1000.0, _HOP))
+    p._reset_dsp()
+
+    assert p._pending_onset == [], "_pending_onset must be empty after _reset_dsp()"
+
+
+def test_eos_flush_with_non_silent_carry() -> None:
+    """EOS flush on a tone-filled carry buffer must not crash and must clear pending."""
+    p = _make_cava_pipeline()
+
+    _feed(p, _sine_stereo(440.0, _HOP * 10))  # warm up STFT + cavacore
+    # Feed a partial block to leave audio in the carry buffer.
+    p._process_canonical_frame(_make_canonical_frame(_sine_stereo(440.0, 239)))
+    assert p._cava.pending_frames > 0
+
+    p._flush_eos_tail()
+
+    assert p._cava.pending_frames == 0
+
+
+# ---------------------------------------------------------------------------
+# Regression: Profile backend validation
+# ---------------------------------------------------------------------------
+
+
+def test_profile_invalid_spectrum_backend_rejected() -> None:
+    """Profile must raise ValueError for unknown spectrum_backend values."""
+    from huesync.models import Profile
+
+    with pytest.raises(ValueError, match="spectrum_backend"):
+        Profile(spectrum_backend="unknown_backend")

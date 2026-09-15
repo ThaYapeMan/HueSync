@@ -38,3 +38,20 @@ const char *cavacore_error(struct cava_plan *p) {
 void cavacore_free_failed(struct cava_plan *p) {
     free(p);
 }
+
+/*
+ * Fully destroy a successfully initialised cava_plan.
+ *
+ * cava_destroy() (upstream) releases all inner audio buffers and FFTW plans
+ * allocated during cava_init() but does NOT call free() on the plan struct
+ * itself.  This wrapper performs both steps so the caller has a single,
+ * auditable cleanup path for plans that initialised successfully.
+ *
+ * Do NOT use this for failed plans (non-zero status) — use
+ * cavacore_free_failed() for those, because their inner pointers were never
+ * initialised and calling cava_destroy() on them is undefined behaviour.
+ */
+void cavacore_close_plan(struct cava_plan *p) {
+    cava_destroy(p);  /* free inner buffers and FFTW plans */
+    free(p);          /* free the plan struct itself (cava_destroy does not) */
+}

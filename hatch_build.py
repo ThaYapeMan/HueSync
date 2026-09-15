@@ -9,8 +9,9 @@ _libcavacore.so using gcc and libfftw3.  The standard HueSync installer
 (scripts/update.sh) installs the required system packages automatically before
 calling pip install:
     build-essential   (gcc + C headers)
-    libfftw3-dev      (FFTW3 development headers, build-time)
-    libfftw3-3        (FFTW3 shared library, runtime)
+    libfftw3-dev      (FFTW3 development headers, build-time only)
+libfftw3-3 / libfftw3-3t64 (runtime) is a transitive dependency of libfftw3-dev
+and does not need to be listed separately.
 If those packages are absent a RuntimeError is raised immediately so that pip
 reports the failure clearly with an actionable message.
 """
@@ -75,7 +76,7 @@ class CustomBuildHook(BuildHookInterface):
                 "cavacore build requires libfftw3-dev (fftw3.h not found by gcc).\n"
                 "Run the standard HueSync installer (installs this automatically):\n"
                 "  bash scripts/update.sh\n"
-                "Or install manually:  apt install libfftw3-dev libfftw3-3"
+                "Or install manually:  apt install libfftw3-dev"
             )
 
         cmd = [

@@ -130,6 +130,11 @@ class CavaCoreAudioPipeline:
         self._onset_pipeline: (
             StftOnsetPipeline | MultibandStftPipeline | SuperfluxStftPipeline
         ) = self._build_onset_pipeline()
+        # Onset results accumulated between cavacore executions.  Onset STFT runs
+        # at the canonical frame rate; cavacore executes every 480 frames.  When
+        # canonical chunks are < 480 frames, onset frames may accumulate here before
+        # cavacore produces bars.  All are drained at each cavacore publication.
+        self._pending_onset: list = []
 
         self._canonicalizer = AudioCanonicalizer()
         self._current_epoch_id: str | None = None
@@ -164,52 +169,23 @@ class CavaCoreAudioPipeline:
         self._bar_stft.reset()
         self._onset_pipeline = self._build_onset_pipeline()
         self._current_epoch_id = None
+        self._pending_onset.clear()
         # Destroy and recreate cavacore backend to flush its rolling buffer,
         # autosens state, gravity, integral, and all internal peak tracking.
         self._cava.close()
         self._cava = CavaCoreBackend(**self._cava_config)
 
-    def _process_canonical_frame(self, frame: object) -> None:
-        """Analyse one AnalysisPcmFrame: feed cavacore + onset pipeline, publish features."""
-        epoch_id: str = frame.epoch_id  # type: ignore[union-attr]
-        samples: np.ndarray = frame.samples  # type: ignore[union-attr]
-        # samples: shape (n, 2), float32, range [-1, 1], columns [L, R]
+    def _publish_features_from_cava(self, cava_bars: list[float]) -> None:
+        """Drain _pending_onset and publish AudioFeatures for the given cava bars."""
+        onset_results = list(self._pending_onset)
+        self._pending_onset.clear()
 
-        if epoch_id != self._current_epoch_id:
-            if self._current_epoch_id is not None:
-                self._reset_dsp()
-            with self._lock:
-                self._latest = None
-            self._current_epoch_id = epoch_id
-
-        # 1. cavacore spectrum bars — carry-buffered scheduler; may return None when
-        #    the carry buffer does not yet hold a complete 480-frame execution block.
-        #    samples.flatten() → [L0, R0, L1, R1, …] interleaved — cavacore convention.
-        cava_bars_np = self._cava.execute(samples)
-        if cava_bars_np is None:
-            return
-        cava_bars = cava_bars_np.tolist()
-
-        # 2. StereoMagStft for onset detection.  Produces 0, 1, or 2 frames
-        #    per canonical chunk depending on hop alignment.
-        mag_frames = self._bar_stft.push(samples)
-        if not mag_frames:
-            # STFT warmup: not enough history yet for a full frame.
-            # cavacore was still fed above so its rolling buffer stays current.
-            return
-
-        onset_frames = self._onset_pipeline.push_mag(mag_frames)
-
-        # 3. Publish once per canonical chunk using the last STFT-frame onset result.
-        #    When mag_frames has >1 frames (rare: input chunk > hop), we aggregate
-        #    onset as OR of all frame onset flags and max of strengths.
-        onset = False
-        onset_strength = 0.0
+        onset, onset_strength = False, 0.0
         onset_bass = onset_mid = onset_treble = False
         onset_bass_str = onset_mid_str = onset_treble_str = 0.0
 
         if self._onset_method == "multiband":
-            for of in onset_frames:
+            for of in onset_results:
                 (b_on, b_str), (m_on, m_str), (t_on, t_str) = of
                 onset_bass = onset_bass or b_on
                 onset_mid = onset_mid or m_on
@@ -220,7 +196,7 @@ class CavaCoreAudioPipeline:
             onset = onset_bass or onset_mid or onset_treble
             onset_strength = max(onset_bass_str, onset_mid_str, onset_treble_str)
         else:
-            for on, st in onset_frames:
+            for on, st in onset_results:
                 onset = onset or on
                 onset_strength = max(onset_strength, st)
 
@@ -249,6 +225,54 @@ class CavaCoreAudioPipeline:
                 relative_exertion=full,
             )
 
+    def _flush_eos_tail(self) -> None:
+        """Process pending cavacore frames at clean EOS by zero-padding to block boundary.
+
+        Clean EOS (source disconnected normally): pending frames in the cavacore
+        carry-buffer are valid audio that must not be silently discarded.
+        Zero-padding to 480 frames forces one final cava_execute() call.
+
+        Invalidated / broken stream: call _reset_dsp() directly without flushing.
+        Pending samples from a broken stream are intentionally discarded — flush()
+        must not be called on a carry buffer that may contain corrupted audio.
+        """
+        if self._current_epoch_id is None:
+            return
+        cava_bars_np = self._cava.flush()
+        if cava_bars_np is None:
+            return  # carry buffer was already empty
+        self._publish_features_from_cava(cava_bars_np.tolist())
+
+    def _process_canonical_frame(self, frame: object) -> None:
+        """Analyse one AnalysisPcmFrame: feed cavacore + onset pipeline, publish features."""
+        epoch_id: str = frame.epoch_id  # type: ignore[union-attr]
+        samples: np.ndarray = frame.samples  # type: ignore[union-attr]
+        # samples: shape (n, 2), float32, range [-1, 1], columns [L, R]
+
+        if epoch_id != self._current_epoch_id:
+            if self._current_epoch_id is not None:
+                self._reset_dsp()
+            with self._lock:
+                self._latest = None
+            self._current_epoch_id = epoch_id
+
+        # 1. Onset STFT — always, regardless of cavacore block readiness.
+        #    All canonical PCM must reach onset analysis even when the cavacore
+        #    carry-buffer has not yet accumulated a complete 480-frame execution block.
+        mag_frames = self._bar_stft.push(samples)
+        if mag_frames:
+            onset_frames = self._onset_pipeline.push_mag(mag_frames)
+            self._pending_onset.extend(onset_frames)
+
+        # 2. cavacore spectrum bars — carry-buffered scheduler; returns None until
+        #    a complete 480-frame execution block is ready.
+        cava_bars_np = self._cava.execute(samples)
+        if cava_bars_np is None:
+            return  # onset state updated above; defer publication
+
+        # 3. Publish features: drain accumulated onset + current cavacore bars.
+        self._publish_features_from_cava(cava_bars_np.tolist())
+
     def _run(self) -> None:
         try:
             while not self._stop.is_set():
@@ -271,6 +295,9 @@ class CavaCoreAudioPipeline:
                         with self._lock:
                             self._latest = None
                     elif isinstance(cresult, EndOfStream):
+                        # Clean EOS: flush pending cavacore carry buffer before reset.
+                        # StreamInvalidated above calls _reset_dsp() directly (no flush).
+                        self._flush_eos_tail()
                         self._reset_dsp()
                         with self._lock:
                             self._latest = None

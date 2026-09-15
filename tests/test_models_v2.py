@@ -471,3 +471,40 @@ def test_analyser_from_dict_rejects_invalid_spectrum_backend() -> None:
 
     with pytest.raises(ValueError, match="spectrum_backend"):
         Analyser.from_dict({"spectrum_backend": "bogus"})
+
+
+# ---------------------------------------------------------------------------
+# Profile spectrum_backend validation
+# ---------------------------------------------------------------------------
+
+
+def test_profile_default_backend_is_v2() -> None:
+    from huesync.models import Profile
+
+    p = Profile()
+    assert p.spectrum_backend == "v2"
+
+
+def test_profile_cavacore_backend_accepted() -> None:
+    from huesync.models import Profile
+
+    p = Profile(spectrum_backend="cavacore")
+    assert p.spectrum_backend == "cavacore"
+
+
+def test_profile_invalid_backend_raises() -> None:
+    import pytest
+
+    from huesync.models import Profile
+
+    with pytest.raises(ValueError, match="spectrum_backend"):
+        Profile(spectrum_backend="unknown_backend")
+
+
+def test_profile_from_dict_rejects_invalid_backend() -> None:
+    import pytest
+
+    from huesync.models import Profile
+
+    with pytest.raises(ValueError, match="spectrum_backend"):
+        Profile.from_dict({"spectrum_backend": "bogus"})

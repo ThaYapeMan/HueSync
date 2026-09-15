@@ -103,6 +103,12 @@ def _load_lib() -> ctypes.CDLL:
     lib.cavacore_free_failed.restype = None
     lib.cavacore_free_failed.argtypes = [c_void_p]
 
+    # Full cleanup for a successfully initialised plan: cava_destroy() releases inner
+    # buffers and FFTW plans, then free() releases the plan struct itself.
+    # cava_destroy() alone does NOT free the plan struct pointer.
+    lib.cavacore_close_plan.restype = None
+    lib.cavacore_close_plan.argtypes = [c_void_p]
+
     return lib
 
 
@@ -172,8 +178,8 @@ class CavaCoreBackend:
     scaling_mode:
         SCALING_LINEAR (0) — samples are used as-is by cavacore after the
         32768 amplitude scale applied at this boundary.
-        SCALING_DECIBEL (1) — cavacore divides by 32768 internally; incompatible
-        with the boundary scaling and not used by HueSync.
+        SCALING_DECIBEL (1) — dB-based logarithmic output scaling. Not used by HueSync;
+        the 32768 boundary scale applied here targets SCALING_LINEAR only.
     """
 
     def __init__(
@@ -246,6 +252,13 @@ class CavaCoreBackend:
     def channels(self) -> int:
         return self._channels
 
+    @property
+    def pending_frames(self) -> int:
+        """Number of stereo frames currently buffered in the carry queue (0..479)."""
+        if self._carry_flat is None:
+            return 0
+        return len(self._carry_flat) // self._channels
+
     def execute(self, samples: np.ndarray) -> np.ndarray | None:
         """Feed samples through the carry-buffer scheduler and return bar values.
 
@@ -307,10 +320,50 @@ class CavaCoreBackend:
 
         return result  # None when no complete block was processed
 
+    def flush(self) -> np.ndarray | None:
+        """Zero-pad the carry buffer to a complete 480-frame block and execute once.
+
+        Use only at clean EOS to account for valid audio that does not fill a
+        complete execution block.  Returns the bar vector, or None when the carry
+        buffer is already empty.  Not valid after close().
+
+        Clean EOS vs. invalidated stream
+        ----------------------------------
+        flush() is for *clean* EOS (source disconnected normally): pending audio
+        is valid and must not be silently discarded.  For an invalidated or broken
+        stream, discard pending state directly by closing and recreating the backend
+        — do not call flush() on a carry buffer from a broken stream.
+
+        The carry buffer stores already-scaled samples (×32768 applied by execute()).
+        Zero-padding appends silence; the N real audio frames are processed alongside
+        (480 - N) silent frames.
+        """
+        if self._plan is None:
+            raise RuntimeError("CavaCoreBackend has been closed")
+        if self._carry_flat is None or len(self._carry_flat) == 0:
+            return None
+        n_carry = len(self._carry_flat)
+        n_pad = self._exec_block_flat - n_carry
+        if n_pad <= 0:
+            return None
+        pad = np.zeros(n_pad, dtype=np.float64)
+        buf = np.concatenate([self._carry_flat, pad])
+        self._carry_flat = None  # consumed
+        chunk = np.ascontiguousarray(buf)
+        c_in = chunk.ctypes.data_as(ctypes.POINTER(ctypes.c_double))
+        self._lib.cava_execute(c_in, len(chunk), self._out_buf, self._plan)
+        raw = np.frombuffer(self._out_buf, dtype=np.float64).copy()
+        if self._channels == 2:
+            return (raw[: self._n_bars] + raw[self._n_bars :]) / 2.0
+        return raw[: self._n_bars].copy()
+
     def close(self) -> None:
         """Release the cava_plan and fftw3 resources.  Idempotent."""
         if self._plan is not None and self._lib is not None:
-            self._lib.cava_destroy(self._plan)
+            # cavacore_close_plan = cava_destroy (inner buffers + FFTW plans)
+            #                     + free(plan struct)
+            # cava_destroy alone does not free the plan struct pointer.
+            self._lib.cavacore_close_plan(self._plan)
             self._plan = None
 
     def __enter__(self) -> CavaCoreBackend:

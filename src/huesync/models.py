@@ -226,6 +226,15 @@ class Profile:
 
     enabled: bool = True
 
+    _VALID_SPECTRUM_BACKENDS: ClassVar[frozenset[str]] = frozenset({"v2", "cavacore"})
+
+    def __post_init__(self) -> None:
+        if self.spectrum_backend not in self._VALID_SPECTRUM_BACKENDS:
+            raise ValueError(
+                f"Invalid spectrum_backend {self.spectrum_backend!r}; "
+                f"must be one of {sorted(self._VALID_SPECTRUM_BACKENDS)}"
+            )
+
     def to_dict(self) -> dict:
         return dict(self.__dict__)
 

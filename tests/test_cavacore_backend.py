@@ -413,3 +413,94 @@ def test_amplitude_silence_produces_zeros() -> None:
     assert out is not None
     assert np.all(out == 0.0), f"Expected zeros from silence, got max={out.max():.6f}"
     b.close()
+
+
+# ---------------------------------------------------------------------------
+# pending_frames property
+# ---------------------------------------------------------------------------
+
+
+def test_pending_frames_zero_initially() -> None:
+    b = _make_backend()
+    assert b.pending_frames == 0
+    b.close()
+
+
+def test_pending_frames_increments_with_partial_block() -> None:
+    b = _make_backend()
+    b.execute(_silence(100))
+    assert b.pending_frames == 100
+    b.execute(_silence(50))
+    assert b.pending_frames == 150
+    b.close()
+
+
+def test_pending_frames_zero_after_full_block() -> None:
+    b = _make_backend()
+    b.execute(_silence(_HOP))  # exactly 480 frames — full block, no carry
+    assert b.pending_frames == 0
+    b.close()
+
+
+# ---------------------------------------------------------------------------
+# flush() — clean-EOS carry-buffer drain
+# ---------------------------------------------------------------------------
+
+
+def test_flush_returns_none_when_carry_empty() -> None:
+    """flush() returns None when the carry buffer is empty."""
+    b = _make_backend()
+    assert b.flush() is None
+    b.close()
+
+
+def test_flush_partial_carry_returns_bars() -> None:
+    """flush() zero-pads a partial carry buffer and returns a bar vector."""
+    b = _make_backend()
+    result = b.execute(_silence(239))
+    assert result is None, "partial block must not produce output"
+    flushed = b.flush()
+    assert flushed is not None, "flush() must return bars for a non-empty carry"
+    assert flushed.shape == (_N_BARS,)
+    b.close()
+
+
+def test_flush_clears_carry_buffer() -> None:
+    """After flush(), pending_frames is zero."""
+    b = _make_backend()
+    b.execute(_silence(239))
+    assert b.pending_frames == 239
+    b.flush()
+    assert b.pending_frames == 0
+    b.close()
+
+
+def test_flush_after_close_raises() -> None:
+    """flush() raises RuntimeError after close()."""
+    b = _make_backend()
+    b.close()
+    with pytest.raises(RuntimeError, match="closed"):
+        b.flush()
+
+
+def test_flush_with_non_silent_audio_returns_nonzero_bars() -> None:
+    """flush() on a non-silent carry buffer should return bars that are not all zero."""
+    b = _make_backend()
+    _warmup(b, n_seconds=2.0)  # let autosens stabilise
+    # Feed 239 frames of a tone — does not complete a block.
+    b.execute(_sine_stereo(440.0, 239, amplitude=0.9))
+    flushed = b.flush()
+    assert flushed is not None
+    # After zero-padding, some bars should be non-zero (tone energy present).
+    assert flushed.max() > 0.0, "Expected nonzero bars after tone flush, got all zeros"
+    b.close()
+
+
+def test_no_plan_leak_across_repeated_create_reset_close() -> None:
+    """Creating and closing many backends must not crash (memory / fd exhaustion)."""
+    for _ in range(50):
+        b = _make_backend()
+        b.execute(_silence(_HOP))
+        b.close()
+    b2 = _make_backend()  # must succeed even after many cycles
+    b2.close()
