@@ -11,6 +11,7 @@ import uuid
 from dataclasses import dataclass, field, fields
 from enum import StrEnum
 
+from .spectrum_engine import VALID_BARS_SOURCES as _VALID_BARS_SOURCES
 from .spectrum_engine import VALID_ENGINE_IDS as _VALID_ENGINE_IDS
 
 log = logging.getLogger(__name__)
@@ -228,6 +229,11 @@ class Profile:
     enabled: bool = True
 
     def __post_init__(self) -> None:
+        if self.bars_source not in _VALID_BARS_SOURCES:
+            raise ValueError(
+                f"Invalid bars_source {self.bars_source!r}; "
+                f"must be one of {sorted(_VALID_BARS_SOURCES)}"
+            )
         if self.spectrum_backend not in _VALID_ENGINE_IDS:
             raise ValueError(
                 f"Invalid spectrum_backend {self.spectrum_backend!r}; "
@@ -461,6 +467,11 @@ class Analyser:
     spectrum_backend: str = "v2"
 
     def __post_init__(self) -> None:
+        if self.bars_source not in _VALID_BARS_SOURCES:
+            raise ValueError(
+                f"Invalid bars_source {self.bars_source!r}; "
+                f"must be one of {sorted(_VALID_BARS_SOURCES)}"
+            )
         if self.spectrum_backend not in _VALID_ENGINE_IDS:
             raise ValueError(
                 f"Invalid spectrum_backend {self.spectrum_backend!r}; "

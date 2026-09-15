@@ -77,6 +77,45 @@ class SharedAnalysis:
 
 
 @dataclass
+class SharedAnalysisFrame:
+    """Enriched per-canonical-frame context passed to every AnalysisProcessor.
+
+    Replaces the narrower SharedAnalysis that was passed to SpectrumEngine.
+    SpectrumProcessor converts this to SharedAnalysis internally so the
+    SpectrumEngine protocol remains unchanged.
+    """
+
+    pcm: np.ndarray               # shape (n, 2) float32 — canonical stereo
+    mag_frames: list[np.ndarray]  # each (n_bins,) float32 — from StereoMagStft
+    epoch_id: str                 # current epoch identifier
+    sample_start: int             # canonical epoch position of pcm[0]
+    sample_end: int               # canonical epoch position past pcm[-1]
+    hop_sample_starts: list[int]  # canonical position of the first sample in each mag_frame
+
+
+@dataclass
+class ProcessorUpdate:
+    """Partial AudioFeatures contribution from one AnalysisProcessor per hop.
+
+    SpectrumProcessor populates ``bars``; BeatDetector populates onset fields.
+    Fields not produced by a processor are left None.
+    """
+
+    processor_id: str
+    sample_start: int
+    sample_end: int
+    bars: list[float] | None = None
+    onset: bool | None = None
+    onset_strength: float | None = None
+    onset_bass: bool | None = None
+    onset_mid: bool | None = None
+    onset_treble: bool | None = None
+    onset_bass_strength: float | None = None
+    onset_mid_strength: float | None = None
+    onset_treble_strength: float | None = None
+
+
+@dataclass
 class PublicationRecord:
     """Atomic publication snapshot from CanonicalAnalysisPipeline."""
 
@@ -84,7 +123,83 @@ class PublicationRecord:
     epoch: str
     sample_pos: int
     features: object            # AudioFeatures — typed as object to avoid circular import
-    effective_engine_id: str
+    effective_engine_id: str   # kept for backward compatibility
+    sample_end: int = 0        # canonical position past the last sample in this publication
+    effective_processor_ids: tuple[str, ...] = ()  # IDs of all processors that contributed
+
+
+# ---------------------------------------------------------------------------
+# AnalysisProcessor protocol
+# ---------------------------------------------------------------------------
+
+
+class AnalysisProcessor(Protocol):
+    """Contract for a pluggable analysis processor.
+
+    An AnalysisProcessor receives SharedAnalysisFrame per canonical PCM frame
+    and returns zero or more ProcessorUpdates.  Multiple processors compose
+    independently inside CanonicalAnalysisPipeline: SpectrumProcessor for bars,
+    BeatDetector for onset, and extension points for loudness/chroma.
+
+    Implementations must be stateful but NOT thread-safe; CAP calls feed()
+    from a single worker thread.
+    """
+
+    @property
+    def processor_id(self) -> str:
+        """Stable string identifier (e.g. 'v2', 'cavacore', 'beat_detector')."""
+        ...
+
+    def feed(self, frame: SharedAnalysisFrame) -> list[ProcessorUpdate]:
+        """Process one canonical frame; return zero or more updates."""
+        ...
+
+    def flush(self) -> list[ProcessorUpdate]:
+        """Flush carry buffer at clean EOS; return final updates."""
+        ...
+
+    def reset(self) -> None:
+        """Reset all internal state (epoch transition or stream invalidation)."""
+        ...
+
+    def close(self) -> None:
+        """Release native resources (e.g. cavacore plan allocation)."""
+        ...
+
+
+# ---------------------------------------------------------------------------
+# Extension-point protocols (no production DSP; future composition points)
+# ---------------------------------------------------------------------------
+
+
+class LoudnessAnalyzer(Protocol):
+    """Extension point for long-term loudness tracking.
+
+    Not implemented in production; reserved for future RMS/LUFS analysis.
+    Satisfies AnalysisProcessor structurally.
+    """
+
+    @property
+    def processor_id(self) -> str: ...
+    def feed(self, frame: SharedAnalysisFrame) -> list[ProcessorUpdate]: ...
+    def flush(self) -> list[ProcessorUpdate]: ...
+    def reset(self) -> None: ...
+    def close(self) -> None: ...
+
+
+class ChromaAnalyzer(Protocol):
+    """Extension point for chroma/key detection.
+
+    Not implemented in production; reserved for future tonal analysis.
+    Satisfies AnalysisProcessor structurally.
+    """
+
+    @property
+    def processor_id(self) -> str: ...
+    def feed(self, frame: SharedAnalysisFrame) -> list[ProcessorUpdate]: ...
+    def flush(self) -> list[ProcessorUpdate]: ...
+    def reset(self) -> None: ...
+    def close(self) -> None: ...
 
 
 # ---------------------------------------------------------------------------
@@ -340,6 +455,66 @@ class CavaCoreSpectrumEngine:
 
     def close(self) -> None:
         self._cava.close()
+
+
+# ---------------------------------------------------------------------------
+# SpectrumProcessor — AnalysisProcessor adapter for SpectrumEngine
+# ---------------------------------------------------------------------------
+
+
+class SpectrumProcessor:
+    """Wraps a SpectrumEngine to satisfy the AnalysisProcessor protocol.
+
+    Converts SharedAnalysisFrame → SharedAnalysis for backward compatibility
+    with SpectrumEngine.feed(), then converts SpectrumUpdates → ProcessorUpdates.
+
+    This is the canonical spectrum composition point: adding a new SpectrumEngine
+    (engine #3) only requires updating the ENGINES registry; SpectrumProcessor
+    and CanonicalAnalysisPipeline require no changes.
+    """
+
+    def __init__(self, engine: SpectrumEngine) -> None:
+        self._engine = engine
+
+    @property
+    def processor_id(self) -> str:
+        return self._engine.engine_id
+
+    def feed(self, frame: SharedAnalysisFrame) -> list[ProcessorUpdate]:
+        shared = SharedAnalysis(
+            mag_frames=frame.mag_frames,
+            pcm=frame.pcm,
+            sample_pos=frame.sample_start,
+            n_samples=len(frame.pcm),
+        )
+        updates = self._engine.feed(frame.pcm, shared)
+        return [
+            ProcessorUpdate(
+                processor_id=self._engine.engine_id,
+                sample_start=u.sample_pos,
+                sample_end=u.sample_pos + _STFT_HOP,
+                bars=u.bars,
+            )
+            for u in updates
+        ]
+
+    def flush(self) -> list[ProcessorUpdate]:
+        updates = self._engine.flush()
+        return [
+            ProcessorUpdate(
+                processor_id=self._engine.engine_id,
+                sample_start=u.sample_pos,
+                sample_end=u.sample_pos + _STFT_HOP,
+                bars=u.bars,
+            )
+            for u in updates
+        ]
+
+    def reset(self) -> None:
+        self._engine.reset()
+
+    def close(self) -> None:
+        self._engine.close()
 
 
 # ---------------------------------------------------------------------------

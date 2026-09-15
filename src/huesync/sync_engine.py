@@ -39,9 +39,12 @@ from .latency import NoLatencyProbe
 from .models import Profile
 from .pcm_source import WINDOW_SIZE, PcmHpss, PcmSource, PcmStft
 from .spectrum_engine import (
+    AnalysisProcessor,
+    ProcessorUpdate,
     PublicationRecord,
-    SharedAnalysis,
+    SharedAnalysisFrame,
     SpectrumEngine,
+    SpectrumProcessor,
 )
 from .types import (
     AudioFeatures,
@@ -766,6 +769,117 @@ class StereoMagStft:
 
 
 # ---------------------------------------------------------------------------
+# BeatDetector — onset detection AnalysisProcessor
+# ---------------------------------------------------------------------------
+
+
+class BeatDetector:
+    """Onset detection processor wrapping the three existing onset pipelines.
+
+    Satisfies the AnalysisProcessor protocol structurally (no explicit subclass).
+    Runs push_mag() on each incoming SharedAnalysisFrame and returns one
+    ProcessorUpdate per STFT hop with typed onset fields.
+
+    BeatDetector is independent of SpectrumProcessor: the two processors run
+    in parallel inside CanonicalAnalysisPipeline.  Their outputs are assembled
+    by CAP rather than being wired together.
+    """
+
+    _SAMPLE_RATE: int = AudioCanonicalizer.TARGET_RATE  # 48000
+
+    def __init__(
+        self,
+        onset_method: str,
+        onset_delta: float,
+        onset_alpha: float,
+        superflux_mu: int,
+        superflux_lag: int,
+        bass_hz: int,
+        mid_hz: int,
+    ) -> None:
+        self._onset_method = onset_method
+        self._onset_delta = onset_delta
+        self._onset_alpha = onset_alpha
+        self._superflux_mu = superflux_mu
+        self._superflux_lag = superflux_lag
+        self._bass_hz = bass_hz
+        self._mid_hz = mid_hz
+        self._onset_pipeline: (
+            StftOnsetPipeline | MultibandStftPipeline | SuperfluxStftPipeline
+        ) = self._build_onset_pipeline()
+
+    @property
+    def processor_id(self) -> str:
+        return "beat_detector"
+
+    def _build_onset_pipeline(
+        self,
+    ) -> StftOnsetPipeline | MultibandStftPipeline | SuperfluxStftPipeline:
+        sr = self._SAMPLE_RATE
+        if self._onset_method == "multiband":
+            return MultibandStftPipeline(
+                sr, bass_hz=self._bass_hz, mid_hz=self._mid_hz,
+                delta=self._onset_delta, alpha=self._onset_alpha,
+            )
+        if self._onset_method == "superflux":
+            return SuperfluxStftPipeline(
+                sr, mu=self._superflux_mu, lag=self._superflux_lag,
+                delta=self._onset_delta, alpha=self._onset_alpha,
+            )
+        return StftOnsetPipeline(sr, delta=self._onset_delta, alpha=self._onset_alpha)
+
+    def _parse_onset_frame(self, of: object, start: int, hop: int) -> ProcessorUpdate:
+        end = start + hop
+        if self._onset_method == "multiband":
+            (b_on, b_str), (m_on, m_str), (t_on, t_str) = of  # type: ignore[misc]
+            return ProcessorUpdate(
+                processor_id="beat_detector",
+                sample_start=start,
+                sample_end=end,
+                onset=b_on or m_on or t_on,
+                onset_strength=max(b_str, m_str, t_str),
+                onset_bass=b_on,
+                onset_mid=m_on,
+                onset_treble=t_on,
+                onset_bass_strength=b_str,
+                onset_mid_strength=m_str,
+                onset_treble_strength=t_str,
+            )
+        on, st = of  # type: ignore[misc]
+        return ProcessorUpdate(
+            processor_id="beat_detector",
+            sample_start=start,
+            sample_end=end,
+            onset=on,
+            onset_strength=st,
+        )
+
+    def feed(self, frame: SharedAnalysisFrame) -> list[ProcessorUpdate]:
+        if not frame.mag_frames:
+            return []
+        onset_frames = self._onset_pipeline.push_mag(frame.mag_frames)
+        hop = self._onset_pipeline.hop
+        updates: list[ProcessorUpdate] = []
+        for i, of in enumerate(onset_frames):
+            start = (
+                frame.hop_sample_starts[i]
+                if i < len(frame.hop_sample_starts)
+                else frame.sample_start
+            )
+            updates.append(self._parse_onset_frame(of, start, hop))
+        return updates
+
+    def flush(self) -> list[ProcessorUpdate]:
+        return []  # onset pipelines have no explicit carry buffer
+
+    def reset(self) -> None:
+        self._onset_pipeline = self._build_onset_pipeline()
+
+    def close(self) -> None:
+        pass
+
+
+# ---------------------------------------------------------------------------
 # CanonicalAnalysisPipeline — engine-agnostic canonical PCM analysis pipeline
 # ---------------------------------------------------------------------------
 
@@ -809,24 +923,30 @@ class CanonicalAnalysisPipeline:
         mid_hz: int,
     ) -> None:
         self._source = source
-        self._engine = engine
-        self._onset_method = onset_method
-        self._onset_delta = onset_delta
-        self._onset_alpha = onset_alpha
-        self._superflux_mu = superflux_mu
-        self._superflux_lag = superflux_lag
-        self._bass_hz = bass_hz
-        self._mid_hz = mid_hz
+        # Composition layer: SpectrumProcessor wraps the engine; BeatDetector
+        # wraps the onset pipeline.  Both satisfy AnalysisProcessor structurally.
+        self._spectrum_processor = SpectrumProcessor(engine)
+        self._beat_detector = BeatDetector(
+            onset_method=onset_method,
+            onset_delta=onset_delta,
+            onset_alpha=onset_alpha,
+            superflux_mu=superflux_mu,
+            superflux_lag=superflux_lag,
+            bass_hz=bass_hz,
+            mid_hz=mid_hz,
+        )
+        self._processors: tuple[AnalysisProcessor, ...] = (
+            self._spectrum_processor, self._beat_detector
+        )
         self._bar_stft = StereoMagStft(_CAP_SAMPLE_RATE)
-        self._onset_pipeline: (
-            StftOnsetPipeline | MultibandStftPipeline | SuperfluxStftPipeline
-        ) = self._build_onset_pipeline()
-        self._pending_onset: list = []
+        self._pending_onset: list[ProcessorUpdate] = []
         self._canonicalizer = AudioCanonicalizer()
         self._current_epoch_id: str | None = None
         self._latest: AudioFeatures | None = None
         self._pub_seq: int = 0
         self._lock = threading.Lock()
+        self._pub_queue: deque[PublicationRecord] = deque(maxlen=1000)
+        self._pub_lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -847,67 +967,71 @@ class CanonicalAnalysisPipeline:
 
     @property
     def effective_spectrum_backend(self) -> str:
-        return self._engine.engine_id
+        return self._spectrum_processor.processor_id
 
     @property
     def v2_peak_ema(self) -> float | None:
         """V2 global peak EMA (None for non-V2 engines or before first frame)."""
-        return getattr(self._engine, "v2_peak_ema", None)
+        return getattr(self._spectrum_processor._engine, "v2_peak_ema", None)
 
     @property
     def v2_bar_smooth(self) -> list[float] | None:
         """V2 per-bar falloff state (None for non-V2 engines or before first frame)."""
-        return getattr(self._engine, "v2_bar_smooth", None)
+        return getattr(self._spectrum_processor._engine, "v2_bar_smooth", None)
+
+    # Backward-compatibility properties — tests and acceptance scripts that
+    # reached into CAP internals via _engine / _onset_pipeline continue to work.
+    @property
+    def _engine(self) -> SpectrumEngine:
+        return self._spectrum_processor._engine
+
+    @property
+    def _onset_pipeline(
+        self,
+    ) -> StftOnsetPipeline | MultibandStftPipeline | SuperfluxStftPipeline:
+        return self._beat_detector._onset_pipeline
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _build_onset_pipeline(
-        self,
-    ) -> StftOnsetPipeline | MultibandStftPipeline | SuperfluxStftPipeline:
-        sr = _CAP_SAMPLE_RATE
-        if self._onset_method == "multiband":
-            return MultibandStftPipeline(
-                sr, bass_hz=self._bass_hz, mid_hz=self._mid_hz,
-                delta=self._onset_delta, alpha=self._onset_alpha,
-            )
-        if self._onset_method == "superflux":
-            return SuperfluxStftPipeline(
-                sr, mu=self._superflux_mu, lag=self._superflux_lag,
-                delta=self._onset_delta, alpha=self._onset_alpha,
-            )
-        return StftOnsetPipeline(sr, delta=self._onset_delta, alpha=self._onset_alpha)
-
     def _reset_dsp(self) -> None:
-        """Reset engine, STFT history, onset pipeline, and epoch state."""
-        self._engine.reset()
+        """Reset all processors, STFT history, pending onset, and epoch state."""
+        for proc in self._processors:
+            proc.reset()
         self._bar_stft.reset()
-        self._onset_pipeline = self._build_onset_pipeline()
         self._pending_onset.clear()
         self._current_epoch_id = None
 
-    def _build_features(self, bars: list[float], onset_batch: list) -> AudioFeatures:
+    def _build_features(
+        self, bars: list[float], onset_batch: list[ProcessorUpdate]
+    ) -> AudioFeatures:
+        """Assemble AudioFeatures from spectrum bars and accumulated onset updates.
+
+        onset_batch contains ProcessorUpdates from BeatDetector — one per STFT
+        hop covered by this spectrum publication.  Fields already parsed by
+        BeatDetector; no onset_method branching needed here.
+        """
         onset = False
         onset_strength = 0.0
         onset_bass = onset_mid = onset_treble = False
         onset_bass_str = onset_mid_str = onset_treble_str = 0.0
 
-        if self._onset_method == "multiband":
-            for of in onset_batch:
-                (b_on, b_str), (m_on, m_str), (t_on, t_str) = of
-                onset_bass = onset_bass or b_on
-                onset_mid = onset_mid or m_on
-                onset_treble = onset_treble or t_on
-                onset_bass_str = max(onset_bass_str, b_str)
-                onset_mid_str = max(onset_mid_str, m_str)
-                onset_treble_str = max(onset_treble_str, t_str)
-            onset = onset_bass or onset_mid or onset_treble
-            onset_strength = max(onset_bass_str, onset_mid_str, onset_treble_str)
-        else:
-            for on, st in onset_batch:
-                onset = onset or on
-                onset_strength = max(onset_strength, st)
+        for pu in onset_batch:
+            if pu.onset:
+                onset = True
+            onset_strength = max(onset_strength, pu.onset_strength or 0.0)
+            if pu.onset_bass:
+                onset_bass = True
+            if pu.onset_mid:
+                onset_mid = True
+            if pu.onset_treble:
+                onset_treble = True
+            onset_bass_str = max(onset_bass_str, pu.onset_bass_strength or 0.0)
+            onset_mid_str = max(onset_mid_str, pu.onset_mid_strength or 0.0)
+            onset_treble_str = max(onset_treble_str, pu.onset_treble_strength or 0.0)
+
+        onset = onset or onset_bass or onset_mid or onset_treble
 
         total = sum(bars)
         full = _slice_avg(bars, 0.0, 1.0)
@@ -947,21 +1071,30 @@ class CanonicalAnalysisPipeline:
             self._current_epoch_id = epoch_id
 
         mag_frames = self._bar_stft.push(samples)
-        if mag_frames:
-            onset_frames = self._onset_pipeline.push_mag(mag_frames)
-            self._pending_onset.extend(onset_frames)
+        hop = self._bar_stft.hop
+        hop_starts = [frame.sample_pos + i * hop for i in range(len(mag_frames))]
 
-        shared = SharedAnalysis(
-            mag_frames=mag_frames,
+        shared_frame = SharedAnalysisFrame(
             pcm=samples,
-            sample_pos=frame.sample_pos,
-            n_samples=len(samples),
+            mag_frames=mag_frames,
+            epoch_id=epoch_id,
+            sample_start=frame.sample_pos,
+            sample_end=frame.sample_pos + len(samples),
+            hop_sample_starts=hop_starts,
         )
-        updates = self._engine.feed(samples, shared)
+
+        # Run all processors; accumulate onset updates in the pending queue.
+        spectrum_updates = self._spectrum_processor.feed(shared_frame)
+        beat_updates = self._beat_detector.feed(shared_frame)
+        self._pending_onset.extend(beat_updates)
 
         records: list[PublicationRecord] = []
-        n_updates = len(updates)
-        for i, update in enumerate(updates):
+        n_updates = len(spectrum_updates)
+        effective_ids = (
+            self._spectrum_processor.processor_id,
+            self._beat_detector.processor_id,
+        )
+        for i, su in enumerate(spectrum_updates):
             # Last update drains all accumulated onset; earlier updates pop one each.
             # V2: N updates from N mag_frames — onset is 1:1 with frames.
             # Cavacore: 0 or 1 update — drains all accumulated onset at once.
@@ -971,47 +1104,64 @@ class CanonicalAnalysisPipeline:
             else:
                 onset_batch = [self._pending_onset.pop(0)] if self._pending_onset else []
 
-            features = self._build_features(update.bars, onset_batch)
+            features = self._build_features(su.bars or [], onset_batch)
             with self._lock:
                 self._latest = features
                 self._pub_seq += 1
                 seq = self._pub_seq
 
-            records.append(PublicationRecord(
+            record = PublicationRecord(
                 sequence=seq,
                 epoch=epoch_id,
-                sample_pos=update.sample_pos,
+                sample_pos=su.sample_start,
+                sample_end=su.sample_end,
                 features=features,
-                effective_engine_id=self._engine.engine_id,
-            ))
+                effective_engine_id=self._spectrum_processor.processor_id,
+                effective_processor_ids=effective_ids,
+            )
+            records.append(record)
+            with self._pub_lock:
+                self._pub_queue.append(record)
         return records
 
     def _flush_engine(self) -> list[PublicationRecord]:
-        """Flush engine carry buffer at clean EOS; do NOT clear _latest."""
-        updates = self._engine.flush()
+        """Flush all processor carry buffers at clean EOS; do NOT clear _latest."""
+        spectrum_updates = self._spectrum_processor.flush()
+        beat_updates = self._beat_detector.flush()
+        self._pending_onset.extend(beat_updates)
+
         records: list[PublicationRecord] = []
-        n_updates = len(updates)
+        n_updates = len(spectrum_updates)
         if self._current_epoch_id is None:
             return records
         epoch_id = self._current_epoch_id
-        for i, update in enumerate(updates):
+        effective_ids = (
+            self._spectrum_processor.processor_id,
+            self._beat_detector.processor_id,
+        )
+        for i, su in enumerate(spectrum_updates):
             if i == n_updates - 1:
                 onset_batch = list(self._pending_onset)
                 self._pending_onset.clear()
             else:
                 onset_batch = [self._pending_onset.pop(0)] if self._pending_onset else []
-            features = self._build_features(update.bars, onset_batch)
+            features = self._build_features(su.bars or [], onset_batch)
             with self._lock:
                 self._latest = features
                 self._pub_seq += 1
                 seq = self._pub_seq
-            records.append(PublicationRecord(
+            record = PublicationRecord(
                 sequence=seq,
                 epoch=epoch_id,
-                sample_pos=update.sample_pos,
+                sample_pos=su.sample_start,
+                sample_end=su.sample_end,
                 features=features,
-                effective_engine_id=self._engine.engine_id,
-            ))
+                effective_engine_id=self._spectrum_processor.processor_id,
+                effective_processor_ids=effective_ids,
+            )
+            records.append(record)
+            with self._pub_lock:
+                self._pub_queue.append(record)
         return records
 
     # ------------------------------------------------------------------
@@ -1033,12 +1183,17 @@ class CanonicalAnalysisPipeline:
         return recs
 
     def drain_publications(self) -> list[PublicationRecord]:
-        """Drain publications buffered since the last call (threaded path).
+        """Drain all publications buffered since the last call.
 
-        In the synchronous path, feed() returns records directly so this
-        returns an empty list.  Provided for API symmetry.
+        The worker appends every PublicationRecord to a bounded deque
+        (maxlen=1000) so that callers polling at a lower rate than the
+        analysis rate receive every record without gaps.  Returns an empty
+        list if nothing has been published since the previous drain.
         """
-        return []
+        with self._pub_lock:
+            result = list(self._pub_queue)
+            self._pub_queue.clear()
+            return result
 
     # ------------------------------------------------------------------
     # Threaded production interface (AudioPipeline protocol)
@@ -1085,7 +1240,12 @@ class CanonicalAnalysisPipeline:
         self._stop.set()
         if self._thread:
             self._thread.join(timeout=2)
-        self._engine.close()
+        # H1: only close processors after the worker thread has terminated.
+        # Closing while the thread is still alive would pull native resources
+        # (e.g. cavacore plan) out from under an active call to feed().
+        if self._thread is None or not self._thread.is_alive():
+            for proc in self._processors:
+                proc.close()
 
     def latest(self) -> AudioFeatures | None:
         with self._lock:
