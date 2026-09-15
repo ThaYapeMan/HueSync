@@ -906,13 +906,13 @@ def _run_one_canonical_patch(self, cresult):
     if isinstance(cresult, CanonicalData):
         cap._process_canonical_frame(cresult.frame)
     elif isinstance(cresult, TemporarilyNoData):
-        if not cap._source.running:
-            with cap._lock:
-                cap._latest = None
+        # TemporarilyNoData deliberately does NOT clear latest_pub — the
+        # last-known features must persist through short source gaps.
+        pass
     elif isinstance(cresult, StreamInvalidated):
         cap._reset_dsp()
-        with cap._lock:
-            cap._latest = None
+        with cap._pub_lock:
+            cap._latest_pub = None
     elif isinstance(cresult, EndOfStream):
         cap._flush_engine()
         cap._reset_dsp()

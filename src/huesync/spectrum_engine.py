@@ -488,15 +488,27 @@ class SpectrumProcessor:
             n_samples=len(frame.pcm),
         )
         updates = self._engine.feed(frame.pcm, shared)
-        return [
-            ProcessorUpdate(
+        # Chunk-independent positions: prefer the canonical hop_sample_starts
+        # supplied by CanonicalAnalysisPipeline over the engine's own naive
+        # sample_pos.  Engines like V2 compute their sample_pos from the local
+        # frame.sample_start + i * hop, which is only correct if the STFT
+        # buffer was empty at the start of the frame — false in practice
+        # because push() batches samples across calls.  hop_sample_starts is
+        # computed against the epoch cursor and is authoritative.
+        hop_starts = frame.hop_sample_starts
+        result: list[ProcessorUpdate] = []
+        for i, u in enumerate(updates):
+            if i < len(hop_starts):
+                start = hop_starts[i]
+            else:
+                start = u.sample_pos
+            result.append(ProcessorUpdate(
                 processor_id=self._engine.engine_id,
-                sample_start=u.sample_pos,
-                sample_end=u.sample_pos + _STFT_HOP,
+                sample_start=start,
+                sample_end=start + _STFT_HOP,
                 bars=u.bars,
-            )
-            for u in updates
-        ]
+            ))
+        return result
 
     def flush(self) -> list[ProcessorUpdate]:
         updates = self._engine.flush()

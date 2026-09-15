@@ -740,9 +740,13 @@ def test_airplay_no_channel_swap_after_partial_read() -> None:
 
 
 def _open_stereo_src(path: Path) -> tuple["SqueezeliteShmStereoSource", mmap.mmap]:
-    """Open a SqueezeliteShmStereoSource on *path* and return (src, writable_mm)."""
+    """Open a SqueezeliteShmStereoSource on *path* and return (src, writable_mm).
+
+    These legacy tests exercise the v0 fall-through code path.  Production
+    canonical LMS PCM sessions reject v0 with require_v1=True (the default).
+    """
     src = SqueezeliteShmStereoSource()
-    src.open("test", _path=path)
+    src.open("test", _path=path, require_v1=False)
     mm = _open_writable_mm(path)
     return src, mm
 

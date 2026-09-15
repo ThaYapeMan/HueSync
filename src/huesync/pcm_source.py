@@ -109,22 +109,43 @@ _MMAP_SIZE = _BUF_OFFSET + VIS_BUF_SIZE * 2  # 32848
 # reads the full extension and uses it for reliable continuity tracking.
 # When absent the source falls back to heuristic v0 tracking.
 #
-# To activate v1: rebuild squeezelite with the patched vis.c that writes:
-#   abi_version = 1
-#   generation  += 1 on each squeezelite restart
-#   abs_write_pos += n_samples on each successful ring-buffer write
-#   gap_flag = 1 if a trywrlock prevented export (cleared after each read)
+# The v1 extension block layout (40 bytes at offset 80):
+#   offset  0: uint32_t magic         = 0x48555345 'HUSE'
+#   offset  4: uint16_t abi_version   = 1
+#   offset  6: uint16_t flags         = reserved, currently 0
+#   offset  8: uint32_t write_seq     = seqlock counter (even=stable, odd=writing)
+#   offset 12: uint64_t generation    = random per-process ID (changes on restart)
+#   offset 20: uint64_t abs_write_pos = exclusive next stereo-frame position
+#   offset 28: uint64_t gap_seq       = monotonic gap counter (skipped exports)
+#   offset 36: uint8_t  _pad[4]       = 0
+#
+# All values are little-endian.  abs_write_pos is measured in STEREO FRAMES,
+# not scalar samples: one stereo frame is 2 * int16_t = 4 bytes.  This matches
+# the natural unit of the DecodedSourceFrame contract downstream.
+#
+# The seqlock protocol lets a consumer read all fields atomically without
+# taking a lock:
+#   Writer: increment write_seq (odd), update fields, increment write_seq (even).
+#   Reader: read write_seq1 → reject if odd; read fields; read write_seq2 →
+#           accept only if seq1 == seq2 (i.e. writer did not run in between).
 # ---------------------------------------------------------------------------
 
 SHM_ABI_V1_MAGIC: int = 0x48555345  # 'HUSE' — marks extended header present
 SHM_ABI_VERSION: int = 1
 
 _V2_EXT_OFFSET: int = _HDR_OFFSET + _HDR_SIZE        # 80
-# magic(4), abi_version(2), flags(1), reserved(1), generation(8), abs_write_pos(8), pad(16)
-_V2_EXT_FMT: str = "<IHBBQQ16x"
+# magic(4), abi_version(2), flags(2), write_seq(4),
+# generation(8), abs_write_pos(8), gap_seq(8), pad(4)
+_V2_EXT_FMT: str = "<IHHIQQQ4x"
 _V2_EXT_SIZE: int = struct.calcsize(_V2_EXT_FMT)     # should be 40
+assert _V2_EXT_SIZE == 40, f"_V2_EXT_SIZE={_V2_EXT_SIZE}, expected 40"
 _BUF_OFFSET_V1: int = _V2_EXT_OFFSET + _V2_EXT_SIZE  # 120
 _MMAP_SIZE_V1: int = _BUF_OFFSET_V1 + VIS_BUF_SIZE * 2  # 32888
+
+# Maximum retries on a seqlock coherent-snapshot read.  Producer holds odd
+# write_seq only for the few microseconds it takes to memcpy a small ring
+# segment plus a handful of scalar stores; ten retries is generous.
+MAX_SEQLOCK_RETRIES: int = 10
 
 
 class ShmContinuityEvent(enum.Enum):
@@ -132,13 +153,14 @@ class ShmContinuityEvent(enum.Enum):
 
     ADVANCE = "advance"            # normal: new samples, buf_index advanced <= VIS_BUF_SIZE//2
     NO_DATA = "no_data"            # buf_index unchanged (also: exact full-lap aliasing — see docs)
-    TORN_READ = "torn_read"        # seqlock consistency check failed; samples discarded
-    OVERRUN = "overrun"            # buf_index advanced > VIS_BUF_SIZE//2 (fell behind writer)
-    FULL_LAP = "full_lap"          # v1 only: abs_write_pos advanced by exactly VIS_BUF_SIZE
-    MULTIPLE_LAPS = "multiple_laps"  # v1 only: abs_write_pos advanced by > VIS_BUF_SIZE
-    RESTART = "restart"            # running/rate change signals new producer session
-    SHM_REPLACED = "shm_replaced"  # buf_size changed — SHM segment replaced
-    GAP_EXPORT = "gap_export"      # v1 only: producer set gap_flag (trywrlock skipped export)
+    TORN_READ = "torn_read"        # seqlock/snapshot inconsistency; samples discarded
+    OVERRUN = "overrun"            # v0: buf_index advanced > VIS_BUF_SIZE//2 (fell behind writer)
+    FULL_LAP = "full_lap"          # v1: abs delta == VIS_BUF_SIZE (exactly one full lap)
+    MULTIPLE_LAPS = "multiple_laps"  # v1: abs delta > VIS_BUF_SIZE
+    RESTART = "restart"            # generation/rate/running/abs regression signals new session
+    SHM_REPLACED = "shm_replaced"  # buf_size field changed — SHM segment replaced
+    GAP_SEQUENCE = "gap_sequence"  # v1: producer's gap_seq incremented (skipped export)
+    UNSUPPORTED_ABI = "unsupported_abi"  # v0 encountered where v1 was required
 
 
 @dataclass
@@ -147,10 +169,11 @@ class ShmReadResult:
 
     samples: np.ndarray       # mono float32; empty on non-ADVANCE events
     event: ShmContinuityEvent
-    abs_write_pos: int        # monotonic absolute write position (v1: from SHM; v0: estimated)
-    n_delivered: int          # samples returned
-    n_lost: int               # estimated lost samples (0 on clean advance)
+    abs_write_pos: int        # monotonic absolute write position in stereo frames
+    n_delivered: int          # stereo frames returned
+    n_lost: int               # estimated stereo frames lost (0 on clean advance)
     abi_version: int          # 0 = legacy, 1 = extended
+    gap_seq: int = 0          # current v1 gap sequence (0 for v0)
 
 
 @dataclass
@@ -159,13 +182,11 @@ class _ShmExtHeader:
 
     magic: int
     abi_version: int
-    flags: int
-    generation: int
-    abs_write_pos: int
-
-    @property
-    def gap_flag(self) -> bool:
-        return bool(self.flags & 0x01)
+    flags: int          # reserved, currently 0
+    write_seq: int      # seqlock counter (even=stable, odd=writer active)
+    generation: int     # producer lifetime ID (random per process)
+    abs_write_pos: int  # exclusive next stereo-frame position (monotonic)
+    gap_seq: int        # monotonic gap sequence
 
 
 class SqueezeliteShmSource:
@@ -183,13 +204,15 @@ class SqueezeliteShmSource:
         self._mm: mmap.mmap | None = None
         self._prev_index: int = 0
         # Continuity tracking
-        self._abi_version: int = 0           # detected on open()
+        self._abi_version: int = 0                # detected on open()
         self._last_running: bool = False
         self._last_rate: int = 0
         self._last_buf_size: int = VIS_BUF_SIZE
-        self._prev_abs_write_pos: int = 0    # v1: from SHM; v0: estimated
-        self._abs_write_pos: int = 0         # monotonic consumer estimate
-        self._prev_generation: int = 0       # v1: producer restart counter
+        # Absolute write position in STEREO FRAMES.  v1: read directly from
+        # the producer.  v0: estimated by accumulating (n_new // 2) each poll.
+        self._abs_write_pos_frames: int = 0
+        self._prev_generation: int = 0            # v1: producer lifetime ID
+        self._prev_gap_seq: int = 0               # v1: last-seen skipped-export counter
 
     def open(self, mac: str, *, _path: Path | None = None) -> None:
         """Map /dev/shm/squeezelite-{mac} into memory.
@@ -206,10 +229,13 @@ class SqueezeliteShmSource:
                 ext = self._read_ext_header()
                 if ext is not None:
                     self._abi_version = ext.abi_version
-                    self._prev_abs_write_pos = ext.abs_write_pos
-                    self._abs_write_pos = ext.abs_write_pos
+                    self._abs_write_pos_frames = ext.abs_write_pos
                     self._prev_generation = ext.generation
-                    _log.debug("SHM v1 ABI detected (generation=%d)", ext.generation)
+                    self._prev_gap_seq = ext.gap_seq
+                    _log.debug(
+                        "SHM v1 ABI detected (generation=%d abs_write_pos=%d gap_seq=%d)",
+                        ext.generation, ext.abs_write_pos, ext.gap_seq,
+                    )
                 else:
                     self._abi_version = 0
             except (ValueError, OSError):
@@ -324,7 +350,7 @@ class SqueezeliteShmSource:
             return None
         self._mm.seek(_V2_EXT_OFFSET)
         raw = self._mm.read(_V2_EXT_SIZE)
-        magic, abi_ver, flags, reserved, generation, abs_write_pos = struct.unpack(
+        magic, abi_ver, flags, write_seq, generation, abs_write_pos, gap_seq = struct.unpack(
             _V2_EXT_FMT, raw
         )
         if magic != SHM_ABI_V1_MAGIC:
@@ -333,9 +359,39 @@ class SqueezeliteShmSource:
             magic=magic,
             abi_version=abi_ver,
             flags=flags,
+            write_seq=write_seq,
             generation=generation,
             abs_write_pos=abs_write_pos,
+            gap_seq=gap_seq,
         )
+
+    def _read_ext_coherent(self) -> _ShmExtHeader | None:
+        """Read v1 extension using the seqlock retry protocol.
+
+        Returns None when:
+        - The magic is absent or the mmap is too small (no v1 header).
+        - We could not obtain a stable coherent snapshot within
+          MAX_SEQLOCK_RETRIES attempts (producer is writing continuously
+          faster than we can read the extension block).
+
+        The caller should treat a coherent-read failure as TORN_READ.
+        """
+        for _ in range(MAX_SEQLOCK_RETRIES):
+            ext = self._read_ext_header()
+            if ext is None:
+                return None
+            if ext.write_seq % 2 == 1:
+                # Producer is mid-write; retry.
+                continue
+            seq1 = ext.write_seq
+            ext2 = self._read_ext_header()
+            if ext2 is None:
+                return None
+            if ext2.write_seq != seq1:
+                # A write happened between our two reads; retry.
+                continue
+            return ext
+        return None
 
     def read_new_checked(self) -> ShmReadResult:
         """Read new PCM samples with full continuity classification.
@@ -360,10 +416,11 @@ class SqueezeliteShmSource:
             return ShmReadResult(
                 samples=np.empty(0, dtype=np.float32),
                 event=ShmContinuityEvent.SHM_REPLACED,
-                abs_write_pos=self._abs_write_pos,
+                abs_write_pos=self._abs_write_pos_frames,
                 n_delivered=0,
                 n_lost=0,
                 abi_version=self._abi_version,
+                gap_seq=self._prev_gap_seq,
             )
 
         # Restart detection: running or rate changed.
@@ -375,116 +432,177 @@ class SqueezeliteShmSource:
             return ShmReadResult(
                 samples=np.empty(0, dtype=np.float32),
                 event=ShmContinuityEvent.RESTART,
-                abs_write_pos=self._abs_write_pos,
+                abs_write_pos=self._abs_write_pos_frames,
                 n_delivered=0,
                 n_lost=0,
                 abi_version=self._abi_version,
+                gap_seq=self._prev_gap_seq,
             )
         if not prev_running and running:
             self._prev_index = buf_index
             return ShmReadResult(
                 samples=np.empty(0, dtype=np.float32),
                 event=ShmContinuityEvent.RESTART,
-                abs_write_pos=self._abs_write_pos,
+                abs_write_pos=self._abs_write_pos_frames,
                 n_delivered=0,
                 n_lost=0,
                 abi_version=self._abi_version,
+                gap_seq=self._prev_gap_seq,
             )
 
-        # v1: use abs_write_pos for precise continuity.
-        ext = self._read_ext_header() if self._abi_version >= 1 else None
-        if ext is not None:
-            # Generation change: producer restarted.
+        # v1: use coherent seqlock read of abs_write_pos for precise continuity.
+        if self._abi_version >= 1:
+            ext = self._read_ext_coherent()
+            if ext is None:
+                # Either the header disappeared (SHM was truncated) or the
+                # producer wrote continuously across every retry attempt.
+                # Either way we cannot trust anything read this poll — emit
+                # TORN_READ so the caller resets the epoch and starts fresh.
+                self._prev_index = buf_index
+                return ShmReadResult(
+                    samples=np.empty(0, dtype=np.float32),
+                    event=ShmContinuityEvent.TORN_READ,
+                    abs_write_pos=self._abs_write_pos_frames,
+                    n_delivered=0,
+                    n_lost=0,
+                    abi_version=self._abi_version,
+                    gap_seq=self._prev_gap_seq,
+                )
+
+            # Generation change: producer restarted between polls.
             if self._prev_generation != 0 and ext.generation != self._prev_generation:
                 self._prev_generation = ext.generation
-                self._prev_abs_write_pos = ext.abs_write_pos
-                self._abs_write_pos = ext.abs_write_pos
+                self._abs_write_pos_frames = ext.abs_write_pos
+                self._prev_gap_seq = ext.gap_seq
                 self._prev_index = buf_index
                 return ShmReadResult(
                     samples=np.empty(0, dtype=np.float32),
                     event=ShmContinuityEvent.RESTART,
-                    abs_write_pos=self._abs_write_pos,
+                    abs_write_pos=self._abs_write_pos_frames,
                     n_delivered=0,
                     n_lost=0,
                     abi_version=self._abi_version,
+                    gap_seq=self._prev_gap_seq,
                 )
             self._prev_generation = ext.generation
-            delta_abs = ext.abs_write_pos - self._prev_abs_write_pos
-            self._prev_abs_write_pos = ext.abs_write_pos
-            self._abs_write_pos = ext.abs_write_pos
-            if ext.gap_flag:
+
+            # Delta measured in stereo frames.
+            delta_frames = int(ext.abs_write_pos) - int(self._abs_write_pos_frames)
+            if delta_frames < 0:
+                # Backward regression: producer restarted with reset counter
+                # (or was rebuilt).  Treat as restart.
+                self._abs_write_pos_frames = ext.abs_write_pos
+                self._prev_gap_seq = ext.gap_seq
                 self._prev_index = buf_index
                 return ShmReadResult(
                     samples=np.empty(0, dtype=np.float32),
-                    event=ShmContinuityEvent.GAP_EXPORT,
-                    abs_write_pos=self._abs_write_pos,
+                    event=ShmContinuityEvent.RESTART,
+                    abs_write_pos=self._abs_write_pos_frames,
                     n_delivered=0,
                     n_lost=0,
                     abi_version=self._abi_version,
+                    gap_seq=self._prev_gap_seq,
                 )
-            if delta_abs <= 0:
+
+            # Gap-sequence increment: producer skipped one or more exports
+            # (its trywrlock failed).  Report once per unique gap_seq value.
+            if ext.gap_seq != self._prev_gap_seq:
+                self._prev_gap_seq = ext.gap_seq
+                self._abs_write_pos_frames = ext.abs_write_pos
+                self._prev_index = buf_index
+                return ShmReadResult(
+                    samples=np.empty(0, dtype=np.float32),
+                    event=ShmContinuityEvent.GAP_SEQUENCE,
+                    abs_write_pos=self._abs_write_pos_frames,
+                    n_delivered=0,
+                    n_lost=0,
+                    abi_version=self._abi_version,
+                    gap_seq=ext.gap_seq,
+                )
+
+            if delta_frames == 0:
+                # No progress since last poll.  Do not adopt buf_index — the
+                # ring buffer position must remain paired with abs_write_pos.
                 return ShmReadResult(
                     samples=np.empty(0, dtype=np.float32),
                     event=ShmContinuityEvent.NO_DATA,
-                    abs_write_pos=self._abs_write_pos,
+                    abs_write_pos=self._abs_write_pos_frames,
                     n_delivered=0,
                     n_lost=0,
                     abi_version=self._abi_version,
+                    gap_seq=ext.gap_seq,
                 )
-            if delta_abs >= VIS_BUF_SIZE:
-                n_lost = int(delta_abs) - VIS_BUF_SIZE
+
+            # A stereo frame is 2 int16 samples in the ring buffer.
+            # VIS_BUF_SIZE is measured in scalar int16 samples, so its
+            # equivalent in stereo frames is VIS_BUF_SIZE // 2.
+            frame_capacity = VIS_BUF_SIZE // 2
+            if delta_frames >= frame_capacity:
+                n_lost = int(delta_frames) - frame_capacity
+                event = (
+                    ShmContinuityEvent.MULTIPLE_LAPS
+                    if delta_frames > frame_capacity
+                    else ShmContinuityEvent.FULL_LAP
+                )
+                self._abs_write_pos_frames = ext.abs_write_pos
                 self._prev_index = buf_index
                 return ShmReadResult(
                     samples=np.empty(0, dtype=np.float32),
-                    event=(
-                        ShmContinuityEvent.MULTIPLE_LAPS
-                        if delta_abs > 2 * VIS_BUF_SIZE
-                        else ShmContinuityEvent.FULL_LAP
-                    ),
-                    abs_write_pos=self._abs_write_pos,
+                    event=event,
+                    abs_write_pos=self._abs_write_pos_frames,
                     n_delivered=0,
                     n_lost=n_lost,
                     abi_version=self._abi_version,
+                    gap_seq=ext.gap_seq,
                 )
 
-        # v0 heuristic: compute n_new from buf_index modular arithmetic.
+            # Adopt the coherent snapshot and continue to the buf_index path
+            # below.  abs_write_pos_frames is not updated yet — we set it
+            # after a successful PCM copy so any torn read leaves state alone.
+            new_abs_frames = int(ext.abs_write_pos)
+        else:
+            new_abs_frames = None
+
+        # v0 heuristic (or v1 fall-through): compute n_new from buf_index.
         n_new = (buf_index - self._prev_index) % VIS_BUF_SIZE
         if n_new == 0:
             return ShmReadResult(
                 samples=np.empty(0, dtype=np.float32),
                 event=ShmContinuityEvent.NO_DATA,
-                abs_write_pos=self._abs_write_pos,
+                abs_write_pos=self._abs_write_pos_frames,
                 n_delivered=0,
                 n_lost=0,
                 abi_version=self._abi_version,
+                gap_seq=self._prev_gap_seq,
             )
 
         if n_new > VIS_BUF_SIZE // 2:
-            # Overrun: fell more than half buffer behind.
+            # Overrun: fell more than half buffer behind (v0 heuristic).
             n_lost = n_new - VIS_BUF_SIZE // 2
             self._prev_index = buf_index
-            self._abs_write_pos += n_new
+            # Advance consumer's stereo-frame counter by best estimate.
+            self._abs_write_pos_frames += n_new // 2
             return ShmReadResult(
                 samples=np.empty(0, dtype=np.float32),
                 event=ShmContinuityEvent.OVERRUN,
-                abs_write_pos=self._abs_write_pos,
+                abs_write_pos=self._abs_write_pos_frames,
                 n_delivered=0,
-                n_lost=n_lost,
+                n_lost=n_lost // 2,
                 abi_version=self._abi_version,
+                gap_seq=self._prev_gap_seq,
             )
 
-        # Normal advance: read the new samples.
-        self._abs_write_pos += n_new
-        n_new -= n_new % 2  # round down to complete stereo frames
+        n_new -= n_new % 2  # round down to complete stereo frames (in scalar units)
         if n_new == 0:
             self._prev_index = buf_index
             return ShmReadResult(
                 samples=np.empty(0, dtype=np.float32),
                 event=ShmContinuityEvent.ADVANCE,
-                abs_write_pos=self._abs_write_pos,
+                abs_write_pos=self._abs_write_pos_frames,
                 n_delivered=0,
                 n_lost=0,
                 abi_version=self._abi_version,
+                gap_seq=self._prev_gap_seq,
             )
         start = (buf_index - n_new) % VIS_BUF_SIZE
         buf_offset = _BUF_OFFSET_V1 if self._abi_version >= 1 else _BUF_OFFSET
@@ -505,12 +623,18 @@ class SqueezeliteShmSource:
             return ShmReadResult(
                 samples=np.empty(0, dtype=np.float32),
                 event=ShmContinuityEvent.TORN_READ,
-                abs_write_pos=self._abs_write_pos,
+                abs_write_pos=self._abs_write_pos_frames,
                 n_delivered=0,
                 n_lost=0,
                 abi_version=self._abi_version,
+                gap_seq=self._prev_gap_seq,
             )
         self._prev_index = buf_index
+        # Commit position after a clean read.
+        if new_abs_frames is not None:
+            self._abs_write_pos_frames = new_abs_frames
+        else:
+            self._abs_write_pos_frames += n_new // 2
         samples_i16 = np.frombuffer(raw, dtype=np.int16)
         mono = (
             samples_i16[0::2].astype(np.float32) + samples_i16[1::2].astype(np.float32)
@@ -518,10 +642,11 @@ class SqueezeliteShmSource:
         return ShmReadResult(
             samples=mono,
             event=ShmContinuityEvent.ADVANCE,
-            abs_write_pos=self._abs_write_pos,
+            abs_write_pos=self._abs_write_pos_frames,
             n_delivered=len(mono),
             n_lost=0,
             abi_version=self._abi_version,
+            gap_seq=self._prev_gap_seq,
         )
 
 
@@ -785,16 +910,60 @@ class SqueezeliteShmStereoSource:
         self._prev_rate: int = 0
         self._prev_updated: int = 0
         self._source_id: str = ""
+        # v1 ABI continuity state
+        self._abi_version: int = 0
+        self._prev_generation: int = 0
+        self._abs_write_pos_frames: int = 0  # in stereo frames
+        self._prev_gap_seq: int = 0
 
-    def open(self, mac: str, *, _path: Path | None = None) -> None:
-        """Map /dev/shm/squeezelite-{mac}.  ``_path`` overrides for tests."""
+    def open(
+        self,
+        mac: str,
+        *,
+        _path: Path | None = None,
+        require_v1: bool = True,
+    ) -> None:
+        """Map /dev/shm/squeezelite-{mac}.  ``_path`` overrides for tests.
+
+        When ``require_v1`` is True (the default for the production canonical
+        LMS PCM path), the SHM segment MUST expose the HueSync v1 extension
+        header at offset 80 (magic 0x48555345 'HUSE').  A stock squeezelite
+        exposes only the legacy v0 header, which cannot classify full-lap
+        aliasing or same-second restarts reliably — activation is rejected
+        with an actionable RuntimeError explaining how to rebuild squeezelite
+        with the producer patch.  Tests that need to exercise the v0
+        fall-through code path may pass ``require_v1=False`` explicitly.
+        """
         path = _path if _path is not None else Path(f"/dev/shm/squeezelite-{mac}")
         fd = path.open("rb")
         try:
-            self._mm = mmap.mmap(fd.fileno(), _MMAP_SIZE, access=mmap.ACCESS_READ)
+            # Try v1 size first; fall back to v0 if file is smaller.
+            try:
+                self._mm = mmap.mmap(fd.fileno(), _MMAP_SIZE_V1, access=mmap.ACCESS_READ)
+            except (ValueError, OSError):
+                self._mm = mmap.mmap(fd.fileno(), _MMAP_SIZE, access=mmap.ACCESS_READ)
         finally:
             fd.close()
         self._source_id = f"lms:{mac}"
+
+        ext = self._read_ext_header()
+        if ext is None or ext.magic != SHM_ABI_V1_MAGIC:
+            if require_v1:
+                self.close()
+                raise RuntimeError(
+                    f"Squeezelite SHM at {path} does not provide the v1 ABI "
+                    f"(magic 0x{SHM_ABI_V1_MAGIC:08X} not found at offset "
+                    f"{_V2_EXT_OFFSET}). "
+                    "Rebuild squeezelite with the HueSync v1 producer patch "
+                    "from squeezelite/output_vis_v1.c and redeploy."
+                )
+            self._abi_version = 0
+        else:
+            self._abi_version = ext.abi_version
+            self._prev_generation = ext.generation
+            self._abs_write_pos_frames = ext.abs_write_pos
+            self._prev_gap_seq = ext.gap_seq
+
         _, buf_index, running, rate, updated = self._read_header()
         self._prev_index = buf_index
         self._prev_running = running
@@ -814,6 +983,42 @@ class SqueezeliteShmStereoSource:
         buf_size, buf_index, running_byte, rate, updated = struct.unpack(_HDR_FMT, raw)
         return buf_size, buf_index, bool(running_byte), rate, updated
 
+    def _read_ext_header(self) -> _ShmExtHeader | None:
+        """Read the v1 extension block; return None if magic absent or mmap too small."""
+        if self._mm is None:
+            return None
+        if len(self._mm) < _V2_EXT_OFFSET + _V2_EXT_SIZE:
+            return None
+        self._mm.seek(_V2_EXT_OFFSET)
+        raw = self._mm.read(_V2_EXT_SIZE)
+        magic, abi_ver, flags, write_seq, generation, abs_write_pos, gap_seq = struct.unpack(
+            _V2_EXT_FMT, raw
+        )
+        return _ShmExtHeader(
+            magic=magic,
+            abi_version=abi_ver,
+            flags=flags,
+            write_seq=write_seq,
+            generation=generation,
+            abs_write_pos=abs_write_pos,
+            gap_seq=gap_seq,
+        )
+
+    def _read_ext_coherent(self) -> _ShmExtHeader | None:
+        """Seqlock retry loop matching SqueezeliteShmSource._read_ext_coherent."""
+        for _ in range(MAX_SEQLOCK_RETRIES):
+            ext = self._read_ext_header()
+            if ext is None or ext.magic != SHM_ABI_V1_MAGIC:
+                return None
+            if ext.write_seq % 2 == 1:
+                continue
+            seq1 = ext.write_seq
+            ext2 = self._read_ext_header()
+            if ext2 is None or ext2.write_seq != seq1:
+                continue
+            return ext
+        return None
+
     @property
     def sample_rate(self) -> int:
         return self._read_header()[3]
@@ -826,11 +1031,142 @@ class SqueezeliteShmStereoSource:
     def source_id(self) -> str:
         return self._source_id
 
-    def read(self) -> SourceReadResult:
-        """Return a SourceReadResult representing the latest available samples.
+    def _buf_offset(self) -> int:
+        """Ring-buffer PCM starts after the extension block on v1, at 80 on v0."""
+        return _BUF_OFFSET_V1 if self._abi_version >= 1 else _BUF_OFFSET
 
-        Stereo layout: samples[:, 0] = L, samples[:, 1] = R.
-        """
+    def _read_v1(self) -> SourceReadResult:
+        """v1 read path: coherent snapshot + producer continuity classification."""
+        assert self._mm is not None
+        ext = self._read_ext_coherent()
+        if ext is None:
+            return StreamInvalidated(
+                cause=InvalidationCause.UNKNOWN, known_lost_samples=None
+            )
+
+        # Rate change → new epoch.
+        _, buf_index_before, running, rate, updated = self._read_header()
+        if self._prev_rate != 0 and rate != self._prev_rate:
+            _log.warning(
+                "SHM stereo source: sample rate changed (%d → %d); invalidating epoch.",
+                self._prev_rate, rate,
+            )
+            self._prev_rate = rate
+            self._prev_running = running
+            self._prev_index = buf_index_before
+            self._prev_generation = ext.generation
+            self._abs_write_pos_frames = ext.abs_write_pos
+            self._prev_gap_seq = ext.gap_seq
+            return StreamInvalidated(cause=InvalidationCause.UNKNOWN, known_lost_samples=None)
+
+        # running transition False → True: new session.
+        if running and not self._prev_running:
+            self._prev_running = running
+            self._prev_rate = rate
+            self._prev_index = buf_index_before
+            self._prev_generation = ext.generation
+            self._abs_write_pos_frames = ext.abs_write_pos
+            self._prev_gap_seq = ext.gap_seq
+            return StreamInvalidated(cause=InvalidationCause.UNKNOWN, known_lost_samples=None)
+        self._prev_running = running
+        self._prev_rate = rate
+
+        # Generation change: producer restarted.
+        if self._prev_generation != 0 and ext.generation != self._prev_generation:
+            self._prev_generation = ext.generation
+            self._abs_write_pos_frames = ext.abs_write_pos
+            self._prev_gap_seq = ext.gap_seq
+            self._prev_index = buf_index_before
+            return StreamInvalidated(cause=InvalidationCause.UNKNOWN, known_lost_samples=None)
+        self._prev_generation = ext.generation
+
+        # abs_write_pos backward regression: producer reset counter.
+        delta_frames = int(ext.abs_write_pos) - int(self._abs_write_pos_frames)
+        if delta_frames < 0:
+            self._abs_write_pos_frames = ext.abs_write_pos
+            self._prev_gap_seq = ext.gap_seq
+            self._prev_index = buf_index_before
+            return StreamInvalidated(cause=InvalidationCause.UNKNOWN, known_lost_samples=None)
+
+        # Gap sequence advanced → producer skipped exports; invalidate epoch.
+        if ext.gap_seq != self._prev_gap_seq:
+            self._prev_gap_seq = ext.gap_seq
+            self._abs_write_pos_frames = ext.abs_write_pos
+            self._prev_index = buf_index_before
+            return StreamInvalidated(cause=InvalidationCause.UNKNOWN, known_lost_samples=None)
+
+        if delta_frames == 0:
+            return TemporarilyNoData()
+
+        frame_capacity = VIS_BUF_SIZE // 2  # ring capacity in stereo frames
+        if delta_frames >= frame_capacity:
+            # A full lap (or more) has been overwritten between polls.
+            self._abs_write_pos_frames = ext.abs_write_pos
+            self._prev_index = buf_index_before
+            return StreamInvalidated(cause=InvalidationCause.UNKNOWN, known_lost_samples=None)
+
+        # Report the absolute stereo-frame position at the START of this read.
+        start_abs_pos = int(self._abs_write_pos_frames)
+
+        # Copy the new PCM window from the ring buffer.  Sample counts here
+        # are in scalar int16 units so the arithmetic matches the ring layout.
+        n_new_scalar = delta_frames * 2
+        start_scalar = (buf_index_before - n_new_scalar) % VIS_BUF_SIZE
+        buf_offset = self._buf_offset()
+        if start_scalar + n_new_scalar <= VIS_BUF_SIZE:
+            self._mm.seek(buf_offset + start_scalar * 2)
+            raw = self._mm.read(n_new_scalar * 2)
+        else:
+            tail = VIS_BUF_SIZE - start_scalar
+            self._mm.seek(buf_offset + start_scalar * 2)
+            raw_tail = self._mm.read(tail * 2)
+            self._mm.seek(buf_offset)
+            raw_head = self._mm.read((n_new_scalar - tail) * 2)
+            raw = raw_tail + raw_head
+
+        # Final seqlock verification: refuse the block if a writer ran while
+        # we were copying.  A single retry loop already handled the metadata
+        # coherence; this catches races against the PCM copy itself.
+        ext_after = self._read_ext_header()
+        if (
+            ext_after is None
+            or ext_after.magic != SHM_ABI_V1_MAGIC
+            or ext_after.write_seq != ext.write_seq
+            or ext_after.abs_write_pos != ext.abs_write_pos
+        ):
+            return StreamInvalidated(cause=InvalidationCause.UNKNOWN, known_lost_samples=None)
+
+        s16 = np.frombuffer(raw, dtype=np.int16)
+        left = s16[0::2].astype(np.float32) / 32768.0
+        right = s16[1::2].astype(np.float32) / 32768.0
+        stereo = np.column_stack([left, right])
+
+        if not np.all(np.isfinite(stereo)):
+            _log.warning("SHM stereo source: non-finite samples; invalidating epoch.")
+            return StreamInvalidated(cause=InvalidationCause.UNKNOWN, known_lost_samples=None)
+
+        over_range = bool(np.any(np.abs(stereo) >= 1.0))
+        wall_ns = time.time_ns()
+
+        # Commit position now that the copy verified.
+        self._abs_write_pos_frames = int(ext.abs_write_pos)
+        self._prev_index = buf_index_before
+        self._prev_updated = updated
+
+        frame = DecodedSourceFrame(
+            samples=stereo,
+            sample_rate=rate,
+            channels=2,
+            source_id=self._source_id,
+            source_sample_pos=start_abs_pos,
+            over_range=over_range,
+            wall_ns=wall_ns,
+        )
+        return DataResult(frame=frame)
+
+    def _read_v0(self) -> SourceReadResult:
+        """v0 fall-through: buf_index heuristic, no producer continuity signal."""
+        assert self._mm is not None
         _, buf_index, running, rate, updated = self._read_header()
 
         # Sample-rate change: squeezelite restarted or a new track at a different rate.
@@ -846,7 +1182,6 @@ class SqueezeliteShmStereoSource:
             return StreamInvalidated(cause=InvalidationCause.UNKNOWN, known_lost_samples=None)
 
         # Running transition False→True: squeezelite restarted and is writing again.
-        # The buf_index was reset; old and new stream data must not be joined.
         if running and not self._prev_running:
             _log.debug("SHM stereo source: running transition → True; invalidating epoch.")
             self._prev_index = buf_index
@@ -861,13 +1196,6 @@ class SqueezeliteShmStereoSource:
         raw_delta = (buf_index - self._prev_index) % VIS_BUF_SIZE
 
         if raw_delta == 0:
-            # buf_index has not advanced modulo VIS_BUF_SIZE. If the writer's
-            # timestamp advanced while raw_delta == 0, the writer completed exactly
-            # one full lap (16384 scalar samples ≈ 186 ms at 44.1 kHz stereo) between
-            # our two reads. All previously visible data is overwritten — emit
-            # StreamInvalidated rather than silently losing the buffer.
-            # (updated is time_t with second resolution; aliasing within a single
-            # second is not detectable here, but is also implausible at normal read rates.)
             if updated != self._prev_updated:
                 _log.warning(
                     "SHM stereo source: full-lap aliasing detected "
@@ -882,8 +1210,6 @@ class SqueezeliteShmStereoSource:
         self._prev_index = buf_index
         self._prev_updated = updated
 
-        # Fell too far behind: continuity is no longer trustworthy.
-        # Cannot prove an exact overrun, so known_lost_samples stays None.
         if raw_delta > VIS_BUF_SIZE // 2:
             _log.warning(
                 "SHM stereo source fell behind: %d new samples (buffer %d); "
@@ -893,49 +1219,37 @@ class SqueezeliteShmStereoSource:
             )
             return StreamInvalidated(cause=InvalidationCause.UNKNOWN, known_lost_samples=None)
 
-        # Round down to complete stereo frames (2 scalar s16 samples per frame).
         n_new = raw_delta - raw_delta % 2
         if n_new == 0:
             return TemporarilyNoData()
 
         start = (buf_index - n_new) % VIS_BUF_SIZE
-
-        assert self._mm is not None
+        buf_offset = self._buf_offset()
         if start + n_new <= VIS_BUF_SIZE:
-            self._mm.seek(_BUF_OFFSET + start * 2)
+            self._mm.seek(buf_offset + start * 2)
             raw = self._mm.read(n_new * 2)
         else:
             tail = VIS_BUF_SIZE - start
-            self._mm.seek(_BUF_OFFSET + start * 2)
+            self._mm.seek(buf_offset + start * 2)
             raw_tail = self._mm.read(tail * 2)
-            self._mm.seek(_BUF_OFFSET)
+            self._mm.seek(buf_offset)
             raw_head = self._mm.read((n_new - tail) * 2)
             raw = raw_tail + raw_head
 
-        # Seqlock-style consistency check: if the writer moved during our copy,
-        # the bytes we read span two write passes and represent a real audio gap.
-        # Signal StreamInvalidated so the downstream epoch is reset rather than
-        # silently joining the discontinuous intervals.
         _, buf_index_after, _, _, _ = self._read_header()
         if buf_index_after != buf_index:
             _log.debug(
                 "SHM stereo source: torn read (buf_index %d → %d); "
                 "audio gap, invalidating epoch.",
-                buf_index,
-                buf_index_after,
+                buf_index, buf_index_after,
             )
             return StreamInvalidated(cause=InvalidationCause.UNKNOWN, known_lost_samples=None)
 
         s16 = np.frombuffer(raw, dtype=np.int16)
-        # Interleaved stereo s16: even indices = L, odd = R.
-        # Scale to float32 in [−1.0, +1.0] by dividing each channel by 32768.
-        # L and R are preserved separately — no downmix.
         left = s16[0::2].astype(np.float32) / 32768.0
         right = s16[1::2].astype(np.float32) / 32768.0
-        stereo = np.column_stack([left, right])  # shape (n_frames, 2)
+        stereo = np.column_stack([left, right])
 
-        # Check for non-finite values (s16 → float32 cannot produce NaN/Inf in
-        # practice, but we validate for correctness).
         if not np.all(np.isfinite(stereo)):
             _log.warning("SHM stereo source: non-finite samples detected; invalidating epoch.")
             return StreamInvalidated(cause=InvalidationCause.UNKNOWN, known_lost_samples=None)
@@ -943,16 +1257,31 @@ class SqueezeliteShmStereoSource:
         over_range = bool(np.any(np.abs(stereo) >= 1.0))
         wall_ns = time.time_ns()
 
+        # Advance consumer-side stereo-frame counter for downstream consumers.
+        start_abs = int(self._abs_write_pos_frames)
+        self._abs_write_pos_frames += n_new // 2
+
         frame = DecodedSourceFrame(
             samples=stereo,
             sample_rate=rate,
             channels=2,
             source_id=self._source_id,
-            source_sample_pos=None,
+            source_sample_pos=start_abs,
             over_range=over_range,
             wall_ns=wall_ns,
         )
         return DataResult(frame=frame)
+
+    def read(self) -> SourceReadResult:
+        """Return a SourceReadResult representing the latest available samples.
+
+        Stereo layout: samples[:, 0] = L, samples[:, 1] = R.  When the v1 ABI
+        is present (the production default) the read is coherent under a
+        seqlock and stream continuity is authoritative rather than heuristic.
+        """
+        if self._abi_version >= 1:
+            return self._read_v1()
+        return self._read_v0()
 
 
 # ---------------------------------------------------------------------------

@@ -44,6 +44,12 @@ special-casing.
 
 Processor-specific aggregation (bars vs. onset) is determined by `ProcessorUpdate.bars is not None`.
 
+`PublicationRecord.effective_processor_ids` lists ONLY the processors that produced at
+least one `ProcessorUpdate` on the current frame.  A processor whose carry buffer is
+still warming up (no output yet) does not appear in the effective ids — this makes the
+metadata a truthful audit of what actually contributed to the record, not a static
+enumeration of what could contribute in principle.
+
 ### One STFT pass, shared
 
 `StereoMagStft` runs once per `_process_canonical_frame()` call. The resulting
@@ -112,10 +118,79 @@ Implement `PcmSource` protocol in `pcm_source.py`. No changes to `CanonicalAnaly
 `SqueezeliteShmSource` supports two ABI modes:
 
 - **v0 (legacy)**: `buf_index` wraps at 16384; `updated` is second-resolution. Full-lap aliasing possible (undetectable without producer changes). Overrun detection: `n_new > 8192`.
-- **v1 (extended)**: Magic `0x48555345` at offset 80 signals extended header. Provides `generation` (producer restart counter), `abs_write_pos` (monotonic 64-bit sample counter), and `gap_flag` (export skipped due to lock failure). Requires squeezelite built with patched vis.c.
+- **v1 (extended)**: Magic `0x48555345` at offset 80 signals extended header. Provides
+  `generation` (random per-process ID), `abs_write_pos` (monotonic stereo-frame counter),
+  `gap_seq` (monotonic count of skipped exports) and `write_seq` (seqlock counter for
+  coherent snapshotting).  Requires squeezelite built with the HueSync producer patch —
+  see `squeezelite/vis_shm_v1.h` and `squeezelite/output_vis_v1.c`.
 
-Use `read_new_checked()` to obtain `ShmReadResult` with `ShmContinuityEvent` classification.
-Map `OVERRUN`, `FULL_LAP`, `MULTIPLE_LAPS`, `RESTART`, `SHM_REPLACED`, `GAP_EXPORT` to `StreamInvalidated` before further PCM enters the same analysis epoch.
+`abs_write_pos` is measured in STEREO FRAMES (one frame = 2 * int16 = 4 bytes) so it
+maps directly onto `DecodedSourceFrame` positions downstream.
+
+Use `read_new_checked()` on `SqueezeliteShmSource` (mono) or `read()` on
+`SqueezeliteShmStereoSource` (stereo).  Both classify continuity via the enum
+`ShmContinuityEvent`:
+
+- `ADVANCE` — normal forward progress.
+- `NO_DATA` — no advance since last poll.
+- `TORN_READ` — seqlock coherent-snapshot retries exhausted or the PCM copy raced.
+- `OVERRUN` — v0 heuristic: fell more than half the ring behind.
+- `FULL_LAP` / `MULTIPLE_LAPS` — v1: `abs_write_pos` delta equals / exceeds one full lap.
+- `RESTART` — v1 generation change, or a rate/running transition (v0 and v1).
+- `SHM_REPLACED` — legacy `buf_size` field changed.
+- `GAP_SEQUENCE` — v1: producer's `gap_seq` incremented (skipped export).  Reported
+  once per unique sequence value.
+- `UNSUPPORTED_ABI` — reserved for v0 encountered where v1 was required.
+
+Consumers must map every non-`ADVANCE`, non-`NO_DATA` event to `StreamInvalidated`
+before further PCM enters the same analysis epoch.
+
+### v1 is mandatory for canonical LMS PCM
+
+`SqueezeliteShmStereoSource.open(require_v1=True)` — the default — refuses to activate
+against a stock squeezelite that only exposes v0.  This is the production canonical
+LMS path (`bars_source='pcm_pipeline'`).  Legacy code paths that still need v0 access
+must pass `require_v1=False` explicitly.
+
+### Transactional live analyser replacement
+
+`SyncEngine.replace_analyser(new_analyser)` is transactional:
+
+1. The old analyser is asked to stop; `stop()` returns `False` if the worker did not
+   terminate within the timeout.  In that case the replacement is aborted with a
+   `RuntimeError` — the old pipeline remains owner and no runtime state is lost.
+2. Old processors are closed only after the worker thread has genuinely terminated
+   (H1 protocol).  Closing while a `feed()` is in flight would invalidate native
+   resources such as the cavacore FFT plan.
+3. If `new_analyser.start()` raises, the runtime is left in a degraded state and the
+   exception propagates to the caller — the standard recovery path is a full coupling
+   deactivate.
+
+### Atomic publication state
+
+`CanonicalAnalysisPipeline._latest_pub` is the sole authoritative publication record.
+Both `latest()` and `pub_seq` are derived from it under `_pub_lock`, so consumers
+always observe a consistent `(sequence, features, sample_pos)` triple.
+
+The publication queue is bounded (`maxlen=1000`) as a best-effort stream: slow
+consumers can lose old records, and `pub_dropped_count` exposes the loss so
+downstream can detect overflow instead of silently missing frames.
+
+### Terminal publication lifetime
+
+- `StreamInvalidated`: reset all DSP state and clear `_latest_pub`.
+- `TemporarilyNoData`: DO NOT clear `_latest_pub`.  Short source gaps preserve the
+  last-known features so effects keep rendering rather than snapping dark.
+- `EndOfStream`: flush processor carry buffers and reset DSP.  `_latest_pub`
+  persists until the next epoch or a `StreamInvalidated`.
+- Epoch transition: reset DSP and clear `_latest_pub` exactly once at the boundary.
+
+### BeatDetector concurrency
+
+`BeatDetector` stores its parameters + pipeline in an immutable `_BeatState`.  `feed()`
+captures the state once at the top and reads all subsequent fields from that local —
+`rebuild()` may replace the whole state via a single atomic assignment (GIL-safe) at
+any point without corrupting the running frame.
 
 ## Modification policy
 

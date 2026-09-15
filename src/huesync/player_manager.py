@@ -643,7 +643,7 @@ class PlayerManager:
         shared _make_canonical_pipeline() factory can select v2 or cavacore, identical
         to the AirPlay path.  Both ingresses feed into the same factory.
         """
-        await self._wait_for_shm(profile.player_mac)
+        await asyncio.to_thread(self._wait_for_shm, profile.player_mac)
 
         shm_source = SqueezeliteShmStereoSource()
         shm_source.open(profile.player_mac)

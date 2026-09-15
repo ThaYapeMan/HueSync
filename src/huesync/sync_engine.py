@@ -24,6 +24,7 @@ import os
 import threading
 import time
 from collections import deque
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -773,6 +774,27 @@ class StereoMagStft:
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class _BeatState:
+    """Immutable BeatDetector parameter + pipeline snapshot.
+
+    Concurrency contract: rebuild() constructs a brand-new _BeatState off any
+    worker thread and installs it via a single attribute assignment (atomic
+    under the GIL).  feed() captures self._state exactly once at the top and
+    reads all subsequent parameters from that local — the running frame never
+    sees a partially-updated configuration even if rebuild() lands mid-call.
+    """
+
+    onset_method: str
+    onset_delta: float
+    onset_alpha: float
+    superflux_mu: int
+    superflux_lag: int
+    bass_hz: int
+    mid_hz: int
+    onset_pipeline: object  # StftOnsetPipeline | MultibandStftPipeline | SuperfluxStftPipeline
+
+
 class BeatDetector:
     """Onset detection processor wrapping the three existing onset pipelines.
 
@@ -783,6 +805,11 @@ class BeatDetector:
     BeatDetector is independent of SpectrumProcessor: the two processors run
     in parallel inside CanonicalAnalysisPipeline.  Their outputs are assembled
     by CAP rather than being wired together.
+
+    Concurrency: the state is kept in a single frozen _BeatState.  Live
+    rebuild() (via api.py PATCH → SyncEngine.update_onset_pipeline) is
+    concurrency-safe with the running analyser thread — feed() captures the
+    state once per invocation and never observes a partial update.
     """
 
     _SAMPLE_RATE: int = AudioCanonicalizer.TARGET_RATE  # 48000
@@ -797,40 +824,92 @@ class BeatDetector:
         bass_hz: int,
         mid_hz: int,
     ) -> None:
-        self._onset_method = onset_method
-        self._onset_delta = onset_delta
-        self._onset_alpha = onset_alpha
-        self._superflux_mu = superflux_mu
-        self._superflux_lag = superflux_lag
-        self._bass_hz = bass_hz
-        self._mid_hz = mid_hz
-        self._onset_pipeline: (
-            StftOnsetPipeline | MultibandStftPipeline | SuperfluxStftPipeline
-        ) = self._build_onset_pipeline()
+        self._state: _BeatState = self._make_state(
+            onset_method, onset_delta, onset_alpha,
+            superflux_mu, superflux_lag, bass_hz, mid_hz,
+        )
 
     @property
     def processor_id(self) -> str:
         return "beat_detector"
 
-    def _build_onset_pipeline(
+    # Backward-compat accessors — many tests and legacy call sites read the
+    # parameter fields directly.  Redirect them to the immutable state.
+    @property
+    def _onset_method(self) -> str:
+        return self._state.onset_method
+
+    @property
+    def _onset_delta(self) -> float:
+        return self._state.onset_delta
+
+    @property
+    def _onset_alpha(self) -> float:
+        return self._state.onset_alpha
+
+    @property
+    def _superflux_mu(self) -> int:
+        return self._state.superflux_mu
+
+    @property
+    def _superflux_lag(self) -> int:
+        return self._state.superflux_lag
+
+    @property
+    def _bass_hz(self) -> int:
+        return self._state.bass_hz
+
+    @property
+    def _mid_hz(self) -> int:
+        return self._state.mid_hz
+
+    @property
+    def _onset_pipeline(
         self,
     ) -> StftOnsetPipeline | MultibandStftPipeline | SuperfluxStftPipeline:
-        sr = self._SAMPLE_RATE
-        if self._onset_method == "multiband":
-            return MultibandStftPipeline(
-                sr, bass_hz=self._bass_hz, mid_hz=self._mid_hz,
-                delta=self._onset_delta, alpha=self._onset_alpha,
-            )
-        if self._onset_method == "superflux":
-            return SuperfluxStftPipeline(
-                sr, mu=self._superflux_mu, lag=self._superflux_lag,
-                delta=self._onset_delta, alpha=self._onset_alpha,
-            )
-        return StftOnsetPipeline(sr, delta=self._onset_delta, alpha=self._onset_alpha)
+        return self._state.onset_pipeline  # type: ignore[return-value]
 
-    def _parse_onset_frame(self, of: object, start: int, hop: int) -> ProcessorUpdate:
+    @classmethod
+    def _make_state(
+        cls,
+        onset_method: str,
+        onset_delta: float,
+        onset_alpha: float,
+        superflux_mu: int,
+        superflux_lag: int,
+        bass_hz: int,
+        mid_hz: int,
+    ) -> _BeatState:
+        sr = cls._SAMPLE_RATE
+        if onset_method == "multiband":
+            pipeline: object = MultibandStftPipeline(
+                sr, bass_hz=bass_hz, mid_hz=mid_hz,
+                delta=onset_delta, alpha=onset_alpha,
+            )
+        elif onset_method == "superflux":
+            pipeline = SuperfluxStftPipeline(
+                sr, mu=superflux_mu, lag=superflux_lag,
+                delta=onset_delta, alpha=onset_alpha,
+            )
+        else:
+            pipeline = StftOnsetPipeline(sr, delta=onset_delta, alpha=onset_alpha)
+        return _BeatState(
+            onset_method=onset_method,
+            onset_delta=onset_delta,
+            onset_alpha=onset_alpha,
+            superflux_mu=superflux_mu,
+            superflux_lag=superflux_lag,
+            bass_hz=bass_hz,
+            mid_hz=mid_hz,
+            onset_pipeline=pipeline,
+        )
+
+    @staticmethod
+    def _parse_onset_frame(
+        state: _BeatState, of: object, start: int, hop: int
+    ) -> ProcessorUpdate:
         end = start + hop
-        if self._onset_method == "multiband":
+        if state.onset_method == "multiband":
             (b_on, b_str), (m_on, m_str), (t_on, t_str) = of  # type: ignore[misc]
             return ProcessorUpdate(
                 processor_id="beat_detector",
@@ -855,10 +934,15 @@ class BeatDetector:
         )
 
     def feed(self, frame: SharedAnalysisFrame) -> list[ProcessorUpdate]:
+        # Capture the state ONCE at the top of the call.  A concurrent
+        # rebuild() may replace self._state after this point, but this feed()
+        # call finishes on the captured configuration.
+        state = self._state
         if not frame.mag_frames:
             return []
-        onset_frames = self._onset_pipeline.push_mag(frame.mag_frames)
-        hop = self._onset_pipeline.hop
+        pipeline = state.onset_pipeline
+        onset_frames = pipeline.push_mag(frame.mag_frames)  # type: ignore[attr-defined]
+        hop = pipeline.hop  # type: ignore[attr-defined]
         updates: list[ProcessorUpdate] = []
         for i, of in enumerate(onset_frames):
             start = (
@@ -866,14 +950,19 @@ class BeatDetector:
                 if i < len(frame.hop_sample_starts)
                 else frame.sample_start
             )
-            updates.append(self._parse_onset_frame(of, start, hop))
+            updates.append(self._parse_onset_frame(state, of, start, hop))
         return updates
 
     def flush(self) -> list[ProcessorUpdate]:
         return []  # onset pipelines have no explicit carry buffer
 
     def reset(self) -> None:
-        self._onset_pipeline = self._build_onset_pipeline()
+        state = self._state
+        self._state = self._make_state(
+            state.onset_method, state.onset_delta, state.onset_alpha,
+            state.superflux_mu, state.superflux_lag,
+            state.bass_hz, state.mid_hz,
+        )
 
     def rebuild(
         self,
@@ -885,15 +974,16 @@ class BeatDetector:
         bass_hz: int,
         mid_hz: int,
     ) -> None:
-        """Replace the onset pipeline with new parameters. Atomic under GIL."""
-        self._onset_method = onset_method
-        self._onset_delta = onset_delta
-        self._onset_alpha = onset_alpha
-        self._superflux_mu = superflux_mu
-        self._superflux_lag = superflux_lag
-        self._bass_hz = bass_hz
-        self._mid_hz = mid_hz
-        self._onset_pipeline = self._build_onset_pipeline()
+        """Replace state atomically with new parameters.
+
+        Build the new _BeatState fully off-thread first, then commit with a
+        single attribute assignment — concurrency-safe under the GIL.
+        """
+        new_state = self._make_state(
+            onset_method, onset_delta, onset_alpha,
+            superflux_mu, superflux_lag, bass_hz, mid_hz,
+        )
+        self._state = new_state
 
     def close(self) -> None:
         pass
@@ -962,14 +1052,20 @@ class CanonicalAnalysisPipeline:
         self._pending_onset: list[ProcessorUpdate] = []
         self._canonicalizer = AudioCanonicalizer()
         self._current_epoch_id: str | None = None
-        self._latest: AudioFeatures | None = None
+        # Publication state — the authoritative record is _latest_pub.
+        # Both pub_seq and latest() derive from it under _pub_lock so that
+        # readers always observe a consistent snapshot.
+        self._latest_pub: PublicationRecord | None = None
         self._pub_seq: int = 0
-        self._lock = threading.Lock()
-        self._pub_queue: deque[PublicationRecord] = deque(maxlen=1000)
         self._pub_lock = threading.Lock()
+        self._pub_queue: deque[PublicationRecord] = deque(maxlen=1000)
+        self._pub_dropped: int = 0
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._source_sample_end: int = 0  # last real (non-padded) source sample position
+        # STFT sample-position tracking so hop_sample_starts is chunk-independent.
+        self._stft_frame_count: int = 0
+        self._epoch_start_sample_pos: int = 0
 
     # ------------------------------------------------------------------
     # Properties
@@ -983,8 +1079,19 @@ class CanonicalAnalysisPipeline:
     @property
     def pub_seq(self) -> int:
         """Monotonically increasing counter; incremented on each publication."""
-        with self._lock:
+        with self._pub_lock:
             return self._pub_seq
+
+    @property
+    def pub_dropped_count(self) -> int:
+        """Number of publications lost to bounded-queue overflow since the last drain.
+
+        The publication queue is best-effort with a fixed maxlen (1000).  If a
+        consumer polls slower than the analysis rate and records overflow, we
+        count them here rather than blocking DSP.  See drain_publications().
+        """
+        with self._pub_lock:
+            return self._pub_dropped
 
     @property
     def effective_spectrum_backend(self) -> str:
@@ -1046,6 +1153,39 @@ class CanonicalAnalysisPipeline:
         self._pending_onset.clear()
         self._current_epoch_id = None
         self._source_sample_end = 0
+        self._stft_frame_count = 0
+        self._epoch_start_sample_pos = 0
+
+    def _publish(
+        self,
+        *,
+        epoch_id: str,
+        sample_start: int,
+        sample_end: int,
+        features: AudioFeatures,
+        effective_engine_id: str,
+        effective_processor_ids: tuple[str, ...],
+    ) -> PublicationRecord:
+        """Build a PublicationRecord and atomically commit it to publication state."""
+        with self._pub_lock:
+            self._pub_seq += 1
+            seq = self._pub_seq
+            record = PublicationRecord(
+                sequence=seq,
+                epoch=epoch_id,
+                sample_pos=sample_start,
+                sample_end=sample_end,
+                features=features,
+                effective_engine_id=effective_engine_id,
+                effective_processor_ids=effective_processor_ids,
+            )
+            self._latest_pub = record
+            # Bounded queue: count drops rather than blocking DSP.
+            maxlen = self._pub_queue.maxlen
+            if maxlen is not None and len(self._pub_queue) == maxlen:
+                self._pub_dropped += 1
+            self._pub_queue.append(record)
+        return record
 
     def _build_features(
         self, bars: list[float], onset_batch: list[ProcessorUpdate]
@@ -1110,13 +1250,23 @@ class CanonicalAnalysisPipeline:
         if epoch_id != self._current_epoch_id:
             if self._current_epoch_id is not None:
                 self._reset_dsp()
-            with self._lock:
-                self._latest = None
+            with self._pub_lock:
+                self._latest_pub = None
             self._current_epoch_id = epoch_id
+            self._epoch_start_sample_pos = frame.sample_pos
+            self._stft_frame_count = 0
 
         mag_frames = self._bar_stft.push(samples)
         hop = self._bar_stft.hop
-        hop_starts = [frame.sample_pos + i * hop for i in range(len(mag_frames))]
+        # Chunk-independent hop positions: each STFT frame N starts at
+        # epoch_start + N * hop, regardless of how the caller batched samples.
+        # This keeps positions stable when the same audio is fed in 480-sample
+        # chunks or 100-sample chunks.
+        hop_starts = [
+            self._epoch_start_sample_pos + (self._stft_frame_count + i) * hop
+            for i in range(len(mag_frames))
+        ]
+        self._stft_frame_count += len(mag_frames)
 
         # Track the last real (non-padded) source sample position for EOS interval clamping.
         self._source_sample_end = frame.sample_pos + len(samples)
@@ -1131,9 +1281,16 @@ class CanonicalAnalysisPipeline:
         )
 
         # Run all processors generically; route bars→spectrum_updates, rest→pending_onset.
+        # effective_processor_ids reports ONLY contributing processors (those that
+        # produced at least one ProcessorUpdate on this frame) — a processor whose
+        # carry buffer is still warming up must not appear in effective ids.
         spectrum_updates: list[ProcessorUpdate] = []
+        contributing_ids: list[str] = []
         for proc in self._processors:
-            for pu in proc.feed(shared_frame):
+            pus = proc.feed(shared_frame)
+            if pus:
+                contributing_ids.append(proc.processor_id)
+            for pu in pus:
                 if pu.bars is not None:
                     spectrum_updates.append(pu)
                 else:
@@ -1141,7 +1298,7 @@ class CanonicalAnalysisPipeline:
 
         records: list[PublicationRecord] = []
         n_updates = len(spectrum_updates)
-        effective_ids = tuple(proc.processor_id for proc in self._processors)
+        effective_ids = tuple(contributing_ids)
         for i, su in enumerate(spectrum_updates):
             # Last update drains all accumulated onset; earlier updates pop one each.
             # V2: N updates from N mag_frames — onset is 1:1 with frames.
@@ -1153,30 +1310,32 @@ class CanonicalAnalysisPipeline:
                 onset_batch = [self._pending_onset.pop(0)] if self._pending_onset else []
 
             features = self._build_features(su.bars or [], onset_batch)
-            with self._lock:
-                self._latest = features
-                self._pub_seq += 1
-                seq = self._pub_seq
-
-            record = PublicationRecord(
-                sequence=seq,
-                epoch=epoch_id,
-                sample_pos=su.sample_start,
+            record = self._publish(
+                epoch_id=epoch_id,
+                sample_start=su.sample_start,
                 sample_end=su.sample_end,
                 features=features,
                 effective_engine_id=self._spectrum_processor.processor_id,
                 effective_processor_ids=effective_ids,
             )
             records.append(record)
-            with self._pub_lock:
-                self._pub_queue.append(record)
         return records
 
     def _flush_engine(self) -> list[PublicationRecord]:
-        """Flush all processor carry buffers at clean EOS; do NOT clear _latest."""
+        """Flush all processor carry buffers at clean EOS; do NOT clear _latest_pub.
+
+        EOS features persist through TemporarilyNoData so the effect layer can
+        keep rendering the last-known state rather than snapping to black
+        during short gaps.  _latest_pub is only cleared on epoch transitions
+        or StreamInvalidated.
+        """
         spectrum_updates: list[ProcessorUpdate] = []
+        contributing_ids: list[str] = []
         for proc in self._processors:
-            for pu in proc.flush():
+            pus = proc.flush()
+            if pus:
+                contributing_ids.append(proc.processor_id)
+            for pu in pus:
                 if pu.bars is not None:
                     spectrum_updates.append(pu)
                 else:
@@ -1187,36 +1346,36 @@ class CanonicalAnalysisPipeline:
         if self._current_epoch_id is None:
             return records
         epoch_id = self._current_epoch_id
-        effective_ids = tuple(proc.processor_id for proc in self._processors)
+        effective_ids = tuple(contributing_ids)
         for i, su in enumerate(spectrum_updates):
             if i == n_updates - 1:
                 onset_batch = list(self._pending_onset)
                 self._pending_onset.clear()
             else:
                 onset_batch = [self._pending_onset.pop(0)] if self._pending_onset else []
-            features = self._build_features(su.bars or [], onset_batch)
-            with self._lock:
-                self._latest = features
-                self._pub_seq += 1
-                seq = self._pub_seq
             # Clamp sample_end to the last real source sample (not zero-padded STFT extent).
             pub_sample_end = (
                 min(su.sample_end, self._source_sample_end)
                 if self._source_sample_end > 0
                 else su.sample_end
             )
-            record = PublicationRecord(
-                sequence=seq,
-                epoch=epoch_id,
-                sample_pos=su.sample_start,
+            # If the flush-record's sample_start is past the real source end,
+            # the block is pure zero-padding — drop it.
+            if (
+                self._source_sample_end > 0
+                and su.sample_start >= self._source_sample_end
+            ):
+                continue
+            features = self._build_features(su.bars or [], onset_batch)
+            record = self._publish(
+                epoch_id=epoch_id,
+                sample_start=su.sample_start,
                 sample_end=pub_sample_end,
                 features=features,
                 effective_engine_id=self._spectrum_processor.processor_id,
                 effective_processor_ids=effective_ids,
             )
             records.append(record)
-            with self._pub_lock:
-                self._pub_queue.append(record)
         return records
 
     # ------------------------------------------------------------------
@@ -1240,14 +1399,16 @@ class CanonicalAnalysisPipeline:
     def drain_publications(self) -> list[PublicationRecord]:
         """Drain all publications buffered since the last call.
 
-        The worker appends every PublicationRecord to a bounded deque
-        (maxlen=1000) so that callers polling at a lower rate than the
-        analysis rate receive every record without gaps.  Returns an empty
-        list if nothing has been published since the previous drain.
+        The publication queue is bounded (maxlen=1000) as a best-effort
+        stream — if the consumer polls slower than the analysis rate the
+        oldest records are dropped and pub_dropped_count tracks how many.
+        Callers that need a lossless record stream should either drain
+        continuously or observe pub_dropped_count to detect overflow.
         """
         with self._pub_lock:
             result = list(self._pub_queue)
             self._pub_queue.clear()
+            self._pub_dropped = 0
             return result
 
     # ------------------------------------------------------------------
@@ -1267,44 +1428,52 @@ class CanonicalAnalysisPipeline:
                     if isinstance(cresult, CanonicalData):
                         self._process_canonical_frame(cresult.frame)
                     elif isinstance(cresult, TemporarilyNoData):
-                        if not self._source.running:  # type: ignore[union-attr]
-                            with self._lock:
-                                self._latest = None
+                        # DO NOT clear _latest_pub here.  Short gaps in the
+                        # source (e.g. a pause between AirPlay tracks) must
+                        # preserve the most recent features so downstream
+                        # effects keep rendering rather than snapping dark.
                         self._stop.wait(_CAP_POLL_S)
                     elif isinstance(cresult, StreamInvalidated):
                         self._reset_dsp()
-                        with self._lock:
-                            self._latest = None
+                        with self._pub_lock:
+                            self._latest_pub = None
                     elif isinstance(cresult, EndOfStream):
-                        # EOS: flush carry buffer; do NOT clear _latest (M2 invariant).
+                        # EOS: flush carry buffer; _latest_pub survives.
                         self._flush_engine()
                         self._reset_dsp()
                         self._canonicalizer.reset()
                         self._stop.wait(_CAP_POLL_S)
         except Exception:
             log.exception("CanonicalAnalysisPipeline worker crashed; clearing stale features")
-            with self._lock:
-                self._latest = None
+            with self._pub_lock:
+                self._latest_pub = None
 
     def start(self) -> None:
         self._stop.clear()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
-    def stop(self) -> None:
+    def stop(self) -> bool:
+        """Signal the worker to stop; return True only if it terminated cleanly.
+
+        Waits up to 2 seconds for the worker thread to exit and closes
+        processors only when the thread has genuinely stopped — H1 fix:
+        pulling native resources out from under an active feed() would
+        crash the cavacore plan allocator.  Callers (e.g. replace_analyser)
+        rely on the boolean return to detect zombie workers.
+        """
         self._stop.set()
         if self._thread:
             self._thread.join(timeout=2)
-        # H1: only close processors after the worker thread has terminated.
-        # Closing while the thread is still alive would pull native resources
-        # (e.g. cavacore plan) out from under an active call to feed().
-        if self._thread is None or not self._thread.is_alive():
+        alive = self._thread is not None and self._thread.is_alive()
+        if not alive:
             for proc in self._processors:
                 proc.close()
+        return not alive
 
     def latest(self) -> AudioFeatures | None:
-        with self._lock:
-            return self._latest
+        with self._pub_lock:
+            return self._latest_pub.features if self._latest_pub else None  # type: ignore[return-value]
 
 
 # ---------------------------------------------------------------------------
@@ -1369,6 +1538,10 @@ class PcmAudioPipelineV2:
         return self._pipeline.pub_seq
 
     @property
+    def pub_dropped_count(self) -> int:
+        return self._pipeline.pub_dropped_count
+
+    @property
     def effective_spectrum_backend(self) -> str:
         return "v2"
 
@@ -1383,8 +1556,8 @@ class PcmAudioPipelineV2:
     def start(self) -> None:
         self._pipeline.start()
 
-    def stop(self) -> None:
-        self._pipeline.stop()
+    def stop(self) -> bool:
+        return self._pipeline.stop()
 
     def latest(self) -> AudioFeatures | None:
         return self._pipeline.latest()
@@ -2534,17 +2707,39 @@ class SyncEngine:
             normaliser.update_exertion_clip(profile.exertion_clip)
 
     def replace_analyser(self, new_analyser: AudioPipeline) -> None:
-        """Stop the current analyser, swap to new_analyser, and start it.
+        """Transactionally replace the running analyser.
 
-        The render loop (run()) continues uninterrupted: it gets None from
-        latest() for the few ticks between the old thread stopping and the new
-        thread producing its first features.  This is indistinguishable from
-        a brief silence and does not affect the Hue session.
+        Contract:
+        - Requests old analyser stop.  If its worker does not stop within the
+          bounded timeout, the replacement is aborted and the old analyser
+          remains the owner (RuntimeError is raised).
+        - If the new analyser fails to start(), the old is left stopped and
+          the runtime is in a degraded state; the caller is expected to
+          surface the exception to the operator.
+        - old.stop() also closes its processors (H1 protocol), so the caller
+          must NOT reuse the previous analyser after a successful replacement.
         """
         old = self._analyser
-        old.stop()
+        clean_stop = old.stop()
+        if not clean_stop:
+            raise RuntimeError(
+                "Old analyser worker did not stop within the 2s timeout; "
+                "replacement aborted — old pipeline remains owner."
+            )
+
         self._analyser = new_analyser
-        new_analyser.start()
+        try:
+            new_analyser.start()
+        except Exception:
+            # New analyser failed to start.  Old processors have already been
+            # closed by stop(), so we cannot cleanly resume the old one.  Keep
+            # the pointer on the new analyser for consistent teardown and let
+            # the caller decide (typically: deactivate the coupling).
+            log.exception(
+                "replace_analyser: new analyser failed to start after old was stopped; "
+                "runtime is in degraded state (deactivate to recover)"
+            )
+            raise
 
     @property
     def last_onset(self) -> bool:
