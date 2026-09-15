@@ -41,16 +41,17 @@ echo "  HEAD: $(git -C "$REPO_DIR" rev-parse --short HEAD)"
 # Step 2: install / verify native build dependencies
 # hatch_build.py compiles _libcavacore.so during pip install and requires:
 #   build-essential — gcc + standard C headers
-#   libfftw3-dev    — FFTW3 development headers (build-time)
-#   libfftw3-3      — FFTW3 shared library (runtime, loaded by _libcavacore.so)
+#   libfftw3-dev    — FFTW3 development headers + runtime shared library
+# libfftw3-dev pulls in the runtime FFTW3 shared library as a transitive
+# dependency, so we do not have to list the runtime package separately.
 # dpkg check avoids a network round-trip when packages are already present.
 # apt-get install is idempotent: already-installed packages are a no-op.
 # ---------------------------------------------------------------------------
 echo ""
 echo "[2/4] Verifying native build dependencies..."
 _need_apt=0
-# libfftw3-3 (or libfftw3-3t64 on Debian 13 Trixie) is a transitive dependency
-# of libfftw3-dev; installing only these two packages is sufficient.
+# The runtime FFTW3 shared library is a transitive dependency of libfftw3-dev;
+# installing only these two packages is sufficient.
 for _pkg in build-essential libfftw3-dev; do
     if ! dpkg -l "$_pkg" 2>/dev/null | grep -q "^ii"; then
         echo "  [missing] $_pkg"

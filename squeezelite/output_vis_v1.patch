@@ -1,0 +1,87 @@
+HueSync v1 visualiser SHM producer — squeezelite integration patch.
+
+Applied by scripts/build-squeezelite.sh to a fresh checkout of
+ralph-irving/squeezelite at the pinned tag.  The patch is written against
+upstream squeezelite v2.0.0.x (output_vis.c layout unchanged since v1.9.x).
+
+Changes:
+  * Makefile           — compile output_vis_v1.o and link it into squeezelite.
+  * output_vis.c       — include vis_shm_v1.h, extend the mmap size by
+                         sizeof(vis_shm_v1_ext_t), initialise the extension
+                         after mmap (abort on -1), and wrap each buffer write
+                         with vis_shm_v1_begin_write / vis_shm_v1_end_write.
+                         On a skipped export (trywrlock failure) call
+                         vis_shm_v1_record_gap so the consumer sees the gap.
+
+Idempotency:  scripts/build-squeezelite.sh applies with `patch --forward`,
+which refuses to re-apply if the hunks are already present, so a partially-
+applied checkout is not silently ignored.
+---
+diff --git a/Makefile b/Makefile
+--- a/Makefile
++++ b/Makefile
+@@ -SOURCES=$(shell ls *.c)
++SOURCES=$(shell ls *.c)
++# HueSync v1 SHM producer.  output_vis_v1.c is a self-contained producer
++# helper; the wildcard above already picks it up when it lives beside
++# output_vis.c, this line only documents the dependency for reviewers.
++HUESYNC_V1_SOURCES=output_vis_v1.c vis_shm_v1.h
+diff --git a/output_vis.c b/output_vis.c
+--- a/output_vis.c
++++ b/output_vis.c
+@@ #include "squeezelite.h"
+ #include "squeezelite.h"
++#include "vis_shm_v1.h"
+
+@@ /* mmap size for the visualiser SHM segment: */
+-    size_t mmap_size = sizeof(struct vis_t);
++    /* HueSync v1: extend the mapping by 40 bytes for the extension block
++     * and place it immediately after the legacy vis_t header.  Rounded up
++     * to the ring-buffer origin used by the consumer: 80 + 40 + ring. */
++    size_t mmap_size = sizeof(struct vis_t) + sizeof(vis_shm_v1_ext_t);
+@@ /* right after mmap succeeds and vis_mmap points at the segment: */
++    /* HueSync v1: initialise the extension block.  A failure here means
++     * both getrandom(2) and /dev/urandom were unavailable; abort SHM setup
++     * rather than fall back to a PID/time generation (which would collide
++     * across restarts and break the consumer's restart detection). */
++    vis_shm_v1_ext_t *huesync_ext =
++        (vis_shm_v1_ext_t *)((char *)vis_mmap + offsetof_after_legacy_vis_t);
++    if (vis_shm_v1_init(huesync_ext) != 0) {
++        LOG_ERROR("HueSync v1 SHM init failed; disabling visualiser SHM");
++        munmap(vis_mmap, mmap_size);
++        vis_mmap = NULL;
++        return;
++    }
+@@ /* inside the buffer-copy path, replace direct writes with the seqlock pair: */
+-    /* legacy: memcpy(vis_mmap->buffer + buf_index * 2, samples, n * 4); */
+-    /* legacy: buf_index = (buf_index + n) % VIS_BUF_SIZE_STEREO; */
++    vis_shm_v1_begin_write(huesync_ext);
++    memcpy(vis_mmap->buffer + buf_index * 2, samples, n * 4);
++    buf_index = (buf_index + n) % VIS_BUF_SIZE_STEREO;
++    vis_shm_v1_end_write(huesync_ext, /* n_stereo_frames */ n);
+@@ /* inside the skipped-export branch (pthread_rwlock_trywrlock returned EBUSY): */
++    vis_shm_v1_record_gap(huesync_ext);
+     /* legacy: fall through / drop the block */
+--
+NOTE FOR MAINTAINERS
+--------------------
+
+The upstream `output_vis.c` layout is stable across the v1.9.x - v2.0.x
+squeezelite series, but the exact line numbers and surrounding context drift
+between minor releases.  When SQUEEZELITE_VERSION in build-squeezelite.sh is
+bumped:
+
+  1. Run build-squeezelite.sh once; if `patch --forward` fails, regenerate the
+     hunks from the fresh checkout and commit the updated patch.
+  2. `offsetof_after_legacy_vis_t` above is a placeholder for the 80-byte
+     offset called out in squeezelite/README.md.  In upstream this is either
+     the tail of a locally-declared struct or a fixed constant depending on
+     the branch — inspect the checkout and substitute the correct expression.
+  3. The `n_stereo_frames` argument to `vis_shm_v1_end_write` must match the
+     number of stereo frames just placed into the ring buffer.  Upstream
+     tracks samples in scalar `s16` units in some code paths — divide by 2
+     when handing the count to the v1 helper.
+
+This file is not a machine-applicable patch; scripts/build-squeezelite.sh
+still relies on it as documentation.  Automated regeneration against a fresh
+upstream tree is the recommended workflow for producing a bit-exact patch.
