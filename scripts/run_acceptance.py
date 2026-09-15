@@ -530,6 +530,38 @@ def analyse_pcm(
     for hop_frame in rechunker.flush():
         _push_and_capture(hop_frame)
 
+    # cavacore EOS flush: zero-pad the carry buffer to force the final cava_execute().
+    # The rechunker drains complete HOP-blocks; the cavacore carry buffer may still
+    # hold 1-479 frames that were not yet published.  _flush_eos_tail() zero-pads to
+    # a complete 480-frame block and executes once, publishing the final spectrum frame.
+    if not is_v2:
+        pipeline._flush_eos_tail()  # type: ignore[union-attr]
+        eos_features = pipeline.latest()
+        if eos_features is not None:
+            # Compute virtual timestamp: one HOP beyond the last published row.
+            last_t_s = rows[-1]["t_s"] if rows else 0.0
+            t_s = last_t_s + HOP / CANONICAL_RATE
+            eos_row: dict[str, Any] = {"t_s": round(t_s, 6), "backend": backend}
+            for i, v in enumerate(eos_features.bars):
+                eos_row[f"bar_{i:02d}"] = round(float(v), 6)
+            eos_row["bass"] = round(float(eos_features.bass), 6)
+            eos_row["mid"] = round(float(eos_features.mid), 6)
+            eos_row["full"] = round(float(eos_features.full), 6)
+            eos_row["centroid"] = round(float(eos_features.centroid), 6)
+            eos_row["onset"] = int(eos_features.onset)
+            eos_row["onset_strength"] = round(float(eos_features.onset_strength), 6)
+            eos_row["onset_bass"] = int(eos_features.onset_bass)
+            eos_row["onset_mid"] = int(eos_features.onset_mid)
+            eos_row["onset_treble"] = int(eos_features.onset_treble)
+            eos_row["onset_bass_strength"] = round(float(eos_features.onset_bass_strength), 6)
+            eos_row["onset_mid_strength"] = round(float(eos_features.onset_mid_strength), 6)
+            eos_row["onset_treble_strength"] = round(float(eos_features.onset_treble_strength), 6)
+            eos_row["relative_exertion"] = round(float(eos_features.relative_exertion), 6)
+            eos_row["peak_ema"] = None
+            eos_row["bars_smooth_mean"] = None
+            eos_row["bars_smooth_max"] = None
+            rows.append(eos_row)
+
     hop = pipeline._bar_stft.hop
     # fft_size: V2 uses a single 2048-pt Hamming STFT for both onset and spectrum.
     # cavacore uses a dual FFT: 4096-pt (mid/treble) + 8192-pt (bass ≤ 100 Hz).

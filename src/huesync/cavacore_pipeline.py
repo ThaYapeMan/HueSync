@@ -331,6 +331,11 @@ class CavaCoreAudioPipeline:
         with self._lock:
             return self._latest
 
+    @property
+    def effective_spectrum_backend(self) -> str:
+        """The spectrum backend actually running in this pipeline instance."""
+        return "cavacore"
+
 
 def make_cavacore_pipeline(source: object, profile: Profile) -> CavaCoreAudioPipeline:
     """Construct a CavaCoreAudioPipeline from a source and engine Profile.

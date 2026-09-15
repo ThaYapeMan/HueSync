@@ -25,9 +25,14 @@ from .lms_discovery import discover_lms
 from .lms_follower import LmsFollower
 from .lms_status import query_lms_status, query_lms_sync_peers, unsync_player
 from .models import BridgeConfig, Controller, Coupling, Profile, VirtualPlayerType
-from .pcm_source import AirPlayPipeStereoSource, PcmSource, SqueezeliteShmSource
+from .pcm_source import (
+    AirPlayPipeStereoSource,
+    PcmSource,
+    SqueezeliteShmSource,
+    SqueezeliteShmStereoSource,
+)
 from .storage import Storage
-from .sync_engine import PcmAudioPipeline, PcmAudioPipelineV2, SyncEngine
+from .sync_engine import PcmAudioPipelineV2, SyncEngine
 
 try:
     from .cavacore import is_cavacore_available as _is_cavacore_available
@@ -39,6 +44,43 @@ from .types import Colour, LatencyProbe
 from .util import generate_locally_administered_mac
 
 log = logging.getLogger(__name__)
+
+
+def _make_canonical_pipeline(
+    source: object,
+    profile: Profile,
+) -> PcmAudioPipelineV2:
+    """Construct the canonical PCM analysis pipeline selected by profile.spectrum_backend.
+
+    The backend selection occurs here — after an ingress has produced canonical PCM —
+    not inside a source-specific activation branch.  Both the LMS PCM path and the
+    AirPlay path call this factory with their respective source adapter.
+
+    Raises RuntimeError if spectrum_backend='cavacore' and the native library is
+    not available (build the wheel first: pip install . with libfftw3-dev installed).
+    """
+    kwargs: dict = dict(
+        source=source,
+        bars=profile.bars,
+        lower_cutoff_freq=profile.lower_cutoff_freq,
+        higher_cutoff_freq=profile.higher_cutoff_freq,
+        onset_method=profile.onset_method,
+        onset_delta=profile.onset_delta,
+        onset_alpha=profile.onset_alpha,
+        superflux_mu=profile.superflux_mu,
+        superflux_lag=profile.superflux_lag,
+        bass_hz=profile.bass_hz,
+        mid_hz=profile.mid_hz,
+        exertion_clip=profile.exertion_clip,
+    )
+    if profile.spectrum_backend == "cavacore":
+        if not _CAVACORE_AVAILABLE:
+            raise RuntimeError(
+                "spectrum_backend='cavacore' requested but cavacore native library is "
+                "not available.  Run: pip install .  (requires libfftw3-dev)"
+            )
+        return _make_cavacore_pipeline(source, profile)
+    return PcmAudioPipelineV2(**kwargs)
 
 
 def _controller_to_bridge(controller: Controller) -> BridgeConfig:
@@ -556,7 +598,20 @@ class PlayerManager:
         output_config: HueOutputConfig,
         channels: list[ChannelInfo],
     ) -> None:
-        """LMS cava sub-path: squeezelite + cava/FIFO + optional SHM PCM tap."""
+        """LMS cava sub-path: squeezelite + cava/FIFO + optional SHM PCM tap.
+
+        bars_source='cava': spectrum bars come from the external CAVA process via FIFO.
+        spectrum_backend is only meaningful for bars_source='pcm_pipeline'; it is
+        silently ignored here.  Warn if spectrum_backend='cavacore' to surface the
+        misconfiguration (cavacore is the embedded backend — it cannot drive FIFO bars).
+        """
+        if profile.spectrum_backend == "cavacore":
+            log.warning(
+                "Coupling %s: spectrum_backend='cavacore' ignored when bars_source='cava'. "
+                "External CAVA/FIFO provides bars directly. "
+                "Set bars_source='pcm_pipeline' to use the embedded cavacore backend.",
+                session.coupling and session.coupling.name,
+            )
         engine = SyncEngine(
             str(session.fifo_path), profile, probe=session.probe,
             mellow_profile=mellow_profile,
@@ -600,27 +655,19 @@ class PlayerManager:
         output_config: HueOutputConfig,
         channels: list[ChannelInfo],
     ) -> None:
-        """LMS pcm_pipeline sub-path: squeezelite + PcmAudioPipeline, no cava/FIFO."""
+        """LMS pcm_pipeline sub-path: squeezelite + canonical PCM pipeline, no cava/FIFO.
+
+        Uses SqueezeliteShmStereoSource (stereo, SourceReadResult protocol) so the
+        shared _make_canonical_pipeline() factory can select v2 or cavacore, identical
+        to the AirPlay path.  Both ingresses feed into the same factory.
+        """
         await self._wait_for_shm(profile.player_mac)
 
-        shm_source = SqueezeliteShmSource()
+        shm_source = SqueezeliteShmStereoSource()
         shm_source.open(profile.player_mac)
         session.shm_source = shm_source
 
-        pcm_analyser = PcmAudioPipeline(
-            source=shm_source,
-            bars=profile.bars,
-            lower_cutoff_freq=profile.lower_cutoff_freq,
-            higher_cutoff_freq=profile.higher_cutoff_freq,
-            onset_method=profile.onset_method,
-            onset_delta=profile.onset_delta,
-            onset_alpha=profile.onset_alpha,
-            superflux_mu=profile.superflux_mu,
-            superflux_lag=profile.superflux_lag,
-            bass_hz=profile.bass_hz,
-            mid_hz=profile.mid_hz,
-            exertion_clip=profile.exertion_clip,
-        )
+        pcm_analyser = _make_canonical_pipeline(shm_source, profile)
 
         engine = SyncEngine(
             None, profile, probe=session.probe,
@@ -638,8 +685,9 @@ class PlayerManager:
         session.poller_task = asyncio.create_task(self._poll_sync_master(session))
         session.poller_task.add_done_callback(_log_task_failure)
         log.info(
-            "LMS pcm_pipeline coupling %s active — SHM: /dev/shm/squeezelite-%s",
+            "LMS pcm_pipeline coupling %s active — backend=%r SHM: /dev/shm/squeezelite-%s",
             session.coupling and session.coupling.name,
+            profile.spectrum_backend,
             profile.player_mac,
         )
 
@@ -666,29 +714,7 @@ class PlayerManager:
         pipe_source.open()
         session.shm_source = pipe_source
 
-        if profile.spectrum_backend == "cavacore":
-            if not _CAVACORE_AVAILABLE:
-                raise RuntimeError(
-                    "spectrum_backend='cavacore' requested but cavacore native library is "
-                    "not available.  Run: pip install .  (requires libfftw3-dev)"
-                )
-            log.info("AirPlay coupling %s using cavacore spectrum backend", profile.name)
-            pcm_analyser = _make_cavacore_pipeline(pipe_source, profile)
-        else:
-            pcm_analyser = PcmAudioPipelineV2(
-                source=pipe_source,
-                bars=profile.bars,
-                lower_cutoff_freq=profile.lower_cutoff_freq,
-                higher_cutoff_freq=profile.higher_cutoff_freq,
-                onset_method=profile.onset_method,
-                onset_delta=profile.onset_delta,
-                onset_alpha=profile.onset_alpha,
-                superflux_mu=profile.superflux_mu,
-                superflux_lag=profile.superflux_lag,
-                bass_hz=profile.bass_hz,
-                mid_hz=profile.mid_hz,
-                exertion_clip=profile.exertion_clip,
-            )
+        pcm_analyser = _make_canonical_pipeline(pipe_source, profile)
 
         engine = SyncEngine(
             None, profile, probe=session.probe,
@@ -704,8 +730,9 @@ class PlayerManager:
         session.task = asyncio.create_task(engine.run(hue_driver))
         session.task.add_done_callback(_log_task_failure)
         log.info(
-            "AirPlay coupling %s active — pipe: /run/huesync/airplay.pcm",
+            "AirPlay coupling %s active — backend=%r pipe: /run/huesync/airplay.pcm",
             session.coupling and session.coupling.name,
+            profile.spectrum_backend,
         )
 
     async def deactivate(self) -> None:

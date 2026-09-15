@@ -588,3 +588,92 @@ def test_profile_invalid_spectrum_backend_rejected() -> None:
 
     with pytest.raises(ValueError, match="spectrum_backend"):
         Profile(spectrum_backend="unknown_backend")
+
+
+# ---------------------------------------------------------------------------
+# effective_spectrum_backend property
+# ---------------------------------------------------------------------------
+
+
+def test_cavacore_pipeline_effective_backend_is_cavacore() -> None:
+    """CavaCoreAudioPipeline.effective_spectrum_backend must return 'cavacore'."""
+    p = _make_cava_pipeline()
+    assert p.effective_spectrum_backend == "cavacore"
+
+
+def test_v2_pipeline_effective_backend_is_v2() -> None:
+    """PcmAudioPipelineV2.effective_spectrum_backend must return 'v2'."""
+    p = _make_v2_pipeline()
+    assert p.effective_spectrum_backend == "v2"
+
+
+# ---------------------------------------------------------------------------
+# Shared factory — _make_canonical_pipeline selects correct backend
+# ---------------------------------------------------------------------------
+
+
+def test_factory_selects_v2_for_v2_backend() -> None:
+    """_make_canonical_pipeline returns PcmAudioPipelineV2 when profile.spectrum_backend='v2'."""
+    from huesync.models import Profile
+    from huesync.player_manager import _make_canonical_pipeline
+
+    src = MagicMock()
+    src.running = True
+    profile = Profile(spectrum_backend="v2", bars=30)
+    pipeline = _make_canonical_pipeline(src, profile)
+    assert isinstance(pipeline, PcmAudioPipelineV2)
+    assert pipeline.effective_spectrum_backend == "v2"
+
+
+def test_factory_selects_cavacore_for_cavacore_backend() -> None:
+    """_make_canonical_pipeline returns CavaCoreAudioPipeline for spectrum_backend='cavacore'."""
+    from huesync.cavacore_pipeline import CavaCoreAudioPipeline
+    from huesync.models import Profile
+    from huesync.player_manager import _make_canonical_pipeline
+
+    src = MagicMock()
+    src.running = True
+    profile = Profile(spectrum_backend="cavacore", bars=30)
+    pipeline = _make_canonical_pipeline(src, profile)
+    assert isinstance(pipeline, CavaCoreAudioPipeline)
+    assert pipeline.effective_spectrum_backend == "cavacore"
+
+
+def test_factory_same_source_accepted_by_both_backends() -> None:
+    """Same mock source is accepted by both factory outputs — proves source-agnostic design."""
+    from huesync.cavacore_pipeline import CavaCoreAudioPipeline
+    from huesync.models import Profile
+    from huesync.player_manager import _make_canonical_pipeline
+
+    src = MagicMock()
+    src.running = True
+    v2 = _make_canonical_pipeline(src, Profile(spectrum_backend="v2", bars=30))
+    cava = _make_canonical_pipeline(src, Profile(spectrum_backend="cavacore", bars=30))
+    assert isinstance(v2, PcmAudioPipelineV2)
+    assert isinstance(cava, CavaCoreAudioPipeline)
+
+
+# ---------------------------------------------------------------------------
+# Real worker start/stop
+# ---------------------------------------------------------------------------
+
+
+def test_worker_starts_and_stops_cleanly() -> None:
+    """start() launches the worker thread; stop() joins it within 2 s."""
+    src = MagicMock()
+    src.running = False
+    # read() must return a TemporarilyNoData-like object to keep the loop idle.
+    from huesync.canonicalizer import TemporarilyNoData
+
+    src.read.return_value = TemporarilyNoData()
+
+    p = _make_cava_pipeline()
+    p._source = src
+
+    p.start()
+    assert p._thread is not None and p._thread.is_alive()
+
+    p.stop()
+    assert p._thread is None or not p._thread.is_alive(), (
+        "Worker thread must terminate within 2 s of stop()"
+    )

@@ -857,24 +857,32 @@ def test_legacy_airplay_source_not_in_player_manager_imports():
 # ---------------------------------------------------------------------------
 
 
-def test_lms_path_still_uses_pcm_audio_pipeline():
-    """The LMS PCM sub-path still uses PcmAudioPipeline (not V2)."""
-    import huesync.player_manager as pm
-    # PcmAudioPipeline is still imported for the LMS native path.
-    assert hasattr(pm, "PcmAudioPipeline"), (
-        "PcmAudioPipeline must remain in player_manager for LMS native path"
-    )
-
-
-def test_v2_not_used_for_lms():
-    """player_manager._activate_lms_pcm uses PcmAudioPipeline, not V2."""
+def test_lms_path_uses_canonical_pipeline():
+    """The LMS PCM sub-path routes through _make_canonical_pipeline (v2 or cavacore)."""
     import inspect
 
     import huesync.player_manager as pm
 
     src = inspect.getsource(pm.PlayerManager._activate_lms_pcm)
-    assert "PcmAudioPipelineV2" not in src
-    assert "PcmAudioPipeline(" in src
+    # Must use the shared factory — not the old mono PcmAudioPipeline.
+    assert "_make_canonical_pipeline" in src, (
+        "_activate_lms_pcm must use _make_canonical_pipeline for backend selection"
+    )
+    assert "SqueezeliteShmStereoSource" in src, (
+        "_activate_lms_pcm must use SqueezeliteShmStereoSource (stereo, SourceReadResult)"
+    )
+    # Legacy mono pipeline must not be called directly.
+    assert "PcmAudioPipeline(" not in src
+
+
+def test_shared_factory_in_player_manager():
+    """_make_canonical_pipeline is a module-level factory in player_manager."""
+    import huesync.player_manager as pm
+
+    assert hasattr(pm, "_make_canonical_pipeline"), (
+        "_make_canonical_pipeline must be a module-level factory"
+    )
+    assert callable(pm._make_canonical_pipeline)
 
 
 # ---------------------------------------------------------------------------

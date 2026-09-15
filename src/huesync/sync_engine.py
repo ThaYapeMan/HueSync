@@ -1110,6 +1110,11 @@ class PcmAudioPipelineV2:
         with self._lock:
             return self._latest
 
+    @property
+    def effective_spectrum_backend(self) -> str:
+        """The spectrum backend actually running in this pipeline instance."""
+        return "v2"
+
 
 # ---------------------------------------------------------------------------
 # Helpers shared by CavaPipeline and ColourModeEffect
