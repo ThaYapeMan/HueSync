@@ -73,14 +73,17 @@ def _make_canonical_pipeline(
         mid_hz=profile.mid_hz,
         exertion_clip=profile.exertion_clip,
     )
-    if profile.spectrum_backend == "cavacore":
+    if profile.spectrum_backend == "v2":
+        return PcmAudioPipelineV2(**kwargs)
+    elif profile.spectrum_backend == "cavacore":
         if not _CAVACORE_AVAILABLE:
             raise RuntimeError(
                 "spectrum_backend='cavacore' requested but cavacore native library is "
                 "not available.  Run: pip install .  (requires libfftw3-dev)"
             )
         return _make_cavacore_pipeline(source, profile)
-    return PcmAudioPipelineV2(**kwargs)
+    else:
+        raise ValueError(f"Unknown spectrum_backend {profile.spectrum_backend!r}")
 
 
 def _controller_to_bridge(controller: Controller) -> BridgeConfig:
@@ -199,6 +202,9 @@ def _build_mellow_profile(coupling: Coupling, storage: Storage) -> Profile | Non
         onset_alpha=ac.onset_alpha,
         superflux_mu=ac.superflux_mu,
         superflux_lag=ac.superflux_lag,
+        use_hpss_separation=ac.use_hpss_separation,
+        bars_source=ac.bars_source,
+        spectrum_backend=ac.spectrum_backend,
         bars=ac.bars,
         lower_cutoff_freq=ac.lower_cutoff_freq,
         higher_cutoff_freq=ac.higher_cutoff_freq,
@@ -525,6 +531,7 @@ class PlayerManager:
             superflux_mu=ac.superflux_mu,
             superflux_lag=ac.superflux_lag,
             use_hpss_separation=ac.use_hpss_separation,
+            bars_source=ac.bars_source,
             spectrum_backend=ac.spectrum_backend,
             bars=ac.bars,
             lower_cutoff_freq=ac.lower_cutoff_freq,
@@ -601,17 +608,10 @@ class PlayerManager:
         """LMS cava sub-path: squeezelite + cava/FIFO + optional SHM PCM tap.
 
         bars_source='cava': spectrum bars come from the external CAVA process via FIFO.
-        spectrum_backend is only meaningful for bars_source='pcm_pipeline'; it is
-        silently ignored here.  Warn if spectrum_backend='cavacore' to surface the
-        misconfiguration (cavacore is the embedded backend — it cannot drive FIFO bars).
+        spectrum_backend is only meaningful when bars_source='pcm_pipeline'.
+        The invalid combination bars_source='cava' + spectrum_backend='cavacore' is
+        rejected at the model layer before this path is reached.
         """
-        if profile.spectrum_backend == "cavacore":
-            log.warning(
-                "Coupling %s: spectrum_backend='cavacore' ignored when bars_source='cava'. "
-                "External CAVA/FIFO provides bars directly. "
-                "Set bars_source='pcm_pipeline' to use the embedded cavacore backend.",
-                session.coupling and session.coupling.name,
-            )
         engine = SyncEngine(
             str(session.fifo_path), profile, probe=session.probe,
             mellow_profile=mellow_profile,

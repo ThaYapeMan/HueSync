@@ -474,6 +474,9 @@ class SqueezeliteShmStereoSource:
     def __init__(self) -> None:
         self._mm: mmap.mmap | None = None
         self._prev_index: int = 0
+        self._prev_running: bool = False
+        self._prev_rate: int = 0
+        self._prev_updated: int = 0
         self._source_id: str = ""
 
     def open(self, mac: str, *, _path: Path | None = None) -> None:
@@ -485,7 +488,11 @@ class SqueezeliteShmStereoSource:
         finally:
             fd.close()
         self._source_id = f"lms:{mac}"
-        self._prev_index = self._read_header()[1]
+        _, buf_index, running, rate, updated = self._read_header()
+        self._prev_index = buf_index
+        self._prev_running = running
+        self._prev_rate = rate
+        self._prev_updated = updated
 
     def close(self) -> None:
         if self._mm is not None:
@@ -517,27 +524,70 @@ class SqueezeliteShmStereoSource:
 
         Stereo layout: samples[:, 0] = L, samples[:, 1] = R.
         """
-        _, buf_index, _, rate, _ = self._read_header()
+        _, buf_index, running, rate, updated = self._read_header()
 
-        n_new = (buf_index - self._prev_index) % VIS_BUF_SIZE
-        self._prev_index = buf_index
+        # Sample-rate change: squeezelite restarted or a new track at a different rate.
+        if self._prev_rate != 0 and rate != self._prev_rate:
+            _log.warning(
+                "SHM stereo source: sample rate changed (%d → %d); invalidating epoch.",
+                self._prev_rate, rate,
+            )
+            self._prev_index = buf_index
+            self._prev_running = running
+            self._prev_rate = rate
+            self._prev_updated = updated
+            return StreamInvalidated(cause=InvalidationCause.UNKNOWN, known_lost_samples=None)
 
-        if n_new == 0:
+        # Running transition False→True: squeezelite restarted and is writing again.
+        # The buf_index was reset; old and new stream data must not be joined.
+        if running and not self._prev_running:
+            _log.debug("SHM stereo source: running transition → True; invalidating epoch.")
+            self._prev_index = buf_index
+            self._prev_running = running
+            self._prev_rate = rate
+            self._prev_updated = updated
+            return StreamInvalidated(cause=InvalidationCause.UNKNOWN, known_lost_samples=None)
+
+        self._prev_running = running
+        self._prev_rate = rate
+
+        raw_delta = (buf_index - self._prev_index) % VIS_BUF_SIZE
+
+        if raw_delta == 0:
+            # buf_index has not advanced modulo VIS_BUF_SIZE. If the writer's
+            # timestamp advanced while raw_delta == 0, the writer completed exactly
+            # one full lap (16384 scalar samples ≈ 186 ms at 44.1 kHz stereo) between
+            # our two reads. All previously visible data is overwritten — emit
+            # StreamInvalidated rather than silently losing the buffer.
+            # (updated is time_t with second resolution; aliasing within a single
+            # second is not detectable here, but is also implausible at normal read rates.)
+            if updated != self._prev_updated:
+                _log.warning(
+                    "SHM stereo source: full-lap aliasing detected "
+                    "(buf_index unchanged, writer timestamp advanced); invalidating epoch."
+                )
+                self._prev_index = buf_index
+                self._prev_updated = updated
+                return StreamInvalidated(cause=InvalidationCause.UNKNOWN, known_lost_samples=None)
+            self._prev_updated = updated
             return TemporarilyNoData()
+
+        self._prev_index = buf_index
+        self._prev_updated = updated
 
         # Fell too far behind: continuity is no longer trustworthy.
         # Cannot prove an exact overrun, so known_lost_samples stays None.
-        if n_new > VIS_BUF_SIZE // 2:
+        if raw_delta > VIS_BUF_SIZE // 2:
             _log.warning(
                 "SHM stereo source fell behind: %d new samples (buffer %d); "
                 "epoch invalidated.",
-                n_new,
+                raw_delta,
                 VIS_BUF_SIZE,
             )
             return StreamInvalidated(cause=InvalidationCause.UNKNOWN, known_lost_samples=None)
 
         # Round down to complete stereo frames (2 scalar s16 samples per frame).
-        n_new -= n_new % 2
+        n_new = raw_delta - raw_delta % 2
         if n_new == 0:
             return TemporarilyNoData()
 

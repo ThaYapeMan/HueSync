@@ -433,6 +433,8 @@ def analyse_pcm(
     rows: list[dict[str, Any]] = []
     violations: list[str] = []
     source_pos: int = 0  # source-rate stereo frame counter
+    last_hop_sample_pos: list[int] = [0]  # mutable cell — updated in _push_and_capture
+    last_pub_seq: list[int] = [pipeline.pub_seq]  # mutable cell — dedup guard for EOS row
 
     def _push_and_capture(hop_frame: AnalysisPcmFrame) -> None:
         """Feed one HOP-sized canonical frame, capture snapshot immediately."""
@@ -440,6 +442,9 @@ def analyse_pcm(
         features = pipeline.latest()
         if features is None:
             return  # STFT warmup: buffer not yet full
+
+        last_hop_sample_pos[0] = hop_frame.sample_pos
+        last_pub_seq[0] = pipeline.pub_seq
 
         t_s = hop_frame.sample_pos / CANONICAL_RATE
 
@@ -535,12 +540,16 @@ def analyse_pcm(
     # hold 1-479 frames that were not yet published.  _flush_eos_tail() zero-pads to
     # a complete 480-frame block and executes once, publishing the final spectrum frame.
     if not is_v2:
+        seq_before_eos = pipeline.pub_seq  # type: ignore[union-attr]
         pipeline._flush_eos_tail()  # type: ignore[union-attr]
         eos_features = pipeline.latest()
-        if eos_features is not None:
-            # Compute virtual timestamp: one HOP beyond the last published row.
-            last_t_s = rows[-1]["t_s"] if rows else 0.0
-            t_s = last_t_s + HOP / CANONICAL_RATE
+        # Only append an EOS row if _flush_eos_tail() actually published new features
+        # (pub_seq advanced).  Without this guard, features that persisted from the last
+        # regular block (M2 fix) would be double-counted.
+        if eos_features is not None and pipeline.pub_seq != seq_before_eos:  # type: ignore[union-attr]
+            # Timestamp: derive from the last sample_pos fed into the pipeline, not
+            # from the row table.  This avoids inventing an off-by-one virtual frame.
+            t_s = (last_hop_sample_pos[0] + HOP) / CANONICAL_RATE
             eos_row: dict[str, Any] = {"t_s": round(t_s, 6), "backend": backend}
             for i, v in enumerate(eos_features.bars):
                 eos_row[f"bar_{i:02d}"] = round(float(v), 6)
@@ -570,6 +579,7 @@ def analyse_pcm(
     fft_size: int | list[int] = WINDOW_SIZE if is_v2 else [4096, 8192]
     info: dict[str, Any] = {
         "backend": backend,
+        "effective_backend": pipeline.effective_spectrum_backend,
         "fft_size": fft_size,
         "onset_fft_size": WINDOW_SIZE,
         "hop": hop,

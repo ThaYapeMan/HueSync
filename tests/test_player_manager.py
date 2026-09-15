@@ -768,3 +768,120 @@ def test_cavacore_unavailable_raises_not_silently_falls_back() -> None:
         "Silent V2 fallback found in player_manager — remove the fallback branch "
         "and let the cavacore-unavailable path raise RuntimeError instead."
     )
+
+
+# ---------------------------------------------------------------------------
+# LMS activation routing: bars_source determines cava vs PCM path
+# ---------------------------------------------------------------------------
+
+
+def _make_lms_storage(
+    tmp_path: Path,
+    bars_source: str = "cava",
+    spectrum_backend: str = "v2",
+) -> tuple["Storage", "Coupling"]:
+    """Storage with an LMS VirtualPlayer, Analyser with given bars_source/spectrum_backend."""
+    storage = Storage(tmp_path / "config.json")
+
+    controller = Controller(
+        id="ctrl-lms", name="Hue Bridge", type=ControllerType.HUE,
+        host="192.168.1.50", app_key="ak", client_key="ck",
+    )
+    storage.save_controller(controller)
+
+    player = VirtualPlayer(
+        id="player-lms", type=VirtualPlayerType.LMS,
+        player_name="HueSync-LMS", player_mac="aa:bb:cc:dd:ee:02",
+    )
+    storage.save_virtual_player(player)
+
+    zone = Zone(
+        id="zone-lms", name="Living AE", controller_id="ctrl-lms",
+        entertainment_area_id="ae-lms", entertainment_area_name="Living Room AE",
+        light_count=2,
+    )
+    storage.save_zone(zone)
+
+    ac = Analyser(
+        id="ac-lms", name="Default", onset_method="combined", onset_delta=0.1,
+        onset_alpha=0.9, superflux_mu=3, superflux_lag=2, bars=30,
+        lower_cutoff_freq=50, higher_cutoff_freq=12000,
+        bars_source=bars_source,
+        spectrum_backend=spectrum_backend,
+    )
+    storage.save_analyser(ac)
+
+    effect = Effect(id="scene-lms", name="Default", effect_type="spectrum_rgb")
+    storage.save_effect(effect)
+
+    crossfader = EnergyProfile(id="cf-lms", name="Default CF", high_energy_effect_id="scene-lms")
+    storage.save_energy_profile(crossfader)
+
+    coupling = Coupling(
+        id="coupling-lms", name="LMS Room",
+        player_id="player-lms", analyser_id="ac-lms",
+        zone_id="zone-lms", energy_profile_id="cf-lms", enabled=True,
+    )
+    storage.save_coupling(coupling)
+
+    return storage, coupling
+
+
+def test_lms_pcm_pipeline_path_when_bars_source_pcm_pipeline_v2(tmp_path: Path) -> None:
+    """bars_source='pcm_pipeline' + spectrum_backend='v2' → _activate_lms_pcm() called."""
+    storage, coupling = _make_lms_storage(
+        tmp_path, bars_source="pcm_pipeline", spectrum_backend="v2"
+    )
+    manager = PlayerManager(storage)
+
+    fake_area = MagicMock()
+    fake_area.id = "ae-lms"
+    fake_area.name = "Living Room AE"
+
+    _pm = "huesync.player_manager"
+    with (
+        patch(f"{_pm}.list_entertainment_areas", new=AsyncMock(return_value=[fake_area])),
+        patch(f"{_pm}.get_channel_infos", new=AsyncMock(return_value=[])),
+        patch(f"{_pm}.HueDriver") as mock_driver_cls,
+        patch.object(manager, "_activate_lms_pcm", new=AsyncMock()) as mock_pcm,
+        patch.object(manager, "_activate_lms_cava", new=AsyncMock()) as mock_cava,
+        patch.object(manager, "_start_squeezelite", new=AsyncMock()),
+        patch.object(manager, "_wait_for_shm", new=AsyncMock()),
+    ):
+        mock_driver = MagicMock()
+        mock_driver.start = AsyncMock()
+        mock_driver_cls.return_value = mock_driver
+
+        asyncio.run(manager.activate_coupling(coupling))
+
+    mock_pcm.assert_called_once()
+    mock_cava.assert_not_called()
+
+
+def test_lms_cava_path_when_bars_source_cava(tmp_path: Path) -> None:
+    """bars_source='cava' (default) → _activate_lms_cava() called."""
+    storage, coupling = _make_lms_storage(tmp_path, bars_source="cava", spectrum_backend="v2")
+    manager = PlayerManager(storage)
+
+    fake_area = MagicMock()
+    fake_area.id = "ae-lms"
+    fake_area.name = "Living Room AE"
+
+    _pm = "huesync.player_manager"
+    with (
+        patch(f"{_pm}.list_entertainment_areas", new=AsyncMock(return_value=[fake_area])),
+        patch(f"{_pm}.get_channel_infos", new=AsyncMock(return_value=[])),
+        patch(f"{_pm}.HueDriver") as mock_driver_cls,
+        patch.object(manager, "_activate_lms_pcm", new=AsyncMock()) as mock_pcm,
+        patch.object(manager, "_activate_lms_cava", new=AsyncMock()) as mock_cava,
+        patch.object(manager, "_start_squeezelite", new=AsyncMock()),
+        patch.object(manager, "_wait_for_shm", new=AsyncMock()),
+    ):
+        mock_driver = MagicMock()
+        mock_driver.start = AsyncMock()
+        mock_driver_cls.return_value = mock_driver
+
+        asyncio.run(manager.activate_coupling(coupling))
+
+    mock_cava.assert_called_once()
+    mock_pcm.assert_not_called()

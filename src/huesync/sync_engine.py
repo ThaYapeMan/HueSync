@@ -852,6 +852,7 @@ class PcmAudioPipelineV2:
         self._canonicalizer = AudioCanonicalizer()
         self._current_epoch_id: str | None = None
         self._latest: AudioFeatures | None = None
+        self._pub_seq: int = 0
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -1055,6 +1056,7 @@ class PcmAudioPipelineV2:
                     hpss_active=False,
                     relative_exertion=full,
                 )
+                self._pub_seq += 1
 
     def _run(self) -> None:
         try:
@@ -1083,9 +1085,9 @@ class PcmAudioPipelineV2:
                             self._latest = None
                     elif isinstance(cresult, EndOfStream):
                         # iOS disconnected from shairport-sync.
+                        # Do NOT clear _latest here — EOS features must remain visible
+                        # to consumers until the next epoch resets them.
                         self._reset_dsp()
-                        with self._lock:
-                            self._latest = None
                         # Reset canonicalizer so the next reconnect starts a fresh epoch.
                         self._canonicalizer.reset()
                         # Avoid a tight busy-loop: the FIFO returns EOF on every read
@@ -1109,6 +1111,12 @@ class PcmAudioPipelineV2:
     def latest(self) -> AudioFeatures | None:
         with self._lock:
             return self._latest
+
+    @property
+    def pub_seq(self) -> int:
+        """Monotonically increasing counter; incremented on each features publication."""
+        with self._lock:
+            return self._pub_seq
 
     @property
     def effective_spectrum_backend(self) -> str:
@@ -1234,6 +1242,10 @@ class CavaPipeline:
             onset_strength=onset_strength,
             relative_exertion=full,
         )
+
+    @property
+    def effective_spectrum_backend(self) -> str:
+        return "cava"
 
 
 # ---------------------------------------------------------------------------
@@ -1456,6 +1468,10 @@ class PcmAudioPipeline:
     def latest(self) -> AudioFeatures | None:
         with self._lock:
             return self._latest
+
+    @property
+    def effective_spectrum_backend(self) -> str:
+        return "v2"
 
 
 # ---------------------------------------------------------------------------

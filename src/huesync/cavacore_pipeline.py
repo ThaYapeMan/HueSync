@@ -139,6 +139,7 @@ class CavaCoreAudioPipeline:
         self._canonicalizer = AudioCanonicalizer()
         self._current_epoch_id: str | None = None
         self._latest: AudioFeatures | None = None
+        self._pub_seq: int = 0
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -224,6 +225,7 @@ class CavaCoreAudioPipeline:
                 hpss_active=False,
                 relative_exertion=full,
             )
+            self._pub_seq += 1
 
     def _flush_eos_tail(self) -> None:
         """Process pending cavacore frames at clean EOS by zero-padding to block boundary.
@@ -297,10 +299,10 @@ class CavaCoreAudioPipeline:
                     elif isinstance(cresult, EndOfStream):
                         # Clean EOS: flush pending cavacore carry buffer before reset.
                         # StreamInvalidated above calls _reset_dsp() directly (no flush).
+                        # Do NOT clear _latest here — the EOS tail features must remain
+                        # visible to consumers until the next epoch resets them.
                         self._flush_eos_tail()
                         self._reset_dsp()
-                        with self._lock:
-                            self._latest = None
                         self._canonicalizer.reset()
                         self._stop.wait(_POLL_S)
         except Exception:
@@ -330,6 +332,12 @@ class CavaCoreAudioPipeline:
     def latest(self) -> AudioFeatures | None:
         with self._lock:
             return self._latest
+
+    @property
+    def pub_seq(self) -> int:
+        """Monotonically increasing counter; incremented on each features publication."""
+        with self._lock:
+            return self._pub_seq
 
     @property
     def effective_spectrum_backend(self) -> str:

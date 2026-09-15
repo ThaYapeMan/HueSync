@@ -29,10 +29,14 @@ from huesync.pcm_source import (
     VIS_BUF_SIZE,
     WINDOW_SIZE,
     AirPlayPipeSource,
+    DataResult,
     PcmHpss,
     PcmSource,
     PcmStft,
     SqueezeliteShmSource,
+    SqueezeliteShmStereoSource,
+    StreamInvalidated,
+    TemporarilyNoData,
 )
 
 # ---------------------------------------------------------------------------
@@ -47,10 +51,11 @@ def _make_vis_t(
     running: bool = True,
     rate: int = 44100,
     buffer: bytes | None = None,
+    updated: int = 0,
 ) -> bytes:
     """Build a complete vis_t image ready to write to a tempfile."""
     lock_bytes = b"\x00" * _HDR_OFFSET
-    header = struct.pack(_HDR_FMT, VIS_BUF_SIZE, buf_index, int(running), rate, 0)
+    header = struct.pack(_HDR_FMT, VIS_BUF_SIZE, buf_index, int(running), rate, updated)
     buf_bytes = buffer if buffer is not None else b"\x00" * (VIS_BUF_SIZE * 2)
     return lock_bytes + header + buf_bytes
 
@@ -81,6 +86,24 @@ def _write_samples(mm: mmap.mmap, start: int, s16_values: list[int]) -> None:
         pos = (start + i) % VIS_BUF_SIZE
         mm.seek(_BUF_OFFSET + pos * 2)
         mm.write(struct.pack("<h", v))
+    mm.flush()
+
+
+def _set_running(mm: mmap.mmap, running: bool) -> None:
+    mm.seek(_HDR_OFFSET + 8)  # running_byte is 8 bytes after buf_size (past buf_size+buf_index)
+    mm.write(struct.pack("<B", int(running)))
+    mm.flush()
+
+
+def _set_rate(mm: mmap.mmap, rate: int) -> None:
+    mm.seek(_HDR_OFFSET + 12)  # rate follows buf_size + buf_index + running + pad
+    mm.write(struct.pack("<I", rate))
+    mm.flush()
+
+
+def _set_updated(mm: mmap.mmap, updated: int) -> None:
+    mm.seek(_HDR_OFFSET + 16)  # updated (time_t) follows rate
+    mm.write(struct.pack("<q", updated))
     mm.flush()
 
 
@@ -709,3 +732,161 @@ def test_airplay_no_channel_swap_after_partial_read() -> None:
     assert len(result) == 1
     # L=32767, R=0 → (32767 + 0) / (2 × 32768) ≈ 0.5
     assert abs(result[0] - 32767 / (2.0 * 32768.0)) < 1e-4
+
+
+# ---------------------------------------------------------------------------
+# SqueezeliteShmStereoSource — continuity and restart detection tests
+# ---------------------------------------------------------------------------
+
+
+def _open_stereo_src(path: Path) -> tuple["SqueezeliteShmStereoSource", mmap.mmap]:
+    """Open a SqueezeliteShmStereoSource on *path* and return (src, writable_mm)."""
+    src = SqueezeliteShmStereoSource()
+    src.open("test", _path=path)
+    mm = _open_writable_mm(path)
+    return src, mm
+
+
+def test_shm_stereo_ordinary_advance(tmp_path: Path) -> None:
+    """Normal forward read returns DataResult with correct shape."""
+    p = _write_vis_t(tmp_path, buf_index=0, running=True, rate=44100)
+    src, mm = _open_stereo_src(p)
+    # Write 8 s16 samples (4 stereo frames: L0,R0,L1,R1,...) starting at index 0.
+    samples = [100, -100, 200, -200, 300, -300, 400, -400]
+    _write_samples(mm, 0, samples)
+    _set_buf_index(mm, 8)
+    result = src.read()
+    mm.close()
+    src.close()
+
+    assert isinstance(result, DataResult)
+    assert result.frame.samples.shape == (4, 2)  # 4 stereo frames
+    assert result.frame.channels == 2
+    assert result.frame.sample_rate == 44100
+
+
+def test_shm_stereo_no_new_data(tmp_path: Path) -> None:
+    """buf_index unchanged, updated unchanged → TemporarilyNoData."""
+    p = _write_vis_t(tmp_path, buf_index=10, running=True, rate=44100, updated=1000)
+    src, mm = _open_stereo_src(p)
+    # Don't advance buf_index or updated.
+    result = src.read()
+    mm.close()
+    src.close()
+
+    assert isinstance(result, TemporarilyNoData)
+
+
+def test_shm_stereo_full_lap_aliasing(tmp_path: Path) -> None:
+    """raw_delta==0 with updated timestamp advanced → StreamInvalidated (full lap)."""
+    p = _write_vis_t(tmp_path, buf_index=100, running=True, rate=44100, updated=1000)
+    src, mm = _open_stereo_src(p)
+    # Simulate full lap: buf_index stays at 100 (mod VIS_BUF_SIZE), but updated advances.
+    _set_updated(mm, 1001)  # writer timestamp advanced without buf_index moving visibly
+    result = src.read()
+    mm.close()
+    src.close()
+
+    assert isinstance(result, StreamInvalidated)
+
+
+def test_shm_stereo_large_delta_fell_behind(tmp_path: Path) -> None:
+    """raw_delta > VIS_BUF_SIZE // 2 → StreamInvalidated (fell too far behind)."""
+    p = _write_vis_t(tmp_path, buf_index=0, running=True, rate=44100)
+    src, mm = _open_stereo_src(p)
+    # Advance by more than half the buffer.
+    _set_buf_index(mm, VIS_BUF_SIZE // 2 + 1)
+    result = src.read()
+    mm.close()
+    src.close()
+
+    assert isinstance(result, StreamInvalidated)
+
+
+def test_shm_stereo_wrap_around(tmp_path: Path) -> None:
+    """Circular buffer wrap (buf_index wraps to 0) returns correct samples."""
+    # Place prev_index near the end of the buffer.
+    wrap_start = VIS_BUF_SIZE - 4  # 4 samples before end
+    p = _write_vis_t(tmp_path, buf_index=wrap_start, running=True, rate=44100)
+    src, mm = _open_stereo_src(p)
+    # Write 8 interleaved s16 samples wrapping around (produces 4 stereo frames).
+    samples = [10, -10, 20, -20, 30, -30, 40, -40]
+    _write_samples(mm, wrap_start, samples)
+    new_index = (wrap_start + 8) % VIS_BUF_SIZE
+    _set_buf_index(mm, new_index)
+    result = src.read()
+    mm.close()
+    src.close()
+
+    assert isinstance(result, DataResult)
+    assert result.frame.samples.shape == (4, 2)
+
+
+def test_shm_stereo_running_false_to_true(tmp_path: Path) -> None:
+    """running transition False→True emits StreamInvalidated (restart detected)."""
+    p = _write_vis_t(tmp_path, buf_index=100, running=False, rate=44100)
+    src, mm = _open_stereo_src(p)
+    # Simulate squeezelite restart: running goes True.
+    _set_running(mm, True)
+    _set_buf_index(mm, 0)
+    result = src.read()
+    mm.close()
+    src.close()
+
+    assert isinstance(result, StreamInvalidated)
+
+
+def test_shm_stereo_running_false_stays_no_data(tmp_path: Path) -> None:
+    """running stays False, buf_index unchanged → TemporarilyNoData (not a restart)."""
+    p = _write_vis_t(tmp_path, buf_index=50, running=False, rate=44100)
+    src, mm = _open_stereo_src(p)
+    # No changes — source is paused.
+    result = src.read()
+    mm.close()
+    src.close()
+
+    assert isinstance(result, TemporarilyNoData)
+
+
+def test_shm_stereo_rate_change(tmp_path: Path) -> None:
+    """Sample rate change → StreamInvalidated (track or restart at different rate)."""
+    p = _write_vis_t(tmp_path, buf_index=0, running=True, rate=44100)
+    src, mm = _open_stereo_src(p)
+    # Simulate rate change mid-stream.
+    _set_rate(mm, 48000)
+    _set_buf_index(mm, 200)
+    result = src.read()
+    mm.close()
+    src.close()
+
+    assert isinstance(result, StreamInvalidated)
+
+
+def test_shm_stereo_rate_unchanged_normal_advance(tmp_path: Path) -> None:
+    """Rate unchanged: normal advance still produces DataResult."""
+    p = _write_vis_t(tmp_path, buf_index=0, running=True, rate=48000)
+    src, mm = _open_stereo_src(p)
+    _write_samples(mm, 0, [10, -10, 20, -20])  # 2 stereo frames
+    _set_buf_index(mm, 4)
+    result = src.read()
+    mm.close()
+    src.close()
+
+    assert isinstance(result, DataResult)
+    assert result.frame.sample_rate == 48000
+
+
+def test_shm_stereo_initial_rate_zero_no_spurious_invalidation(tmp_path: Path) -> None:
+    """Rate guard skips check when _prev_rate==0 (first read after open on non-zero rate)."""
+    # Source opened at rate=0 would normally trigger the rate-change check.
+    # The guard 'self._prev_rate != 0' must prevent a false invalidation on first read.
+    p = _write_vis_t(tmp_path, buf_index=0, running=True, rate=44100)
+    src, mm = _open_stereo_src(p)
+    # _prev_rate was anchored to 44100 on open() — no spurious invalidation expected.
+    _write_samples(mm, 0, [100, -100])  # 1 stereo frame
+    _set_buf_index(mm, 2)
+    result = src.read()
+    mm.close()
+    src.close()
+
+    assert isinstance(result, DataResult)

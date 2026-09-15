@@ -234,6 +234,15 @@ class Profile:
                 f"Invalid spectrum_backend {self.spectrum_backend!r}; "
                 f"must be one of {sorted(self._VALID_SPECTRUM_BACKENDS)}"
             )
+        # bars_source="cava" means external CAVA FIFO — spectrum_backend has no
+        # meaning there.  "cavacore" specifically refers to the embedded Spectrum
+        # engine over canonical PCM, so this combination is an explicit error.
+        if self.bars_source == "cava" and self.spectrum_backend == "cavacore":
+            raise ValueError(
+                "bars_source='cava' (external CAVA FIFO) is incompatible with "
+                "spectrum_backend='cavacore' (embedded cavacore Spectrum engine). "
+                "Set bars_source='pcm_pipeline' to use the embedded cavacore backend."
+            )
 
     def to_dict(self) -> dict:
         return dict(self.__dict__)
@@ -459,6 +468,12 @@ class Analyser:
             raise ValueError(
                 f"Invalid spectrum_backend {self.spectrum_backend!r}; "
                 f"must be one of {sorted(self._VALID_SPECTRUM_BACKENDS)}"
+            )
+        if self.bars_source == "cava" and self.spectrum_backend == "cavacore":
+            raise ValueError(
+                "bars_source='cava' (external CAVA FIFO) is incompatible with "
+                "spectrum_backend='cavacore' (embedded cavacore Spectrum engine). "
+                "Set bars_source='pcm_pipeline' to use the embedded cavacore backend."
             )
 
     def to_dict(self) -> dict:

@@ -1164,3 +1164,81 @@ def test_clone_effect_then_edit_does_not_affect_original(client: TestClient):
     # Original Effect sensitivity is unchanged.
     orig = client._storage.get_effect(orig_id)
     assert orig.sensitivity == pytest.approx(1.0)
+
+
+# ---------------------------------------------------------------------------
+# Analyser spectrum_backend API write path (M4)
+# ---------------------------------------------------------------------------
+
+
+def test_create_analyser_with_cavacore_backend_persisted(client: TestClient):
+    """POST /api/analysers with spectrum_backend='cavacore' persists the value."""
+    resp = client.post("/api/analysers", json={
+        "name": "CavaCore AC",
+        "bars_source": "pcm_pipeline",
+        "spectrum_backend": "cavacore",
+    })
+    assert resp.status_code == 201
+    body = resp.json()
+    assert body["spectrum_backend"] == "cavacore"
+    assert body["bars_source"] == "pcm_pipeline"
+
+    # Verify it's stored and retrievable.
+    ac_id = body["id"]
+    get_resp = client.get(f"/api/analysers/{ac_id}")
+    assert get_resp.status_code == 200
+    assert get_resp.json()["spectrum_backend"] == "cavacore"
+
+
+def test_create_analyser_default_backend_is_v2(client: TestClient):
+    """POST /api/analysers without spectrum_backend defaults to 'v2'."""
+    resp = client.post("/api/analysers", json={"name": "Default AC"})
+    assert resp.status_code == 201
+    assert resp.json()["spectrum_backend"] == "v2"
+
+
+def test_patch_analyser_spectrum_backend_accepted(client: TestClient):
+    """PATCH /api/analysers/{id} can change spectrum_backend to cavacore."""
+    create_resp = client.post("/api/analysers", json={
+        "name": "Patch AC",
+        "bars_source": "pcm_pipeline",
+        "spectrum_backend": "v2",
+    })
+    ac_id = create_resp.json()["id"]
+
+    patch_resp = client.patch(f"/api/analysers/{ac_id}", json={"spectrum_backend": "cavacore"})
+    assert patch_resp.status_code == 200
+    assert patch_resp.json()["spectrum_backend"] == "cavacore"
+
+
+def test_create_analyser_invalid_backend_rejected(client: TestClient):
+    """POST /api/analysers with unknown spectrum_backend → 422."""
+    resp = client.post("/api/analysers", json={
+        "name": "Bad AC",
+        "bars_source": "pcm_pipeline",
+        "spectrum_backend": "libfoo",
+    })
+    assert resp.status_code == 422
+
+
+def test_create_analyser_cava_fifo_with_cavacore_rejected(client: TestClient):
+    """POST /api/analysers with bars_source='cava' + spectrum_backend='cavacore' → error."""
+    resp = client.post("/api/analysers", json={
+        "name": "Bad Combo AC",
+        "bars_source": "cava",
+        "spectrum_backend": "cavacore",
+    })
+    assert resp.status_code in (400, 422)
+
+
+def test_patch_analyser_cava_fifo_with_cavacore_rejected(client: TestClient):
+    """PATCH with bars_source='cava' + spectrum_backend='cavacore' → 422."""
+    create_resp = client.post("/api/analysers", json={
+        "name": "Combo Patch AC",
+        "bars_source": "pcm_pipeline",
+        "spectrum_backend": "cavacore",
+    })
+    ac_id = create_resp.json()["id"]
+
+    patch_resp = client.patch(f"/api/analysers/{ac_id}", json={"bars_source": "cava"})
+    assert patch_resp.status_code == 422

@@ -135,6 +135,7 @@ class AnalyserCreateBody(BaseModel):
     higher_cutoff_freq: int = 12000
     use_hpss_separation: bool = False
     bars_source: str = "cava"
+    spectrum_backend: str = "v2"
 
 
 class AnalyserPatchBody(BaseModel):
@@ -150,6 +151,7 @@ class AnalyserPatchBody(BaseModel):
     higher_cutoff_freq: int | None = None
     use_hpss_separation: bool | None = None
     bars_source: str | None = None
+    spectrum_backend: str | None = None
 
 
 class EffectCreateBody(BaseModel):
@@ -774,19 +776,23 @@ async def list_analysers(request: Request):
 async def create_analyser(request: Request, body: AnalyserCreateBody):
     storage = _storage(request)
     _assert_name_unique(body.name, [(a.id, a.name) for a in storage.list_analysers()], "Analyser")
-    ac = Analyser(
-        name=body.name,
-        onset_method=body.onset_method,
-        onset_delta=body.onset_delta,
-        onset_alpha=body.onset_alpha,
-        superflux_mu=body.superflux_mu,
-        superflux_lag=body.superflux_lag,
-        bars=body.bars,
-        lower_cutoff_freq=body.lower_cutoff_freq,
-        higher_cutoff_freq=body.higher_cutoff_freq,
-        use_hpss_separation=body.use_hpss_separation,
-        bars_source=body.bars_source,
-    )
+    try:
+        ac = Analyser(
+            name=body.name,
+            onset_method=body.onset_method,
+            onset_delta=body.onset_delta,
+            onset_alpha=body.onset_alpha,
+            superflux_mu=body.superflux_mu,
+            superflux_lag=body.superflux_lag,
+            bars=body.bars,
+            lower_cutoff_freq=body.lower_cutoff_freq,
+            higher_cutoff_freq=body.higher_cutoff_freq,
+            use_hpss_separation=body.use_hpss_separation,
+            bars_source=body.bars_source,
+            spectrum_backend=body.spectrum_backend,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     storage.save_analyser(ac)
     return JSONResponse(content=ac.to_dict(), status_code=201)
 
@@ -816,6 +822,10 @@ async def patch_analyser(ac_id: str, request: Request, body: AnalyserPatchBody):
         )
     for field, value in updates.items():
         setattr(ac, field, value)
+    try:
+        ac.__post_init__()
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     storage.save_analyser(ac)
     # Trigger restart if the active coupling uses this Analyser.
     active_id = storage.get_active_coupling_id()

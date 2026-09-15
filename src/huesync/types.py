@@ -233,6 +233,11 @@ class AudioPipeline(Protocol):
         """
         ...
 
+    @property
+    def effective_spectrum_backend(self) -> str:
+        """Identifier of the spectrum engine actually running ('v2', 'cavacore', 'cava')."""
+        ...
+
 
 # ---------------------------------------------------------------------------
 # Output — contract between the effect engine and the transport layer

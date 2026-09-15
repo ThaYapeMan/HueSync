@@ -455,7 +455,7 @@ def test_analyser_default_spectrum_backend_is_v2() -> None:
 
 
 def test_analyser_cavacore_backend_accepted() -> None:
-    a = Analyser(spectrum_backend="cavacore")
+    a = Analyser(bars_source="pcm_pipeline", spectrum_backend="cavacore")
     assert a.spectrum_backend == "cavacore"
 
 
@@ -488,7 +488,7 @@ def test_profile_default_backend_is_v2() -> None:
 def test_profile_cavacore_backend_accepted() -> None:
     from huesync.models import Profile
 
-    p = Profile(spectrum_backend="cavacore")
+    p = Profile(bars_source="pcm_pipeline", spectrum_backend="cavacore")
     assert p.spectrum_backend == "cavacore"
 
 
