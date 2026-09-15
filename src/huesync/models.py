@@ -10,7 +10,8 @@ import logging
 import uuid
 from dataclasses import dataclass, field, fields
 from enum import StrEnum
-from typing import ClassVar
+
+from .spectrum_engine import VALID_ENGINE_IDS as _VALID_ENGINE_IDS
 
 log = logging.getLogger(__name__)
 
@@ -226,13 +227,11 @@ class Profile:
 
     enabled: bool = True
 
-    _VALID_SPECTRUM_BACKENDS: ClassVar[frozenset[str]] = frozenset({"v2", "cavacore"})
-
     def __post_init__(self) -> None:
-        if self.spectrum_backend not in self._VALID_SPECTRUM_BACKENDS:
+        if self.spectrum_backend not in _VALID_ENGINE_IDS:
             raise ValueError(
                 f"Invalid spectrum_backend {self.spectrum_backend!r}; "
-                f"must be one of {sorted(self._VALID_SPECTRUM_BACKENDS)}"
+                f"must be one of {sorted(_VALID_ENGINE_IDS)}"
             )
         # bars_source="cava" means external CAVA FIFO — spectrum_backend has no
         # meaning there.  "cavacore" specifically refers to the embedded Spectrum
@@ -461,13 +460,11 @@ class Analyser:
     # "cavacore" — upstream cavacore: Hann dual-FFT, bandwidth-normalised mean, autosens
     spectrum_backend: str = "v2"
 
-    _VALID_SPECTRUM_BACKENDS: ClassVar[frozenset[str]] = frozenset({"v2", "cavacore"})
-
     def __post_init__(self) -> None:
-        if self.spectrum_backend not in self._VALID_SPECTRUM_BACKENDS:
+        if self.spectrum_backend not in _VALID_ENGINE_IDS:
             raise ValueError(
                 f"Invalid spectrum_backend {self.spectrum_backend!r}; "
-                f"must be one of {sorted(self._VALID_SPECTRUM_BACKENDS)}"
+                f"must be one of {sorted(_VALID_ENGINE_IDS)}"
             )
         if self.bars_source == "cava" and self.spectrum_backend == "cavacore":
             raise ValueError(

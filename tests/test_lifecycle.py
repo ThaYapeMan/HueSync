@@ -38,7 +38,7 @@ from huesync.pcm_source import (
     AirPlayPipeStereoSource,
     SqueezeliteShmStereoSource,
 )
-from huesync.sync_engine import PcmAudioPipelineV2
+from huesync.sync_engine import _CAP_POLL_S, PcmAudioPipelineV2
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -87,13 +87,11 @@ def _make_canonical_frame(samples: np.ndarray, epoch_id: str = "ep-1") -> object
 
 def _feed_frames(pipeline: PcmAudioPipelineV2, stereo: np.ndarray,
                  epoch_id: str = "ep-1", chunk: int = 4096) -> None:
-    n, pos = len(stereo), 0
     offset = 0
-    while offset < n:
-        end = min(offset + chunk, n)
+    while offset < len(stereo):
+        end = min(offset + chunk, len(stereo))
         frame = _make_canonical_frame(stereo[offset:end], epoch_id=epoch_id)
-        pipeline._process_canonical_frame(frame)
-        pos += end - offset
+        pipeline.feed(frame)
         offset = end
 
 
@@ -155,14 +153,14 @@ def test_invalidation_clears_latest_via_run():
     src = _SeqSource(seq, done)
     p = _make_pipeline(source=src)
 
-    # Manually set _latest to a non-None value (simulates prior audio)
+    # Manually set _latest to a non-None value on the inner CAP (simulates prior audio).
     from huesync.types import AudioFeatures
     stale = AudioFeatures(
         bars=[0.5] * 30, bass=0.5, mid=0.5, full=0.5,
         centroid=0.5, sustained_energy=None,
     )
-    with p._lock:
-        p._latest = stale
+    with p._pipeline._lock:
+        p._pipeline._latest = stale
 
     p.start()
     done.wait(timeout=2.0)
@@ -197,7 +195,7 @@ def test_epoch_warmup_clears_latest():
     # A 10-sample frame will not produce any STFT frames (need 2048).
     tiny = np.zeros((10, 2), dtype=np.float32)
     frame_b = _make_canonical_frame(tiny, epoch_id="epoch-B")
-    p._process_canonical_frame(frame_b)
+    p.feed(frame_b)
 
     # _latest must be None immediately after epoch change, before warmup completes.
     assert p.latest() is None, (
@@ -215,31 +213,32 @@ def test_dsp_reset_exactly_once_after_invalidation():
     """After _run() resets DSP on StreamInvalidated (_current_epoch_id → None),
     the next epoch's _process_canonical_frame must not reset again.
 
-    Verified by checking BandNormaliser identity: only ONE new instance after
-    a StreamInvalidated + epoch-A → epoch-B transition.
+    Verified by checking onset_pipeline identity via the inner CAP: only ONE new
+    instance after a StreamInvalidated + epoch-A → epoch-B transition.
     """
     p = _make_pipeline()
+    cap = p._pipeline  # inner CanonicalAnalysisPipeline
 
     # Prime epoch A
     sig_a = _sine_stereo(440, n=2 * _CANONICAL_RATE)
     _feed_frames(p, sig_a, epoch_id="epoch-A")
-    norm_after_a = id(p._normaliser)
 
     # Simulate what _run() does on StreamInvalidated: call _reset_dsp() directly.
-    p._reset_dsp()  # sets _current_epoch_id = None
-    norm_after_invalidate = id(p._normaliser)
-    assert norm_after_invalidate != norm_after_a, "Reset must replace BandNormaliser"
+    cap._reset_dsp()  # sets _current_epoch_id = None; replaces onset_pipeline
+    onset_after_reset = id(cap._onset_pipeline)
+    assert cap._current_epoch_id is None, "_reset_dsp must clear _current_epoch_id"
 
     # Now feed first frame of epoch B — _current_epoch_id is None so no second reset.
     tiny = np.zeros((10, 2), dtype=np.float32)
     frame_b = _make_canonical_frame(tiny, epoch_id="epoch-B")
-    p._process_canonical_frame(frame_b)
+    p.feed(frame_b)
 
-    # BandNormaliser must NOT have been replaced again (no double reset).
-    assert id(p._normaliser) == norm_after_invalidate, (
+    # onset_pipeline must NOT have been replaced again (no double reset).
+    assert id(cap._onset_pipeline) == onset_after_reset, (
         "Double reset detected: epoch-B arrival after already-reset state "
-        "must not replace BandNormaliser a second time"
+        "must not replace onset_pipeline a second time"
     )
+    assert cap._current_epoch_id == "epoch-B", "epoch_id must be updated to epoch-B"
 
 
 # ---------------------------------------------------------------------------
@@ -257,8 +256,9 @@ def test_temp_no_data_does_not_reset_dsp_via_run():
     # Prime some DSP state first
     sig = _sine_stereo(440, n=2 * _CANONICAL_RATE)
     _feed_frames(p, sig, epoch_id="ep-1")
-    norm_id_before = id(p._normaliser)
-    epoch_before = p._current_epoch_id
+    cap = p._pipeline  # inner CanonicalAnalysisPipeline
+    onset_id_before = id(cap._onset_pipeline)
+    epoch_before = cap._current_epoch_id
 
     p.start()
     done.wait(timeout=2.0)
@@ -266,8 +266,10 @@ def test_temp_no_data_does_not_reset_dsp_via_run():
     p.stop()
 
     # DSP must not have been reset by TemporarilyNoData
-    assert id(p._normaliser) == norm_id_before, "TemporarilyNoData must not replace BandNormaliser"
-    assert p._current_epoch_id == epoch_before, "TemporarilyNoData must not clear epoch_id"
+    assert id(cap._onset_pipeline) == onset_id_before, (
+        "TemporarilyNoData must not replace onset_pipeline"
+    )
+    assert cap._current_epoch_id == epoch_before, "TemporarilyNoData must not clear epoch_id"
 
 
 # ---------------------------------------------------------------------------
@@ -339,7 +341,7 @@ def test_eos_no_busy_spin():
         n = call_count
     assert n < 100, (
         f"Busy-spin detected: {n} source reads in 100 ms "
-        f"(expected < 100 with _POLL_S={PcmAudioPipelineV2._POLL_S}s sleep)"
+        f"(expected < 100 with _CAP_POLL_S={_CAP_POLL_S}s sleep)"
     )
 
 
@@ -424,14 +426,14 @@ def test_worker_exception_clears_latest():
 
     p = _make_pipeline(source=_CrashAfterFirst())
 
-    # Plant stale features
+    # Plant stale features on the inner CAP
     from huesync.types import AudioFeatures
     stale = AudioFeatures(
         bars=[0.8] * 30, bass=0.8, mid=0.8, full=0.8,
         centroid=0.5, sustained_energy=None,
     )
-    with p._lock:
-        p._latest = stale
+    with p._pipeline._lock:
+        p._pipeline._latest = stale
 
     p.start()
     crash_event.wait(timeout=2.0)

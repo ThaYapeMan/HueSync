@@ -101,14 +101,14 @@ def _make_v2_pipeline(**kwargs) -> PcmAudioPipelineV2:
 
 
 def _feed(pipeline: object, stereo: np.ndarray, chunk: int = _HOP) -> None:
-    """Feed stereo samples in chunks of `chunk` to pipeline._process_canonical_frame."""
+    """Feed stereo samples in chunks of `chunk` to pipeline.feed."""
     n = len(stereo)
     pos = 0
     offset = 0
     while offset < n:
         end = min(offset + chunk, n)
         frame = _make_canonical_frame(stereo[offset:end], sample_pos=pos)
-        pipeline._process_canonical_frame(frame)  # type: ignore[union-attr]
+        pipeline.feed(frame)  # type: ignore[union-attr]
         pos += end - offset
         offset = end
 
@@ -133,7 +133,7 @@ def test_silence_latest_returns_none_or_zeros() -> None:
     p = _make_cava_pipeline()
     # Feed enough silence to fill cavacore's rolling buffer
     for _ in range(40):
-        p._process_canonical_frame(_make_canonical_frame(_silence(_HOP)))
+        p.feed(_make_canonical_frame(_silence(_HOP)))
     features = p.latest()
     # Either None (STFT warmup not done) or zero bars
     if features is not None:
@@ -247,7 +247,7 @@ def test_epoch_transition_clears_features() -> None:
 
     # Simulate epoch transition by sending a frame with a new epoch_id
     frame = _make_canonical_frame(_silence(_HOP), epoch_id="ep-2")
-    p._process_canonical_frame(frame)
+    p.feed(frame)
 
     # _latest is cleared on epoch start (before any new frames from new epoch produce output)
     # After the reset the STFT warmup begins again; latest() may be None
@@ -260,9 +260,7 @@ def test_multiple_epoch_transitions_stable() -> None:
     for ep in range(5):
         _feed(p, _sine_stereo(440.0, _CANONICAL_RATE // 2), chunk=_HOP)
         # Simulate new epoch
-        p._process_canonical_frame(
-            _make_canonical_frame(_silence(_HOP), epoch_id=f"ep-{ep + 2}")
-        )
+        p.feed(_make_canonical_frame(_silence(_HOP), epoch_id=f"ep-{ep + 2}"))
 
 
 # ---------------------------------------------------------------------------
@@ -283,7 +281,7 @@ def test_processing_latency_per_hop() -> None:
 
     t0 = time.monotonic()
     for frame in canonical:
-        p._process_canonical_frame(frame)
+        p.feed(frame)
     elapsed = time.monotonic() - t0
 
     per_hop_ms = elapsed / len(frames) * 1000
@@ -314,7 +312,7 @@ def test_epoch_reset_output_matches_fresh_pipeline() -> None:
     p_a = _make_cava_pipeline()
     _feed(p_a, warm)
     # Trigger epoch reset
-    p_a._process_canonical_frame(_make_canonical_frame(_silence(_HOP), epoch_id="ep-reset"))
+    p_a.feed(_make_canonical_frame(_silence(_HOP), epoch_id="ep-reset"))
     _feed(p_a, signal, chunk=_HOP)
     out_a = p_a.latest()
 
@@ -349,7 +347,7 @@ def test_onset_not_gated_by_cava_bar_energy() -> None:
 
     # Feed only 1 hop — cavacore rolling buffer is almost empty (bars ≈ 0).
     frame = _make_canonical_frame(impulse, epoch_id="ep-onset")
-    p._process_canonical_frame(frame)
+    p.feed(frame)
 
     # Onset could fire here or not (depends on STFT warmup), but the pipeline
     # must not crash, and if latest() is non-None the onset field must be bool.
@@ -372,7 +370,7 @@ def test_onset_same_regardless_of_backend_context() -> None:
         _feed(pipeline, pre_silence)
         # Feed one loud burst frame
         frame = _make_canonical_frame(impulse_block)
-        pipeline._process_canonical_frame(frame)  # type: ignore[union-attr]
+        pipeline.feed(frame)  # type: ignore[union-attr]
         f = pipeline.latest()  # type: ignore[union-attr]
         return f.onset if f is not None else False
 
@@ -430,29 +428,29 @@ def test_onset_fanout_two_half_blocks() -> None:
 
     stft_call_count = [0]
     stft_total_frames = [0]
-    orig_stft = p._bar_stft.push
+    orig_stft = p._pipeline._bar_stft.push
 
     def tracked_stft(samples: np.ndarray) -> list:
         stft_call_count[0] += 1
         stft_total_frames[0] += len(samples)
         return orig_stft(samples)
 
-    p._bar_stft.push = tracked_stft  # type: ignore[method-assign]
+    p._pipeline._bar_stft.push = tracked_stft  # type: ignore[method-assign]
 
     cava_none = [0]
     cava_hit = [0]
-    orig_exec = p._cava.execute
+    orig_exec = p._pipeline._engine._cava.execute
 
     def tracked_execute(samples: np.ndarray):  # type: ignore[return]
         result = orig_exec(samples)
         (cava_hit if result is not None else cava_none)[0] += 1
         return result
 
-    p._cava.execute = tracked_execute  # type: ignore[method-assign]
+    p._pipeline._engine._cava.execute = tracked_execute  # type: ignore[method-assign]
 
     half = np.zeros((240, 2), dtype=np.float32)
-    p._process_canonical_frame(_make_canonical_frame(half, sample_pos=0))
-    p._process_canonical_frame(_make_canonical_frame(half, sample_pos=240))
+    p.feed(_make_canonical_frame(half, sample_pos=0))
+    p.feed(_make_canonical_frame(half, sample_pos=240))
 
     assert stft_call_count[0] == 2, f"STFT push called {stft_call_count[0]}× (expected 2)"
     assert stft_total_frames[0] == 480, (
@@ -471,25 +469,25 @@ def test_onset_identical_pcm_reaches_both_branches() -> None:
     p = _make_cava_pipeline()
 
     stft_received: list[np.ndarray] = []
-    orig_stft = p._bar_stft.push
+    orig_stft = p._pipeline._bar_stft.push
 
     def capture_stft(s: np.ndarray) -> list:
         stft_received.append(s.copy())
         return orig_stft(s)
 
-    p._bar_stft.push = capture_stft  # type: ignore[method-assign]
+    p._pipeline._bar_stft.push = capture_stft  # type: ignore[method-assign]
 
     cava_received: list[np.ndarray] = []
-    orig_exec = p._cava.execute
+    orig_exec = p._pipeline._engine._cava.execute
 
     def capture_exec(s: np.ndarray):  # type: ignore[return]
         cava_received.append(s.copy())
         return orig_exec(s)
 
-    p._cava.execute = capture_exec  # type: ignore[method-assign]
+    p._pipeline._engine._cava.execute = capture_exec  # type: ignore[method-assign]
 
     pcm = _sine_stereo(440.0, _HOP)
-    p._process_canonical_frame(_make_canonical_frame(pcm))
+    p.feed(_make_canonical_frame(pcm))
 
     assert len(stft_received) == 1 and len(cava_received) == 1
     np.testing.assert_array_equal(
@@ -504,18 +502,16 @@ def test_arbitrary_chunk_segmentation_delivers_all_pcm_to_stft() -> None:
     p = _make_cava_pipeline()
 
     total_stft_frames = [0]
-    orig_stft = p._bar_stft.push
+    orig_stft = p._pipeline._bar_stft.push
 
     def counting_stft(s: np.ndarray) -> list:
         total_stft_frames[0] += len(s)
         return orig_stft(s)
 
-    p._bar_stft.push = counting_stft  # type: ignore[method-assign]
+    p._pipeline._bar_stft.push = counting_stft  # type: ignore[method-assign]
 
     for chunk_size in [73, 100, 50, 200, 57]:
-        p._process_canonical_frame(
-            _make_canonical_frame(np.zeros((chunk_size, 2), dtype=np.float32))
-        )
+        p.feed(_make_canonical_frame(np.zeros((chunk_size, 2), dtype=np.float32)))
 
     assert total_stft_frames[0] == 480, (
         f"STFT received {total_stft_frames[0]} frames; expected 480"
@@ -532,12 +528,14 @@ def test_clean_eos_tail_flushed() -> None:
     p = _make_cava_pipeline()
 
     pcm = _sine_stereo(440.0, 239)
-    p._process_canonical_frame(_make_canonical_frame(pcm))
-    assert p._cava.pending_frames == 239
+    p.feed(_make_canonical_frame(pcm))
+    assert p._pipeline._engine._cava.pending_frames == 239
 
-    p._flush_eos_tail()
+    p.end_of_stream()
 
-    assert p._cava.pending_frames == 0, "carry buffer must be empty after EOS flush"
+    assert p._pipeline._engine._cava.pending_frames == 0, (
+        "carry buffer must be empty after EOS flush"
+    )
 
 
 def test_invalidated_stream_discards_pending_without_flush() -> None:
@@ -545,12 +543,14 @@ def test_invalidated_stream_discards_pending_without_flush() -> None:
     p = _make_cava_pipeline()
 
     pcm = _sine_stereo(440.0, 239)
-    p._process_canonical_frame(_make_canonical_frame(pcm))
-    assert p._cava.pending_frames == 239
+    p.feed(_make_canonical_frame(pcm))
+    assert p._pipeline._engine._cava.pending_frames == 239
 
-    p._reset_dsp()
+    p._pipeline._reset_dsp()
 
-    assert p._cava.pending_frames == 0, "new backend after reset must have no pending frames"
+    assert p._pipeline._engine._cava.pending_frames == 0, (
+        "new backend after reset must have no pending frames"
+    )
 
 
 def test_pending_onset_cleared_on_epoch_reset() -> None:
@@ -558,9 +558,11 @@ def test_pending_onset_cleared_on_epoch_reset() -> None:
     p = _make_cava_pipeline()
 
     _feed(p, _sine_stereo(1000.0, _HOP))
-    p._reset_dsp()
+    p._pipeline._reset_dsp()
 
-    assert p._pending_onset == [], "_pending_onset must be empty after _reset_dsp()"
+    assert p._pipeline._pending_onset == [], (
+        "_pending_onset must be empty after _reset_dsp()"
+    )
 
 
 def test_eos_flush_with_non_silent_carry() -> None:
@@ -569,12 +571,12 @@ def test_eos_flush_with_non_silent_carry() -> None:
 
     _feed(p, _sine_stereo(440.0, _HOP * 10))  # warm up STFT + cavacore
     # Feed a partial block to leave audio in the carry buffer.
-    p._process_canonical_frame(_make_canonical_frame(_sine_stereo(440.0, 239)))
-    assert p._cava.pending_frames > 0
+    p.feed(_make_canonical_frame(_sine_stereo(440.0, 239)))
+    assert p._pipeline._engine._cava.pending_frames > 0
 
-    p._flush_eos_tail()
+    p.end_of_stream()
 
-    assert p._cava.pending_frames == 0
+    assert p._pipeline._engine._cava.pending_frames == 0
 
 
 # ---------------------------------------------------------------------------

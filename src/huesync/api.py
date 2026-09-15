@@ -357,6 +357,12 @@ async def _apply_coupling_action(
     if changed & _C_DEACTIVATE_FIELDS:
         await manager.deactivate()
         return
+    # spectrum_backend swap on a pcm_pipeline session: rebuild the analysis
+    # worker with the new engine without restarting squeezelite or Hue.
+    if "spectrum_backend" in changed and profile.bars_source == "pcm_pipeline":
+        manager.replace_pcm_analyser(profile)
+        manager.update_render(profile, mellow_profile)
+        return
     # analyser_id swap: treat as cava + PCM change (new Analyser replaces all
     # its fields: bars, cutoffs, onset params).  energy_profile_id alone falls
     # through to update_render() only.

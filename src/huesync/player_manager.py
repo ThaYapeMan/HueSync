@@ -31,15 +31,9 @@ from .pcm_source import (
     SqueezeliteShmSource,
     SqueezeliteShmStereoSource,
 )
+from .spectrum_engine import make_spectrum_engine as _make_spectrum_engine
 from .storage import Storage
-from .sync_engine import PcmAudioPipelineV2, SyncEngine
-
-try:
-    from .cavacore import is_cavacore_available as _is_cavacore_available
-    from .cavacore_pipeline import make_cavacore_pipeline as _make_cavacore_pipeline
-    _CAVACORE_AVAILABLE: bool = _is_cavacore_available()
-except Exception:
-    _CAVACORE_AVAILABLE = False
+from .sync_engine import CanonicalAnalysisPipeline, SyncEngine
 from .types import Colour, LatencyProbe
 from .util import generate_locally_administered_mac
 
@@ -49,21 +43,21 @@ log = logging.getLogger(__name__)
 def _make_canonical_pipeline(
     source: object,
     profile: Profile,
-) -> PcmAudioPipelineV2:
+) -> CanonicalAnalysisPipeline:
     """Construct the canonical PCM analysis pipeline selected by profile.spectrum_backend.
 
-    The backend selection occurs here — after an ingress has produced canonical PCM —
-    not inside a source-specific activation branch.  Both the LMS PCM path and the
-    AirPlay path call this factory with their respective source adapter.
-
-    Raises RuntimeError if spectrum_backend='cavacore' and the native library is
-    not available (build the wheel first: pip install . with libfftw3-dev installed).
+    Uses the engine registry so adding a new engine requires no changes here.
+    Raises RuntimeError if the selected engine is not available on this system.
     """
-    kwargs: dict = dict(
+    engine = _make_spectrum_engine(
+        profile.spectrum_backend,
+        n_bars=profile.bars,
+        lower_hz=float(profile.lower_cutoff_freq),
+        upper_hz=float(profile.higher_cutoff_freq),
+    )
+    return CanonicalAnalysisPipeline(
         source=source,
-        bars=profile.bars,
-        lower_cutoff_freq=profile.lower_cutoff_freq,
-        higher_cutoff_freq=profile.higher_cutoff_freq,
+        engine=engine,
         onset_method=profile.onset_method,
         onset_delta=profile.onset_delta,
         onset_alpha=profile.onset_alpha,
@@ -71,19 +65,7 @@ def _make_canonical_pipeline(
         superflux_lag=profile.superflux_lag,
         bass_hz=profile.bass_hz,
         mid_hz=profile.mid_hz,
-        exertion_clip=profile.exertion_clip,
     )
-    if profile.spectrum_backend == "v2":
-        return PcmAudioPipelineV2(**kwargs)
-    elif profile.spectrum_backend == "cavacore":
-        if not _CAVACORE_AVAILABLE:
-            raise RuntimeError(
-                "spectrum_backend='cavacore' requested but cavacore native library is "
-                "not available.  Run: pip install .  (requires libfftw3-dev)"
-            )
-        return _make_cavacore_pipeline(source, profile)
-    else:
-        raise ValueError(f"Unknown spectrum_backend {profile.spectrum_backend!r}")
 
 
 def _controller_to_bridge(controller: Controller) -> BridgeConfig:
@@ -860,6 +842,32 @@ class PlayerManager:
         if self._active and self._active.sync_engine:
             self._active.profile = profile
             self._active.sync_engine.update_render(profile, mellow_profile)
+
+    def replace_pcm_analyser(self, profile: Profile) -> None:
+        """Swap the active spectrum engine without restarting squeezelite or the Hue session.
+
+        Stops the current CanonicalAnalysisPipeline worker, builds a new one
+        with the engine selected by profile.spectrum_backend, and starts it.
+        Only valid for bars_source='pcm_pipeline' sessions that have an active
+        shm_source.  No-ops silently if no session is active or the session
+        has no shm_source (cava path).
+        """
+        if self._active is None or self._active.sync_engine is None:
+            return
+        source = self._active.shm_source
+        if source is None:
+            log.warning(
+                "replace_pcm_analyser: active session has no shm_source "
+                "(bars_source='cava'?); ignoring spectrum_backend swap"
+            )
+            return
+        new_pipeline = _make_canonical_pipeline(source, profile)
+        self._active.profile = profile
+        self._active.sync_engine.replace_analyser(new_pipeline)
+        log.info(
+            "replace_pcm_analyser: new spectrum_backend=%r active",
+            profile.spectrum_backend,
+        )
 
     async def refresh_probe(self) -> None:
         """Re-evaluate the latency probe for the current sync master.

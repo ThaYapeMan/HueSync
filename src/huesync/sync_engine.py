@@ -28,6 +28,7 @@ from collections import deque
 import numpy as np
 
 from .canonicalizer import (
+    AnalysisPcmFrame,
     AudioCanonicalizer,
     CanonicalData,
     EndOfStream,
@@ -37,6 +38,11 @@ from .canonicalizer import (
 from .latency import NoLatencyProbe
 from .models import Profile
 from .pcm_source import WINDOW_SIZE, PcmHpss, PcmSource, PcmStft
+from .spectrum_engine import (
+    PublicationRecord,
+    SharedAnalysis,
+    SpectrumEngine,
+)
 from .types import (
     AudioFeatures,
     AudioPipeline,
@@ -760,61 +766,40 @@ class StereoMagStft:
 
 
 # ---------------------------------------------------------------------------
-# PcmAudioPipelineV2 — canonical stereo AudioPipeline for native AirPlay
+# CanonicalAnalysisPipeline — engine-agnostic canonical PCM analysis pipeline
 # ---------------------------------------------------------------------------
 
+_CAP_POLL_S: float = 0.005
+_CAP_SAMPLE_RATE: int = AudioCanonicalizer.TARGET_RATE  # 48000
 
-class PcmAudioPipelineV2:
-    """AudioPipeline that analyses canonical 48 kHz stereo PCM from a decoded-source adapter.
 
-    Phase 3 native AirPlay analysis path.  Replaces the legacy mono-downmix
-    AirPlayPipeSource + PcmAudioPipeline path for native AirPlay sessions.
+class CanonicalAnalysisPipeline:
+    """Engine-agnostic canonical 48 kHz stereo PCM analysis pipeline.
 
-    Signal path:
-        source.read()            ← SourceReadResult (stereo S16LE decoded to float32)
-        AudioCanonicalizer        ← resamples to 48 kHz, stereo, epoch tracking
-        StereoMagStft             ← independent L/R STFT, RMS-combined magnitude
-        onset detectors           ← operate on combined magnitude (no downmix)
-        BandNormaliser            ← EMA AGC; dt = hop/48000 (sample-derived)
-        AudioFeatures             ← compatible with existing Effects
+    Owns the source loop, AudioCanonicalizer, epoch tracking, StereoMagStft,
+    onset detectors, and publication state.  Delegates spectrum bar computation
+    to a SpectrumEngine.  Any SpectrumEngine implementation is accepted without
+    changes here (V2, cavacore, or a future third engine).
 
-    Phase-safety guarantee:
-        Opposite-phase stereo (L=x, R=-x) produces the same spectral magnitude
-        as in-phase stereo (L=x, R=x).  The structural (L+R)/2 cancellation bug
-        present in the legacy mono path cannot occur here.
+    Public synchronous interface (acceptance script, no thread):
+        feed(frame)          → list[PublicationRecord]
+        end_of_stream()      → list[PublicationRecord]
+        drain_publications() → list[PublicationRecord]
+
+    Threaded production interface (satisfies AudioPipeline protocol):
+        start(), stop(), latest(), pub_seq, effective_spectrum_backend
 
     Lifecycle:
-        - TEMPORARILY_NO_DATA: no reset, no silence insertion, no DSP advance
-        - StreamInvalidated: DSP state reset before next epoch begins
-        - EndOfStream: DSP reset; latest() returns None until next epoch
-        - Epoch transition detected via epoch_id change: DSP reset exactly once
+        TEMPORARILY_NO_DATA: no DSP reset, no silence insertion
+        StreamInvalidated:   DSP + engine reset, _latest cleared
+        EndOfStream:         engine flushed (EOS features persist), then DSP reset
+        Epoch transition:    DSP + engine reset exactly once per boundary
     """
-
-    _POLL_S: float = 0.005
-    _SAMPLE_RATE: int = AudioCanonicalizer.TARGET_RATE  # 48000
-    # Per-bar squelch gate in linear STFT magnitude units.
-    # Derived from S16 ADC quantization floor: 1/32768 ≈ 3.05e-5 amplitude;
-    # for broadband signal at that level E[|X_k|] ≈ 7.7e-4.  Bars below this
-    # floor contain quantization noise rather than musical content.
-    _V2_NOISE_FLOOR: float = 1e-3
-    # Release time-constant for the global peak-EMA reference.
-    # Fast attack (BandNormaliser.DEFAULT_ATTACK_TAU_S = 5 ms) + slow fall so
-    # that a loud transient raises the reference immediately but lets it decay
-    # over ~1.5 s rather than chasing every quiet gap.
-    _V2_PEAK_RELEASE_TAU_S: float = 1.5
-    # Per-bar fast-attack / slow-release decay time constant.
-    # Bars rise instantly (take new value if it exceeds the held value) and decay
-    # exponentially at ~0.3 s (37% at tau).  Matches WLED AudioReactive and
-    # CAVA's fall_off_weight behaviour: the eye can track a transient without
-    # bars snapping to zero the moment the signal dips for one frame.
-    _V2_BAR_FALL_TAU_S: float = 0.3
 
     def __init__(
         self,
-        source: object,  # duck-typed: requires .read() -> SourceReadResult, .running: bool
-        bars: int,
-        lower_cutoff_freq: int,
-        higher_cutoff_freq: int,
+        source: object,
+        engine: SpectrumEngine,
         onset_method: str,
         onset_delta: float,
         onset_alpha: float,
@@ -822,12 +807,9 @@ class PcmAudioPipelineV2:
         superflux_lag: int,
         bass_hz: int,
         mid_hz: int,
-        exertion_clip: float = BandNormaliser.DEFAULT_EXERTION_CLIP,
     ) -> None:
         self._source = source
-        self._n_bars = bars
-        self._lower_hz = float(lower_cutoff_freq)
-        self._upper_hz = float(higher_cutoff_freq)
+        self._engine = engine
         self._onset_method = onset_method
         self._onset_delta = onset_delta
         self._onset_alpha = onset_alpha
@@ -835,20 +817,11 @@ class PcmAudioPipelineV2:
         self._superflux_lag = superflux_lag
         self._bass_hz = bass_hz
         self._mid_hz = mid_hz
-        self._exertion_clip = exertion_clip
-        # gate=0.0: disable the CAVA-calibrated silence gate for the native PCM path.
-        # _mag_to_bar_bytes produces raw FFT magnitudes (not CAVA's 0-255 scale);
-        # exact digital silence gives bar_bytes=0 → exertion=0 → result=0 naturally
-        # without a gate.  DEFAULT_GATE=5.0 fires on all broadband audio below
-        # ~σ=0.20 amplitude and is incompatible with this path.  CAVA and legacy
-        # PcmAudioPipeline are unaffected; they continue to use DEFAULT_GATE=5.0.
-        self._normaliser = BandNormaliser(exertion_clip=exertion_clip, gate=0.0)
-        # dt = hop/sample_rate, sample-derived.  Constant for canonical 48 kHz.
-        self._bar_stft = StereoMagStft(self._SAMPLE_RATE)
-        self._normalise_dt: float = self._bar_stft.hop / self._SAMPLE_RATE
+        self._bar_stft = StereoMagStft(_CAP_SAMPLE_RATE)
         self._onset_pipeline: (
             StftOnsetPipeline | MultibandStftPipeline | SuperfluxStftPipeline
         ) = self._build_onset_pipeline()
+        self._pending_onset: list = []
         self._canonicalizer = AudioCanonicalizer()
         self._current_epoch_id: str | None = None
         self._latest: AudioFeatures | None = None
@@ -856,85 +829,116 @@ class PcmAudioPipelineV2:
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
-        self._v2_peak_ema: float | None = None   # global peak reference for V2 normalisation
-        self._bar_smooth: list[float] | None = None  # per-bar falloff state (V2)
-        self._diag_pcm_frame: int = 0  # bounded diagnostic counter (remove after fix confirmed)
+
+    # ------------------------------------------------------------------
+    # Properties
+    # ------------------------------------------------------------------
 
     @property
-    def normaliser(self) -> BandNormaliser:
-        return self._normaliser
+    def hop(self) -> int:
+        """STFT hop size in canonical samples (480 at 48 kHz)."""
+        return self._bar_stft.hop
+
+    @property
+    def pub_seq(self) -> int:
+        """Monotonically increasing counter; incremented on each publication."""
+        with self._lock:
+            return self._pub_seq
+
+    @property
+    def effective_spectrum_backend(self) -> str:
+        return self._engine.engine_id
+
+    @property
+    def v2_peak_ema(self) -> float | None:
+        """V2 global peak EMA (None for non-V2 engines or before first frame)."""
+        return getattr(self._engine, "v2_peak_ema", None)
+
+    @property
+    def v2_bar_smooth(self) -> list[float] | None:
+        """V2 per-bar falloff state (None for non-V2 engines or before first frame)."""
+        return getattr(self._engine, "v2_bar_smooth", None)
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
 
     def _build_onset_pipeline(
         self,
     ) -> StftOnsetPipeline | MultibandStftPipeline | SuperfluxStftPipeline:
-        sr = self._SAMPLE_RATE
+        sr = _CAP_SAMPLE_RATE
         if self._onset_method == "multiband":
             return MultibandStftPipeline(
-                sr,
-                bass_hz=self._bass_hz,
-                mid_hz=self._mid_hz,
-                delta=self._onset_delta,
-                alpha=self._onset_alpha,
+                sr, bass_hz=self._bass_hz, mid_hz=self._mid_hz,
+                delta=self._onset_delta, alpha=self._onset_alpha,
             )
         if self._onset_method == "superflux":
             return SuperfluxStftPipeline(
-                sr,
-                mu=self._superflux_mu,
-                lag=self._superflux_lag,
-                delta=self._onset_delta,
-                alpha=self._onset_alpha,
+                sr, mu=self._superflux_mu, lag=self._superflux_lag,
+                delta=self._onset_delta, alpha=self._onset_alpha,
             )
         return StftOnsetPipeline(sr, delta=self._onset_delta, alpha=self._onset_alpha)
 
     def _reset_dsp(self) -> None:
-        """Reset all DSP state: STFT history, peak EMA, per-bar falloff, onset history."""
+        """Reset engine, STFT history, onset pipeline, and epoch state."""
+        self._engine.reset()
         self._bar_stft.reset()
-        self._v2_peak_ema = None
-        self._bar_smooth = None
-        # Keep the BandNormaliser instance for CAVA-compatibility tests and the
-        # gate=0.0 assertion; its normalise() is NOT called in the V2 bar path.
-        self._normaliser = BandNormaliser(exertion_clip=self._exertion_clip, gate=0.0)
         self._onset_pipeline = self._build_onset_pipeline()
+        self._pending_onset.clear()
         self._current_epoch_id = None
 
-    def _mag_to_bar_floats(self, mag: np.ndarray) -> list[float]:
-        """Map STFT magnitude bins into N log-spaced bars → linear floats.
+    def _build_features(self, bars: list[float], onset_batch: list) -> AudioFeatures:
+        onset = False
+        onset_strength = 0.0
+        onset_bass = onset_mid = onset_treble = False
+        onset_bass_str = onset_mid_str = onset_treble_str = 0.0
 
-        Uses np.max (not np.mean) within each bar's bin range.  Derivation:
-        musical signals are tonal — each note occupies a single FFT bin.
-        np.mean divides that bin's energy by n_bins, creating systematic
-        n_bins× attenuation for high-frequency bars (1 bin at 50 Hz vs 69 bins
-        at 10 kHz).  np.max takes the peak energy in the bar regardless of
-        bin count, matching hardware spectrum analysers and WLED AudioReactive.
+        if self._onset_method == "multiband":
+            for of in onset_batch:
+                (b_on, b_str), (m_on, m_str), (t_on, t_str) = of
+                onset_bass = onset_bass or b_on
+                onset_mid = onset_mid or m_on
+                onset_treble = onset_treble or t_on
+                onset_bass_str = max(onset_bass_str, b_str)
+                onset_mid_str = max(onset_mid_str, m_str)
+                onset_treble_str = max(onset_treble_str, t_str)
+            onset = onset_bass or onset_mid or onset_treble
+            onset_strength = max(onset_bass_str, onset_mid_str, onset_treble_str)
+        else:
+            for on, st in onset_batch:
+                onset = onset or on
+                onset_strength = max(onset_strength, st)
 
-        Bars below _V2_NOISE_FLOOR are zeroed (squelch gate).  No log encoding.
-        Dynamic-range conditioning is owned entirely by the global peak EMA in
-        _process_canonical_frame.
-        """
-        sr = self._SAMPLE_RATE
-        n_bins = len(mag)
-        log_lo = math.log10(max(self._lower_hz, 1.0))
-        log_hi = math.log10(max(self._upper_hz, self._lower_hz + 1.0))
-        result: list[float] = []
-        for i in range(self._n_bars):
-            f_lo = 10.0 ** (log_lo + i / self._n_bars * (log_hi - log_lo))
-            f_hi = 10.0 ** (log_lo + (i + 1) / self._n_bars * (log_hi - log_lo))
-            bin_lo = max(0, round(f_lo * WINDOW_SIZE / sr))
-            bin_hi = min(n_bins, max(bin_lo + 1, round(f_hi * WINDOW_SIZE / sr)))
-            val = float(np.max(mag[bin_lo:bin_hi])) if bin_hi > bin_lo else 0.0
-            result.append(val if val > self._V2_NOISE_FLOOR else 0.0)
-        return result
+        total = sum(bars)
+        full = _slice_avg(bars, 0.0, 1.0)
+        centroid = (
+            sum(idx * v for idx, v in enumerate(bars)) / total / len(bars)
+            if total > 1e-9 else 0.0
+        )
+        return AudioFeatures(
+            bars=bars,
+            bass=_slice_avg(bars, 0.0, 0.20),
+            mid=_slice_avg(bars, 0.0, 0.55),
+            full=full,
+            centroid=centroid,
+            onset=onset,
+            onset_strength=onset_strength,
+            onset_bass=onset_bass,
+            onset_mid=onset_mid,
+            onset_treble=onset_treble,
+            onset_bass_strength=onset_bass_str,
+            onset_mid_strength=onset_mid_str,
+            onset_treble_strength=onset_treble_str,
+            sustained_energy=None,
+            hpss_active=False,
+            relative_exertion=full,
+        )
 
-    def _process_canonical_frame(self, frame: object) -> None:
-        """Analyse one AnalysisPcmFrame and update _latest."""
-        # frame is AnalysisPcmFrame — accessed by attribute, not isinstance (no import loop).
-        epoch_id: str = frame.epoch_id  # type: ignore[union-attr]
-        samples: np.ndarray = frame.samples  # type: ignore[union-attr]
+    def _process_canonical_frame(self, frame: AnalysisPcmFrame) -> list[PublicationRecord]:
+        """Process one AnalysisPcmFrame; return new PublicationRecords."""
+        epoch_id: str = frame.epoch_id
+        samples: np.ndarray = frame.samples
 
-        # Epoch transition: guard against double-reset when _run() already called
-        # _reset_dsp() on StreamInvalidated (which sets _current_epoch_id = None).
-        # Any epoch change also clears the published snapshot so old-epoch features
-        # cannot leak into the new epoch's STFT warmup window.
         if epoch_id != self._current_epoch_id:
             if self._current_epoch_id is not None:
                 self._reset_dsp()
@@ -942,121 +946,103 @@ class PcmAudioPipelineV2:
                 self._latest = None
             self._current_epoch_id = epoch_id
 
-        # Stereo STFT → RMS-combined magnitude frames.
         mag_frames = self._bar_stft.push(samples)
+        if mag_frames:
+            onset_frames = self._onset_pipeline.push_mag(mag_frames)
+            self._pending_onset.extend(onset_frames)
 
-        # Onset analysis on the same combined magnitude (no second STFT).
-        if self._onset_method == "multiband":
-            onset_frames = self._onset_pipeline.push_mag(mag_frames)  # type: ignore[union-attr]
-        else:
-            onset_frames = self._onset_pipeline.push_mag(mag_frames)  # type: ignore[union-attr]
+        shared = SharedAnalysis(
+            mag_frames=mag_frames,
+            pcm=samples,
+            sample_pos=frame.sample_pos,
+            n_samples=len(samples),
+        )
+        updates = self._engine.feed(samples, shared)
 
-        for mag_frame, onset_result in zip(mag_frames, onset_frames, strict=True):
-            # Linear per-bar magnitudes with per-bar squelch gate.
-            bar_mags = self._mag_to_bar_floats(mag_frame)
-
-            # Global peak EMA — fast attack, slow release (WLED-style AGC).
-            # One adaptive reference for all bars: preserves spectral shape
-            # (bass ≠ treble), temporal contrast (transients punch through),
-            # and source independence (no fixed scale calibrated to iOS volume).
-            peak = max(bar_mags) if bar_mags else 0.0
-            dt = self._normalise_dt
-            if self._v2_peak_ema is None:
-                self._v2_peak_ema = max(peak, self._V2_NOISE_FLOOR)
+        records: list[PublicationRecord] = []
+        n_updates = len(updates)
+        for i, update in enumerate(updates):
+            # Last update drains all accumulated onset; earlier updates pop one each.
+            # V2: N updates from N mag_frames — onset is 1:1 with frames.
+            # Cavacore: 0 or 1 update — drains all accumulated onset at once.
+            if i == n_updates - 1:
+                onset_batch = list(self._pending_onset)
+                self._pending_onset.clear()
             else:
-                a = 1.0 - math.exp(
-                    -dt / (BandNormaliser.DEFAULT_ATTACK_TAU_S if peak > self._v2_peak_ema
-                           else self._V2_PEAK_RELEASE_TAU_S)
-                )
-                self._v2_peak_ema += a * (peak - self._v2_peak_ema)
+                onset_batch = [self._pending_onset.pop(0)] if self._pending_onset else []
 
-            ref = max(self._v2_peak_ema, self._V2_NOISE_FLOOR)
-            bars = [min(m / ref, 1.0) for m in bar_mags]
-
-            # Per-bar fast-attack / slow-release falloff (WLED/CAVA style).
-            # Instant attack: take the new value if it exceeds the held value.
-            # Exponential decay: held value × fall_factor each frame.
-            # Prevents bars from snapping to zero on a single quiet frame.
-            fall_factor = math.exp(-dt / self._V2_BAR_FALL_TAU_S)
-            if self._bar_smooth is None:
-                self._bar_smooth = list(bars)
-            else:
-                self._bar_smooth = [
-                    max(s * fall_factor, b)
-                    for s, b in zip(self._bar_smooth, bars, strict=True)
-                ]
-            bars = self._bar_smooth
-
-            # TEMPORARY DIAGNOSTIC: log linear magnitudes and normalised output every 50 frames.
-            # Remove once mushy-output defect is confirmed fixed on LXC.
-            self._diag_pcm_frame += 1
-            if self._diag_pcm_frame % 50 == 0:
-                raw_mag_mean = float(np.mean(mag_frame))
-                bar_float_max = max(bar_mags) if bar_mags else 0.0
-                bars_mean_v = sum(bars) / len(bars) if bars else 0.0
-                bars_max_v = max(bars) if bars else 0.0
-                log.info(
-                    "[pcm-v2 diag] frame=%d raw_mag_mean=%.4f bar_float_max=%.4f "
-                    "peak_ema=%.4f bars_smooth_mean=%.3f bars_smooth_max=%.3f",
-                    self._diag_pcm_frame,
-                    raw_mag_mean,
-                    bar_float_max,
-                    self._v2_peak_ema,
-                    bars_mean_v,
-                    bars_max_v,
-                )
-            total = sum(bars)
-            n = len(bars)
-            centroid = (
-                sum(idx * v for idx, v in enumerate(bars)) / total / n
-                if total > 1e-9
-                else 0.0
-            )
-
-            onset = False
-            onset_strength = 0.0
-            onset_bass = onset_mid = onset_treble = False
-            onset_bass_str = onset_mid_str = onset_treble_str = 0.0
-
-            if self._onset_method == "multiband":
-                (b_on, b_str), (m_on, m_str), (t_on, t_str) = onset_result
-                onset_bass, onset_bass_str = b_on, b_str
-                onset_mid, onset_mid_str = m_on, m_str
-                onset_treble, onset_treble_str = t_on, t_str
-                onset = b_on or m_on or t_on
-                onset_strength = max(b_str, m_str, t_str)
-            else:
-                onset, onset_strength = onset_result
-
-            if total < 1e-9:
-                onset = onset_bass = onset_mid = onset_treble = False
-                onset_strength = onset_bass_str = onset_mid_str = onset_treble_str = 0.0
-
-            full = _slice_avg(bars, 0.0, 1.0)
+            features = self._build_features(update.bars, onset_batch)
             with self._lock:
-                self._latest = AudioFeatures(
-                    bars=bars,
-                    bass=_slice_avg(bars, 0.0, 0.20),
-                    mid=_slice_avg(bars, 0.0, 0.55),
-                    full=full,
-                    centroid=centroid,
-                    onset=onset,
-                    onset_strength=onset_strength,
-                    onset_bass=onset_bass,
-                    onset_mid=onset_mid,
-                    onset_treble=onset_treble,
-                    onset_bass_strength=onset_bass_str,
-                    onset_mid_strength=onset_mid_str,
-                    onset_treble_strength=onset_treble_str,
-                    # AirPlay native does not provide sustained_energy / HPSS in Phase 3.
-                    # Matches the existing AirPlay native path: sustained_energy=None,
-                    # hpss_active=False.  LayerMixer fallback (sustained_energy is None
-                    # → use full) remains active.
-                    sustained_energy=None,
-                    hpss_active=False,
-                    relative_exertion=full,
-                )
+                self._latest = features
                 self._pub_seq += 1
+                seq = self._pub_seq
+
+            records.append(PublicationRecord(
+                sequence=seq,
+                epoch=epoch_id,
+                sample_pos=update.sample_pos,
+                features=features,
+                effective_engine_id=self._engine.engine_id,
+            ))
+        return records
+
+    def _flush_engine(self) -> list[PublicationRecord]:
+        """Flush engine carry buffer at clean EOS; do NOT clear _latest."""
+        updates = self._engine.flush()
+        records: list[PublicationRecord] = []
+        n_updates = len(updates)
+        if self._current_epoch_id is None:
+            return records
+        epoch_id = self._current_epoch_id
+        for i, update in enumerate(updates):
+            if i == n_updates - 1:
+                onset_batch = list(self._pending_onset)
+                self._pending_onset.clear()
+            else:
+                onset_batch = [self._pending_onset.pop(0)] if self._pending_onset else []
+            features = self._build_features(update.bars, onset_batch)
+            with self._lock:
+                self._latest = features
+                self._pub_seq += 1
+                seq = self._pub_seq
+            records.append(PublicationRecord(
+                sequence=seq,
+                epoch=epoch_id,
+                sample_pos=update.sample_pos,
+                features=features,
+                effective_engine_id=self._engine.engine_id,
+            ))
+        return records
+
+    # ------------------------------------------------------------------
+    # Synchronous interface — acceptance script / testing only
+    # ------------------------------------------------------------------
+
+    def feed(self, frame: AnalysisPcmFrame) -> list[PublicationRecord]:
+        """Process one canonical frame synchronously; return new publications."""
+        return self._process_canonical_frame(frame)
+
+    def end_of_stream(self) -> list[PublicationRecord]:
+        """Flush engine at clean EOS; return any final publications.
+
+        EOS features persist in _latest until the next epoch (M2 invariant).
+        """
+        recs = self._flush_engine()
+        self._reset_dsp()
+        self._canonicalizer.reset()
+        return recs
+
+    def drain_publications(self) -> list[PublicationRecord]:
+        """Drain publications buffered since the last call (threaded path).
+
+        In the synchronous path, feed() returns records directly so this
+        returns an empty list.  Provided for API symmetry.
+        """
+        return []
+
+    # ------------------------------------------------------------------
+    # Threaded production interface (AudioPipeline protocol)
+    # ------------------------------------------------------------------
 
     def _run(self) -> None:
         try:
@@ -1065,36 +1051,28 @@ class PcmAudioPipelineV2:
                 canonical_results = self._canonicalizer.push(source_result)
 
                 if not canonical_results:
-                    # soxr accumulated input but produced no output yet; loop immediately.
                     continue
 
                 for cresult in canonical_results:
                     if isinstance(cresult, CanonicalData):
                         self._process_canonical_frame(cresult.frame)
                     elif isinstance(cresult, TemporarilyNoData):
-                        # No data from pipe (EAGAIN).  Do not reset DSP or insert silence.
-                        # If source is not receiving audio, clear stale features.
                         if not self._source.running:  # type: ignore[union-attr]
                             with self._lock:
                                 self._latest = None
-                        self._stop.wait(self._POLL_S)
+                        self._stop.wait(_CAP_POLL_S)
                     elif isinstance(cresult, StreamInvalidated):
-                        # Continuity broken: discard DSP history and stale snapshot.
                         self._reset_dsp()
                         with self._lock:
                             self._latest = None
                     elif isinstance(cresult, EndOfStream):
-                        # iOS disconnected from shairport-sync.
-                        # Do NOT clear _latest here — EOS features must remain visible
-                        # to consumers until the next epoch resets them.
+                        # EOS: flush carry buffer; do NOT clear _latest (M2 invariant).
+                        self._flush_engine()
                         self._reset_dsp()
-                        # Reset canonicalizer so the next reconnect starts a fresh epoch.
                         self._canonicalizer.reset()
-                        # Avoid a tight busy-loop: the FIFO returns EOF on every read
-                        # while no writer is attached.
-                        self._stop.wait(self._POLL_S)
+                        self._stop.wait(_CAP_POLL_S)
         except Exception:
-            log.exception("PcmAudioPipelineV2 worker crashed; clearing stale features")
+            log.exception("CanonicalAnalysisPipeline worker crashed; clearing stale features")
             with self._lock:
                 self._latest = None
 
@@ -1107,21 +1085,103 @@ class PcmAudioPipelineV2:
         self._stop.set()
         if self._thread:
             self._thread.join(timeout=2)
+        self._engine.close()
 
     def latest(self) -> AudioFeatures | None:
         with self._lock:
             return self._latest
 
+
+# ---------------------------------------------------------------------------
+# PcmAudioPipelineV2 — canonical stereo AudioPipeline for native AirPlay
+# ---------------------------------------------------------------------------
+
+
+class PcmAudioPipelineV2:
+    """Thin wrapper around CanonicalAnalysisPipeline with V2SpectrumEngine.
+
+    Keeps the same constructor signature as the previous monolithic implementation
+    so player_manager.py and the acceptance script need no changes at the call site.
+    All analysis logic lives in CanonicalAnalysisPipeline + V2SpectrumEngine.
+    """
+
+    def __init__(
+        self,
+        source: object,
+        bars: int,
+        lower_cutoff_freq: int,
+        higher_cutoff_freq: int,
+        onset_method: str,
+        onset_delta: float,
+        onset_alpha: float,
+        superflux_mu: int,
+        superflux_lag: int,
+        bass_hz: int,
+        mid_hz: int,
+        exertion_clip: float = BandNormaliser.DEFAULT_EXERTION_CLIP,
+    ) -> None:
+        from .spectrum_engine import V2SpectrumEngine
+        engine = V2SpectrumEngine(
+            n_bars=bars,
+            lower_hz=float(lower_cutoff_freq),
+            upper_hz=float(higher_cutoff_freq),
+        )
+        self._pipeline = CanonicalAnalysisPipeline(
+            source=source,
+            engine=engine,
+            onset_method=onset_method,
+            onset_delta=onset_delta,
+            onset_alpha=onset_alpha,
+            superflux_mu=superflux_mu,
+            superflux_lag=superflux_lag,
+            bass_hz=bass_hz,
+            mid_hz=mid_hz,
+        )
+        # BandNormaliser stub kept for SyncEngine.update_render() compatibility.
+        # The V2 bar path uses the engine's own AGC; normalise() is not called.
+        self._normaliser = BandNormaliser(exertion_clip=exertion_clip, gate=0.0)
+
+    @property
+    def normaliser(self) -> BandNormaliser:
+        return self._normaliser
+
+    @property
+    def hop(self) -> int:
+        return self._pipeline.hop
+
     @property
     def pub_seq(self) -> int:
-        """Monotonically increasing counter; incremented on each features publication."""
-        with self._lock:
-            return self._pub_seq
+        return self._pipeline.pub_seq
 
     @property
     def effective_spectrum_backend(self) -> str:
-        """The spectrum backend actually running in this pipeline instance."""
         return "v2"
+
+    @property
+    def v2_peak_ema(self) -> float | None:
+        return self._pipeline.v2_peak_ema
+
+    @property
+    def v2_bar_smooth(self) -> list[float] | None:
+        return self._pipeline.v2_bar_smooth
+
+    def start(self) -> None:
+        self._pipeline.start()
+
+    def stop(self) -> None:
+        self._pipeline.stop()
+
+    def latest(self) -> AudioFeatures | None:
+        return self._pipeline.latest()
+
+    def feed(self, frame: AnalysisPcmFrame) -> list[PublicationRecord]:
+        return self._pipeline.feed(frame)
+
+    def end_of_stream(self) -> list[PublicationRecord]:
+        return self._pipeline.end_of_stream()
+
+    def drain_publications(self) -> list[PublicationRecord]:
+        return self._pipeline.drain_publications()
 
 
 # ---------------------------------------------------------------------------
@@ -1245,7 +1305,7 @@ class CavaPipeline:
 
     @property
     def effective_spectrum_backend(self) -> str:
-        return "cava"
+        return "external_cava_fifo"
 
 
 # ---------------------------------------------------------------------------
@@ -2253,6 +2313,19 @@ class SyncEngine:
         normaliser = getattr(self._analyser, "normaliser", None)
         if normaliser is not None:
             normaliser.update_exertion_clip(profile.exertion_clip)
+
+    def replace_analyser(self, new_analyser: AudioPipeline) -> None:
+        """Stop the current analyser, swap to new_analyser, and start it.
+
+        The render loop (run()) continues uninterrupted: it gets None from
+        latest() for the few ticks between the old thread stopping and the new
+        thread producing its first features.  This is indistinguishable from
+        a brief silence and does not affect the Hue session.
+        """
+        old = self._analyser
+        old.stop()
+        self._analyser = new_analyser
+        new_analyser.start()
 
     @property
     def last_onset(self) -> bool:

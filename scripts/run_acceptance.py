@@ -424,8 +424,8 @@ def analyse_pcm(
         pipeline = PcmAudioPipelineV2(**_kwargs)
         is_v2 = True
 
-    assert pipeline._bar_stft.hop == HOP, (
-        f"Production hop {pipeline._bar_stft.hop} != harness HOP {HOP} — update HOP constant"
+    assert pipeline.hop == HOP, (
+        f"Production hop {pipeline.hop} != harness HOP {HOP} — update HOP constant"
     )
     canonicalizer = AudioCanonicalizer()
     rechunker = _CanonicalRechunker()
@@ -433,42 +433,31 @@ def analyse_pcm(
     rows: list[dict[str, Any]] = []
     violations: list[str] = []
     source_pos: int = 0  # source-rate stereo frame counter
-    last_hop_sample_pos: list[int] = [0]  # mutable cell — updated in _push_and_capture
-    last_pub_seq: list[int] = [pipeline.pub_seq]  # mutable cell — dedup guard for EOS row
 
-    def _push_and_capture(hop_frame: AnalysisPcmFrame) -> None:
-        """Feed one HOP-sized canonical frame, capture snapshot immediately."""
-        pipeline._process_canonical_frame(hop_frame)
-        features = pipeline.latest()
-        if features is None:
-            return  # STFT warmup: buffer not yet full
-
-        last_hop_sample_pos[0] = hop_frame.sample_pos
-        last_pub_seq[0] = pipeline.pub_seq
-
-        t_s = hop_frame.sample_pos / CANONICAL_RATE
-
+    def _capture_row(features: object, sample_pos: int) -> None:
+        """Record one AudioFeatures snapshot as a CSV row."""
+        t_s = sample_pos / CANONICAL_RATE
         row: dict[str, Any] = {"t_s": round(t_s, 6), "backend": backend}
-        for i, v in enumerate(features.bars):
+        for i, v in enumerate(features.bars):  # type: ignore[union-attr]
             row[f"bar_{i:02d}"] = round(float(v), 6)
-        row["bass"] = round(float(features.bass), 6)
-        row["mid"] = round(float(features.mid), 6)
-        row["full"] = round(float(features.full), 6)
-        row["centroid"] = round(float(features.centroid), 6)
-        row["onset"] = int(features.onset)
-        row["onset_strength"] = round(float(features.onset_strength), 6)
-        row["onset_bass"] = int(features.onset_bass)
-        row["onset_mid"] = int(features.onset_mid)
-        row["onset_treble"] = int(features.onset_treble)
-        row["onset_bass_strength"] = round(float(features.onset_bass_strength), 6)
-        row["onset_mid_strength"] = round(float(features.onset_mid_strength), 6)
-        row["onset_treble_strength"] = round(float(features.onset_treble_strength), 6)
-        row["relative_exertion"] = round(float(features.relative_exertion), 6)
+        row["bass"] = round(float(features.bass), 6)  # type: ignore[union-attr]
+        row["mid"] = round(float(features.mid), 6)  # type: ignore[union-attr]
+        row["full"] = round(float(features.full), 6)  # type: ignore[union-attr]
+        row["centroid"] = round(float(features.centroid), 6)  # type: ignore[union-attr]
+        row["onset"] = int(features.onset)  # type: ignore[union-attr]
+        row["onset_strength"] = round(float(features.onset_strength), 6)  # type: ignore[union-attr]
+        row["onset_bass"] = int(features.onset_bass)  # type: ignore[union-attr]
+        row["onset_mid"] = int(features.onset_mid)  # type: ignore[union-attr]
+        row["onset_treble"] = int(features.onset_treble)  # type: ignore[union-attr]
+        row["onset_bass_strength"] = round(float(features.onset_bass_strength), 6)  # type: ignore[union-attr]
+        row["onset_mid_strength"] = round(float(features.onset_mid_strength), 6)  # type: ignore[union-attr]
+        row["onset_treble_strength"] = round(float(features.onset_treble_strength), 6)  # type: ignore[union-attr]
+        row["relative_exertion"] = round(float(features.relative_exertion), 6)  # type: ignore[union-attr]
 
         # V2-specific internal state — available only for PcmAudioPipelineV2.
         if is_v2:
-            peak_ema = pipeline._v2_peak_ema  # type: ignore[union-attr]
-            bar_smooth = pipeline._bar_smooth  # type: ignore[union-attr]
+            peak_ema = pipeline.v2_peak_ema
+            bar_smooth = pipeline.v2_bar_smooth
             row["peak_ema"] = round(float(peak_ema), 6) if peak_ema is not None else 0.0
             if bar_smooth is not None:
                 row["bars_smooth_mean"] = round(sum(bar_smooth) / len(bar_smooth), 6)
@@ -477,7 +466,6 @@ def analyse_pcm(
                 row["bars_smooth_mean"] = 0.0
                 row["bars_smooth_max"] = 0.0
         else:
-            # V2-only internal state — not applicable to cavacore.
             row["peak_ema"] = None
             row["bars_smooth_mean"] = None
             row["bars_smooth_max"] = None
@@ -495,6 +483,11 @@ def analyse_pcm(
                 violations.append(f"t={t_s:.3f} {field} non-finite: {v}")
 
         rows.append(row)
+
+    def _push_and_capture(hop_frame: AnalysisPcmFrame) -> None:
+        """Feed one HOP-sized canonical frame; capture snapshots from returned records."""
+        for rec in pipeline.feed(hop_frame):
+            _capture_row(rec.features, rec.sample_pos)
 
     def _feed_canonical(cresult: CanonicalData) -> None:
         """Re-chunk canonical batch into HOP blocks and capture each snapshot."""
@@ -535,43 +528,11 @@ def analyse_pcm(
     for hop_frame in rechunker.flush():
         _push_and_capture(hop_frame)
 
-    # cavacore EOS flush: zero-pad the carry buffer to force the final cava_execute().
-    # The rechunker drains complete HOP-blocks; the cavacore carry buffer may still
-    # hold 1-479 frames that were not yet published.  _flush_eos_tail() zero-pads to
-    # a complete 480-frame block and executes once, publishing the final spectrum frame.
-    if not is_v2:
-        seq_before_eos = pipeline.pub_seq  # type: ignore[union-attr]
-        pipeline._flush_eos_tail()  # type: ignore[union-attr]
-        eos_features = pipeline.latest()
-        # Only append an EOS row if _flush_eos_tail() actually published new features
-        # (pub_seq advanced).  Without this guard, features that persisted from the last
-        # regular block (M2 fix) would be double-counted.
-        if eos_features is not None and pipeline.pub_seq != seq_before_eos:  # type: ignore[union-attr]
-            # Timestamp: derive from the last sample_pos fed into the pipeline, not
-            # from the row table.  This avoids inventing an off-by-one virtual frame.
-            t_s = (last_hop_sample_pos[0] + HOP) / CANONICAL_RATE
-            eos_row: dict[str, Any] = {"t_s": round(t_s, 6), "backend": backend}
-            for i, v in enumerate(eos_features.bars):
-                eos_row[f"bar_{i:02d}"] = round(float(v), 6)
-            eos_row["bass"] = round(float(eos_features.bass), 6)
-            eos_row["mid"] = round(float(eos_features.mid), 6)
-            eos_row["full"] = round(float(eos_features.full), 6)
-            eos_row["centroid"] = round(float(eos_features.centroid), 6)
-            eos_row["onset"] = int(eos_features.onset)
-            eos_row["onset_strength"] = round(float(eos_features.onset_strength), 6)
-            eos_row["onset_bass"] = int(eos_features.onset_bass)
-            eos_row["onset_mid"] = int(eos_features.onset_mid)
-            eos_row["onset_treble"] = int(eos_features.onset_treble)
-            eos_row["onset_bass_strength"] = round(float(eos_features.onset_bass_strength), 6)
-            eos_row["onset_mid_strength"] = round(float(eos_features.onset_mid_strength), 6)
-            eos_row["onset_treble_strength"] = round(float(eos_features.onset_treble_strength), 6)
-            eos_row["relative_exertion"] = round(float(eos_features.relative_exertion), 6)
-            eos_row["peak_ema"] = None
-            eos_row["bars_smooth_mean"] = None
-            eos_row["bars_smooth_max"] = None
-            rows.append(eos_row)
+    # EOS flush: drain any carry buffer (cavacore: up to 479 samples; V2: no-op).
+    for rec in pipeline.end_of_stream():
+        _capture_row(rec.features, rec.sample_pos)
 
-    hop = pipeline._bar_stft.hop
+    hop = pipeline.hop
     # fft_size: V2 uses a single 2048-pt Hamming STFT for both onset and spectrum.
     # cavacore uses a dual FFT: 4096-pt (mid/treble) + 8192-pt (bass ≤ 100 Hz).
     # The onset STFT (StereoMagStft, 2048-pt) is present in both backends but is
