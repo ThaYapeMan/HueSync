@@ -124,8 +124,8 @@ def test_csv_columns_exact(rows_from_sine: list[dict]) -> None:
 
 
 def test_csv_columns_count() -> None:
-    # 1 (t_s) + 1 (backend) + 30 (bars) + 13 (scalar features) + 3 (conditioning) = 48
-    assert len(CSV_COLUMNS) == 48
+    # t_s(1) + backend(1) + effective_backend(1) + bars(30) + scalars(13) + conditioning(3) = 49
+    assert len(CSV_COLUMNS) == 49
 
 
 def test_csv_bar_columns_named_correctly() -> None:

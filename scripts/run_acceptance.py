@@ -72,13 +72,8 @@ from huesync.canonicalizer import (  # noqa: E402
     EndOfStream,
 )
 from huesync.pcm_source import WINDOW_SIZE  # noqa: E402
-from huesync.sync_engine import PcmAudioPipelineV2  # noqa: E402
-
-try:
-    from huesync.cavacore_pipeline import CavaCoreAudioPipeline  # noqa: E402
-    _CAVACORE_AVAILABLE = True
-except Exception:
-    _CAVACORE_AVAILABLE = False
+from huesync.spectrum_engine import ENGINES, make_spectrum_engine  # noqa: E402
+from huesync.sync_engine import CanonicalAnalysisPipeline  # noqa: E402
 
 # Suppress the per-frame diagnostic INFO log that fires every 50 frames.
 # This log was added as a temporary field-debugging aid and is not structural.
@@ -119,7 +114,7 @@ _DEFAULT_EXERTION_CLIP: float = 3.0
 # CSV columns — order is fixed for reproducibility.
 _BAR_COLS = [f"bar_{i:02d}" for i in range(_DEFAULT_BARS)]
 CSV_COLUMNS: list[str] = (
-    ["t_s", "backend"]
+    ["t_s", "backend", "effective_backend"]
     + _BAR_COLS
     + [
         "bass",
@@ -135,11 +130,11 @@ CSV_COLUMNS: list[str] = (
         "onset_mid_strength",
         "onset_treble_strength",
         "relative_exertion",
-        # V2 internal conditioning — read from pipeline instance state after each
-        # _process_canonical_frame() call.  Not available for cavacore (filled 0.0).
-        "peak_ema",         # _v2_peak_ema: global reference at this moment
-        "bars_smooth_mean", # mean(_bar_smooth) == features.full (explicit label)
-        "bars_smooth_max",  # max(_bar_smooth)  == max(features.bars)
+        # Pipeline internal conditioning — exposed via CanonicalAnalysisPipeline properties.
+        # v2_peak_ema and v2_bar_smooth are populated for v2 engine; 0.0 otherwise.
+        "peak_ema",         # v2_peak_ema: global reference at this moment
+        "bars_smooth_mean", # mean(v2_bar_smooth) (explicit label)
+        "bars_smooth_max",  # max(v2_bar_smooth)
     ]
 )
 
@@ -377,31 +372,38 @@ def analyse_pcm(
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Run raw S16LE 44100 Hz stereo PCM through the production analysis path.
 
-    Calls AudioCanonicalizer.push() and pipeline._process_canonical_frame()
+    Calls AudioCanonicalizer.push() and CanonicalAnalysisPipeline.feed()
     directly.  No DSP is duplicated; the worker thread is simply not started.
 
-    The `backend` parameter selects the spectrum pipeline:
-    - "v2"       — PcmAudioPipelineV2 (HueSync STFT, Hamming window, 2048-pt FFT)
-    - "cavacore" — CavaCoreAudioPipeline (upstream cavacore, Hann window, 4096/8192-pt FFT)
+    The `backend` parameter selects the spectrum engine via the ENGINES registry.
+    Any engine registered in spectrum_engine.ENGINES is accepted.
 
     AudioCanonicalizer emits variable-length batches (~893 canonical samples per
     441-source-sample chunk).  _CanonicalRechunker re-chunks these into exact
-    HOP-sample (480-sample) blocks before each _process_canonical_frame() call,
-    guaranteeing at most one STFT frame per call and one CSV row per STFT frame.
+    HOP-sample (480-sample) blocks before each feed() call, guaranteeing at most
+    one STFT frame per call and one CSV row per STFT frame.
 
     Args:
         raw_pcm: Complete S16LE 44100 Hz stereo PCM bytes (any length).
-        backend: "v2" (default) or "cavacore".
+        backend: Engine ID from spectrum_engine.ENGINES (e.g. "v2", "cavacore").
 
     Returns:
         rows:  list of dicts, one per AudioFeatures snapshot (post-STFT-warmup).
         info:  pipeline configuration dict (for metadata JSON).
     """
-    _kwargs: dict[str, Any] = dict(
+    if backend not in ENGINES:
+        raise KeyError(
+            f"Unknown spectrum engine {backend!r}; valid: {sorted(ENGINES.keys())}"
+        )
+    engine = make_spectrum_engine(
+        backend,
+        n_bars=_DEFAULT_BARS,
+        lower_hz=float(_DEFAULT_LOWER_HZ),
+        upper_hz=float(_DEFAULT_UPPER_HZ),
+    )
+    pipeline = CanonicalAnalysisPipeline(
         source=_OfflineSource(),
-        bars=_DEFAULT_BARS,
-        lower_cutoff_freq=_DEFAULT_LOWER_HZ,
-        higher_cutoff_freq=_DEFAULT_UPPER_HZ,
+        engine=engine,
         onset_method=_DEFAULT_ONSET_METHOD,
         onset_delta=_DEFAULT_ONSET_DELTA,
         onset_alpha=_DEFAULT_ONSET_ALPHA,
@@ -409,20 +411,7 @@ def analyse_pcm(
         superflux_lag=_DEFAULT_SUPERFLUX_LAG,
         bass_hz=_DEFAULT_BASS_HZ,
         mid_hz=_DEFAULT_MID_HZ,
-        exertion_clip=_DEFAULT_EXERTION_CLIP,
     )
-
-    if backend == "cavacore":
-        if not _CAVACORE_AVAILABLE:
-            raise RuntimeError(
-                "cavacore backend requested but CavaCoreAudioPipeline could not be imported.\n"
-                "Build the native library first: pip install . (requires libfftw3-dev)."
-            )
-        pipeline: PcmAudioPipelineV2 | CavaCoreAudioPipeline = CavaCoreAudioPipeline(**_kwargs)
-        is_v2 = False
-    else:
-        pipeline = PcmAudioPipelineV2(**_kwargs)
-        is_v2 = True
 
     assert pipeline.hop == HOP, (
         f"Production hop {pipeline.hop} != harness HOP {HOP} — update HOP constant"
@@ -433,11 +422,18 @@ def analyse_pcm(
     rows: list[dict[str, Any]] = []
     violations: list[str] = []
     source_pos: int = 0  # source-rate stereo frame counter
+    _last_rec: list[object] = []  # capture last PublicationRecord for metadata
 
-    def _capture_row(features: object, sample_pos: int) -> None:
+    def _capture_row(features: object, sample_pos: int, rec: object | None = None) -> None:
         """Record one AudioFeatures snapshot as a CSV row."""
         t_s = sample_pos / CANONICAL_RATE
-        row: dict[str, Any] = {"t_s": round(t_s, 6), "backend": backend}
+        row: dict[str, Any] = {
+            "t_s": round(t_s, 6),
+            "backend": backend,
+            "effective_backend": (
+                getattr(rec, "effective_engine_id", backend) if rec else backend
+            ),
+        }
         for i, v in enumerate(features.bars):  # type: ignore[union-attr]
             row[f"bar_{i:02d}"] = round(float(v), 6)
         row["bass"] = round(float(features.bass), 6)  # type: ignore[union-attr]
@@ -454,21 +450,16 @@ def analyse_pcm(
         row["onset_treble_strength"] = round(float(features.onset_treble_strength), 6)  # type: ignore[union-attr]
         row["relative_exertion"] = round(float(features.relative_exertion), 6)  # type: ignore[union-attr]
 
-        # V2-specific internal state — available only for PcmAudioPipelineV2.
-        if is_v2:
-            peak_ema = pipeline.v2_peak_ema
-            bar_smooth = pipeline.v2_bar_smooth
-            row["peak_ema"] = round(float(peak_ema), 6) if peak_ema is not None else 0.0
-            if bar_smooth is not None:
-                row["bars_smooth_mean"] = round(sum(bar_smooth) / len(bar_smooth), 6)
-                row["bars_smooth_max"] = round(max(bar_smooth), 6)
-            else:
-                row["bars_smooth_mean"] = 0.0
-                row["bars_smooth_max"] = 0.0
+        # Pipeline internal conditioning — available via CanonicalAnalysisPipeline properties.
+        peak_ema = pipeline.v2_peak_ema
+        bar_smooth = pipeline.v2_bar_smooth
+        row["peak_ema"] = round(float(peak_ema), 6) if peak_ema is not None else 0.0
+        if bar_smooth is not None:
+            row["bars_smooth_mean"] = round(sum(bar_smooth) / len(bar_smooth), 6)
+            row["bars_smooth_max"] = round(max(bar_smooth), 6)
         else:
-            row["peak_ema"] = None
-            row["bars_smooth_mean"] = None
-            row["bars_smooth_max"] = None
+            row["bars_smooth_mean"] = 0.0
+            row["bars_smooth_max"] = 0.0
 
         # Hard correctness invariants — reported but do not abort analysis.
         for i in range(_DEFAULT_BARS):
@@ -483,11 +474,14 @@ def analyse_pcm(
                 violations.append(f"t={t_s:.3f} {field} non-finite: {v}")
 
         rows.append(row)
+        if rec is not None:
+            _last_rec.clear()
+            _last_rec.append(rec)
 
     def _push_and_capture(hop_frame: AnalysisPcmFrame) -> None:
         """Feed one HOP-sized canonical frame; capture snapshots from returned records."""
         for rec in pipeline.feed(hop_frame):
-            _capture_row(rec.features, rec.sample_pos)
+            _capture_row(rec.features, rec.sample_pos, rec)
 
     def _feed_canonical(cresult: CanonicalData) -> None:
         """Re-chunk canonical batch into HOP blocks and capture each snapshot."""
@@ -528,23 +522,24 @@ def analyse_pcm(
     for hop_frame in rechunker.flush():
         _push_and_capture(hop_frame)
 
-    # EOS flush: drain any carry buffer (cavacore: up to 479 samples; V2: no-op).
+    # EOS flush: drain any carry buffer (cavacore: up to 479 samples; CAP: no-op for v2).
     for rec in pipeline.end_of_stream():
-        _capture_row(rec.features, rec.sample_pos)
+        _capture_row(rec.features, rec.sample_pos, rec)
 
     hop = pipeline.hop
-    # fft_size: V2 uses a single 2048-pt Hamming STFT for both onset and spectrum.
-    # cavacore uses a dual FFT: 4096-pt (mid/treble) + 8192-pt (bass ≤ 100 Hz).
-    # The onset STFT (StereoMagStft, 2048-pt) is present in both backends but is
-    # used only for onset detection, not spectrum bar generation.
-    fft_size: int | list[int] = WINDOW_SIZE if is_v2 else [4096, 8192]
+    last_rec = _last_rec[0] if _last_rec else None
+    effective_processor_ids = (
+        list(getattr(last_rec, "effective_processor_ids", []))
+        if last_rec else []
+    )
     info: dict[str, Any] = {
         "backend": backend,
         "effective_backend": pipeline.effective_spectrum_backend,
-        "fft_size": fft_size,
+        "effective_processor_ids": effective_processor_ids,
+        "fft_size": WINDOW_SIZE,
         "onset_fft_size": WINDOW_SIZE,
         "hop": hop,
-        "window": "hamming" if is_v2 else "hann",
+        "window": "hamming",
         "canonical_rate": CANONICAL_RATE,
         "n_bars": _DEFAULT_BARS,
         "lower_hz": _DEFAULT_LOWER_HZ,
@@ -657,9 +652,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--backend",
         default="v2",
-        choices=["v2", "cavacore"],
+        choices=sorted(ENGINES.keys()),
         metavar="BACKEND",
-        help="spectrum pipeline: v2 (default) or cavacore",
+        help=f"spectrum engine: {sorted(ENGINES.keys())} (default: v2)",
     )
     parser.add_argument("--start", type=float, default=None, metavar="SECONDS")
     parser.add_argument("--duration", type=float, default=None, metavar="SECONDS")

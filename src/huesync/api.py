@@ -818,6 +818,7 @@ async def patch_analyser(ac_id: str, request: Request, body: AnalyserPatchBody):
     ac = storage.get_analyser(ac_id)
     if ac is None:
         raise HTTPException(status_code=404, detail="Analyser not found")
+    old_ac = replace(ac)  # snapshot for transactional rollback
     updates = body.model_dump(exclude_unset=True)
     if "name" in updates:
         _assert_name_unique(
@@ -832,6 +833,7 @@ async def patch_analyser(ac_id: str, request: Request, body: AnalyserPatchBody):
         ac.__post_init__()
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    # Save candidate config first (needed so _build_engine_profile reads new values).
     storage.save_analyser(ac)
     # Trigger restart if the active coupling uses this Analyser.
     active_id = storage.get_active_coupling_id()
@@ -840,11 +842,18 @@ async def patch_analyser(ac_id: str, request: Request, body: AnalyserPatchBody):
         coupling = storage.get_coupling(active_id)
         if coupling and coupling.analyser_id == ac_id:
             if "bars_source" in active_fields:
-                # bars_source changes the SyncEngine initialization mode entirely
-                # (FIFO vs PcmAudioPipeline) — full deactivate required.
                 await manager.deactivate()
             else:
-                await _apply_coupling_action(coupling, storage, manager, active_fields)
+                try:
+                    await _apply_coupling_action(coupling, storage, manager, active_fields)
+                except RuntimeError as exc:
+                    # Runtime activation failed; roll back persisted config so the
+                    # saved state matches what is actually running.
+                    storage.save_analyser(old_ac)
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"Engine activation failed (config rolled back): {exc}",
+                    ) from exc
     return ac.to_dict()
 
 

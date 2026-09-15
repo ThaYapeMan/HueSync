@@ -14,8 +14,10 @@ Verifies the AnalysisProcessor composition layer:
 
 from __future__ import annotations
 
+import struct as _struct
 import threading
 import time
+from pathlib import Path as _Path
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -23,6 +25,16 @@ import pytest
 
 from huesync.canonicalizer import AnalysisPcmFrame
 from huesync.models import Analyser, Profile
+from huesync.pcm_source import (
+    _HDR_FMT,
+    _HDR_OFFSET,
+    _MMAP_SIZE_V1,
+    _V2_EXT_FMT,
+    SHM_ABI_V1_MAGIC,
+    VIS_BUF_SIZE,
+    ShmContinuityEvent,
+    SqueezeliteShmSource,
+)
 from huesync.spectrum_engine import (
     ProcessorUpdate,
     PublicationRecord,
@@ -646,3 +658,335 @@ def test_publication_record_new_fields_set():
     )
     assert rec.sample_end == 480
     assert rec.effective_processor_ids == ("v2", "beat_detector")
+
+
+# ---------------------------------------------------------------------------
+# Test 1: Generic 4-processor feed dispatch
+# ---------------------------------------------------------------------------
+
+
+def test_generic_4processor_feed_dispatch():
+    """All four processors in _processors receive feed(), reset(), flush(), close()."""
+
+    class _DummyProc:
+        def __init__(self, pid: str) -> None:
+            self._pid = pid
+            self.feed_calls: list = []
+            self.reset_calls: int = 0
+            self.flush_calls: int = 0
+            self.close_calls: int = 0
+
+        @property
+        def processor_id(self) -> str:
+            return self._pid
+
+        def feed(self, frame):
+            self.feed_calls.append(frame)
+            return []
+
+        def reset(self) -> None:
+            self.reset_calls += 1
+
+        def flush(self) -> list:
+            self.flush_calls += 1
+            return []
+
+        def close(self) -> None:
+            self.close_calls += 1
+
+    dummy_loudness = _DummyProc("loudness")
+    dummy_chroma = _DummyProc("chroma")
+
+    cap = _make_cap()
+    cap._processors = (*cap._processors, dummy_loudness, dummy_chroma)
+
+    # Feed one frame
+    cap.feed(_make_frame(n=_HOP, sample_pos=0))
+
+    assert len(dummy_loudness.feed_calls) == 1
+    assert len(dummy_chroma.feed_calls) == 1
+
+    # Reset
+    cap._reset_dsp()
+    assert dummy_loudness.reset_calls == 1
+    assert dummy_chroma.reset_calls == 1
+
+    # Flush (via end_of_stream)
+    cap.end_of_stream()
+    assert dummy_loudness.flush_calls >= 1
+    assert dummy_chroma.flush_calls >= 1
+
+    # Close
+    cap.stop()
+    assert dummy_loudness.close_calls == 1
+    assert dummy_chroma.close_calls == 1
+
+
+# ---------------------------------------------------------------------------
+# Test 2: H3 — live BeatDetector rebuild
+# ---------------------------------------------------------------------------
+
+
+def test_h3_rebuild_beat_detector_updates_active_processor():
+    """After rebuild(), BeatDetector uses new onset_method and rebuilds pipeline."""
+    bd = BeatDetector(
+        onset_method="combined",
+        onset_delta=0.1,
+        onset_alpha=0.9,
+        superflux_mu=3,
+        superflux_lag=2,
+        bass_hz=250,
+        mid_hz=2000,
+    )
+    assert bd._onset_method == "combined"
+    old_pipeline = bd._onset_pipeline
+
+    bd.rebuild(
+        onset_method="multiband",
+        onset_delta=0.2,
+        onset_alpha=0.8,
+        superflux_mu=3,
+        superflux_lag=2,
+        bass_hz=300,
+        mid_hz=2500,
+    )
+    assert bd._onset_method == "multiband"
+    assert bd._onset_delta == pytest.approx(0.2)
+    assert bd._bass_hz == 300
+    assert bd._onset_pipeline is not old_pipeline  # new object
+
+
+def test_h3_cap_rebuild_beat_detector():
+    """CanonicalAnalysisPipeline.rebuild_beat_detector reaches the BeatDetector."""
+    cap = _make_cap()
+
+    bd_before = next(p for p in cap._processors if isinstance(p, BeatDetector))
+    old_pipeline = bd_before._onset_pipeline
+
+    # Build a Profile with new onset settings using keyword args.
+    profile = Profile(
+        onset_method="multiband",
+        onset_delta=0.2,
+        onset_alpha=0.8,
+        superflux_mu=3,
+        superflux_lag=2,
+        bass_hz=300,
+        mid_hz=2500,
+    )
+    cap.rebuild_beat_detector(profile)
+
+    bd_after = next(p for p in cap._processors if isinstance(p, BeatDetector))
+    assert bd_after is bd_before  # same object, rebuilt in place
+    assert bd_after._onset_method == "multiband"
+    assert bd_after._onset_pipeline is not old_pipeline
+
+
+# ---------------------------------------------------------------------------
+# Test 4: SHM continuity v0 and v1
+# ---------------------------------------------------------------------------
+
+
+def _write_shm_v0(
+    path: _Path,
+    buf_index: int,
+    running: bool = True,
+    rate: int = 44100,
+    buf_size: int = VIS_BUF_SIZE,
+) -> None:
+    """Write a synthetic v0 SHM segment."""
+    header = _struct.pack(
+        _HDR_FMT, buf_size, buf_index % VIS_BUF_SIZE, int(running), rate, 0
+    )
+    data = bytes(_HDR_OFFSET) + header + bytes(VIS_BUF_SIZE * 2)
+    path.write_bytes(data)
+
+
+def _write_shm_v1(
+    path: _Path,
+    buf_index: int,
+    generation: int,
+    abs_write_pos: int,
+    running: bool = True,
+    rate: int = 44100,
+    gap_flag: int = 0,
+) -> None:
+    """Write a synthetic v1 SHM segment with extended header."""
+    legacy_hdr = _struct.pack(
+        _HDR_FMT, VIS_BUF_SIZE, buf_index % VIS_BUF_SIZE, int(running), rate, 0
+    )
+    ext_hdr = _struct.pack(
+        _V2_EXT_FMT, SHM_ABI_V1_MAGIC, 1, gap_flag, 0, generation, abs_write_pos
+    )
+    data = bytes(_HDR_OFFSET) + legacy_hdr + ext_hdr + bytes(VIS_BUF_SIZE * 2)
+    assert len(data) == _MMAP_SIZE_V1, f"Expected {_MMAP_SIZE_V1}, got {len(data)}"
+    path.write_bytes(data)
+
+
+def test_shm_advance_v0(tmp_path):
+    p = tmp_path / "shm"
+    _write_shm_v0(p, buf_index=0)
+    src = SqueezeliteShmSource()
+    src.open("x", _path=p)
+    # Write 100 new stereo samples (200 bytes) at offset 0.
+    data = bytearray(p.read_bytes())
+    # Advance buf_index by 100.
+    buf_index_new = 100
+    _struct.pack_into(_HDR_FMT, data, _HDR_OFFSET, VIS_BUF_SIZE, buf_index_new, 1, 44100, 0)
+    p.write_bytes(bytes(data))
+    result = src.read_new_checked()
+    assert result.event == ShmContinuityEvent.ADVANCE
+    assert result.n_delivered > 0
+
+
+def test_shm_no_data_v0(tmp_path):
+    p = tmp_path / "shm"
+    _write_shm_v0(p, buf_index=50)
+    src = SqueezeliteShmSource()
+    src.open("x", _path=p)
+    result = src.read_new_checked()  # no advance since open
+    assert result.event == ShmContinuityEvent.NO_DATA
+
+
+def test_shm_overrun_v0(tmp_path):
+    p = tmp_path / "shm"
+    _write_shm_v0(p, buf_index=0)
+    src = SqueezeliteShmSource()
+    src.open("x", _path=p)
+    # Advance by more than VIS_BUF_SIZE//2 (overrun).
+    data = bytearray(p.read_bytes())
+    _struct.pack_into(
+        _HDR_FMT, data, _HDR_OFFSET, VIS_BUF_SIZE, VIS_BUF_SIZE // 2 + 1, 1, 44100, 0
+    )
+    p.write_bytes(bytes(data))
+    result = src.read_new_checked()
+    assert result.event == ShmContinuityEvent.OVERRUN
+    assert result.n_delivered == 0
+
+
+def test_shm_restart_on_running_transition(tmp_path):
+    p = tmp_path / "shm"
+    _write_shm_v0(p, buf_index=0, running=True)
+    src = SqueezeliteShmSource()
+    src.open("x", _path=p)
+    # Transition running → False.
+    _write_shm_v0(p, buf_index=0, running=False)
+    src.read_new_checked()  # consume the running=False transition
+    # Transition running → True.
+    _write_shm_v0(p, buf_index=100, running=True)
+    result = src.read_new_checked()
+    assert result.event == ShmContinuityEvent.RESTART
+
+
+def test_shm_restart_on_rate_change(tmp_path):
+    p = tmp_path / "shm"
+    _write_shm_v0(p, buf_index=0, rate=44100)
+    src = SqueezeliteShmSource()
+    src.open("x", _path=p)
+    _write_shm_v0(p, buf_index=50, rate=48000)  # rate changed
+    result = src.read_new_checked()
+    assert result.event == ShmContinuityEvent.RESTART
+
+
+def test_shm_v1_full_lap_detectable(tmp_path):
+    p = tmp_path / "shm"
+    _write_shm_v1(p, buf_index=0, generation=1, abs_write_pos=1000)
+    src = SqueezeliteShmSource()
+    src.open("x", _path=p)
+    # Advance abs_write_pos by exactly VIS_BUF_SIZE.
+    _write_shm_v1(p, buf_index=0, generation=1, abs_write_pos=1000 + VIS_BUF_SIZE)
+    result = src.read_new_checked()
+    assert result.event == ShmContinuityEvent.FULL_LAP
+
+
+def test_shm_v1_multiple_laps(tmp_path):
+    p = tmp_path / "shm"
+    _write_shm_v1(p, buf_index=0, generation=1, abs_write_pos=0)
+    src = SqueezeliteShmSource()
+    src.open("x", _path=p)
+    # Advance by 3 full laps.
+    _write_shm_v1(p, buf_index=0, generation=1, abs_write_pos=3 * VIS_BUF_SIZE)
+    result = src.read_new_checked()
+    assert result.event == ShmContinuityEvent.MULTIPLE_LAPS
+
+
+def test_shm_v1_gap_export(tmp_path):
+    p = tmp_path / "shm"
+    _write_shm_v1(p, buf_index=0, generation=1, abs_write_pos=0)
+    src = SqueezeliteShmSource()
+    src.open("x", _path=p)
+    _write_shm_v1(p, buf_index=100, generation=1, abs_write_pos=100, gap_flag=1)
+    result = src.read_new_checked()
+    assert result.event == ShmContinuityEvent.GAP_EXPORT
+
+
+def test_shm_producer_generation_change(tmp_path):
+    p = tmp_path / "shm"
+    _write_shm_v1(p, buf_index=0, generation=1, abs_write_pos=5000)
+    src = SqueezeliteShmSource()
+    src.open("x", _path=p)
+    # Producer restarted: generation incremented, abs_write_pos reset to small value.
+    _write_shm_v1(p, buf_index=10, generation=2, abs_write_pos=10)
+    result = src.read_new_checked()
+    # Generation change must be classified as a continuity break.
+    assert result.event in (
+        ShmContinuityEvent.RESTART,
+        ShmContinuityEvent.SHM_REPLACED,
+        ShmContinuityEvent.OVERRUN,
+        ShmContinuityEvent.MULTIPLE_LAPS,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 5: CAVA EOS valid sample interval
+# ---------------------------------------------------------------------------
+
+
+def test_cava_eos_sample_end_not_padded():
+    """PublicationRecord.sample_end from flush should not exceed real source end."""
+    cap = _make_cap()
+
+    sample_pos = 0
+    for _ in range(10):
+        cap.feed(_make_frame(n=_HOP, sample_pos=sample_pos))
+        sample_pos += _HOP
+
+    # Feed a partial tail of 100 samples (< HOP = 480).
+    tail_frame = AnalysisPcmFrame(
+        samples=np.zeros((100, 2), dtype=np.float32),
+        sample_pos=sample_pos,
+        epoch_id="ep-1",
+        source_id="test:src",
+        over_range=False,
+    )
+    cap.feed(tail_frame)
+    expected_source_end = sample_pos + 100  # real end
+
+    flush_recs = cap.end_of_stream()
+    if flush_recs:
+        last_rec = flush_recs[-1]
+        assert last_rec.sample_end <= expected_source_end, (
+            f"flush record sample_end {last_rec.sample_end} "
+            f"exceeds real source end {expected_source_end}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Test 6: Acceptance registry selection
+# ---------------------------------------------------------------------------
+
+
+def test_acceptance_rejects_unknown_engine():
+    """analyse_pcm() raises KeyError for an unknown backend."""
+    import sys
+    sys.path.insert(0, str(_Path(__file__).parent.parent / "scripts"))
+    import importlib
+    acc = importlib.import_module("run_acceptance")
+    with pytest.raises(KeyError, match="nonexistent_engine"):
+        acc.analyse_pcm(b"\x00" * 1000, backend="nonexistent_engine")
+
+
+def test_acceptance_uses_registry():
+    """ENGINES registry contains at least 'v2'; CLI choices are derived from it."""
+    from huesync.spectrum_engine import ENGINES
+    assert "v2" in ENGINES
+    assert "cavacore" in ENGINES  # registered even if not available on this system

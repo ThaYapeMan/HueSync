@@ -12,12 +12,14 @@ FFT window: inaudible, and rare.
 
 from __future__ import annotations
 
+import enum
 import errno
 import logging
 import mmap
 import os
 import struct
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
@@ -93,6 +95,78 @@ _HDR_SIZE = struct.calcsize(_HDR_FMT)  # 24
 _BUF_OFFSET = _HDR_OFFSET + _HDR_SIZE  # 80
 _MMAP_SIZE = _BUF_OFFSET + VIS_BUF_SIZE * 2  # 32848
 
+# ---------------------------------------------------------------------------
+# Versioned SHM continuity ABI
+# ---------------------------------------------------------------------------
+# The legacy squeezelite vis_t header (ABI v0) provides only buf_index (wraps
+# at VIS_BUF_SIZE) and updated (second-resolution timestamp).  These are
+# insufficient to distinguish a full-lap overrun from no-new-data, or a same-
+# second restart from ordinary polling.
+#
+# The extended ABI (v1) adds a 40-byte extension block immediately after the
+# legacy header (at _V2_EXT_OFFSET = _HDR_OFFSET + _HDR_SIZE = 80).  When the
+# magic 0x48555345 ('HUSE') is present at that offset, SqueezeliteShmSource
+# reads the full extension and uses it for reliable continuity tracking.
+# When absent the source falls back to heuristic v0 tracking.
+#
+# To activate v1: rebuild squeezelite with the patched vis.c that writes:
+#   abi_version = 1
+#   generation  += 1 on each squeezelite restart
+#   abs_write_pos += n_samples on each successful ring-buffer write
+#   gap_flag = 1 if a trywrlock prevented export (cleared after each read)
+# ---------------------------------------------------------------------------
+
+SHM_ABI_V1_MAGIC: int = 0x48555345  # 'HUSE' — marks extended header present
+SHM_ABI_VERSION: int = 1
+
+_V2_EXT_OFFSET: int = _HDR_OFFSET + _HDR_SIZE        # 80
+# magic(4), abi_version(2), flags(1), reserved(1), generation(8), abs_write_pos(8), pad(16)
+_V2_EXT_FMT: str = "<IHBBQQ16x"
+_V2_EXT_SIZE: int = struct.calcsize(_V2_EXT_FMT)     # should be 40
+_BUF_OFFSET_V1: int = _V2_EXT_OFFSET + _V2_EXT_SIZE  # 120
+_MMAP_SIZE_V1: int = _BUF_OFFSET_V1 + VIS_BUF_SIZE * 2  # 32888
+
+
+class ShmContinuityEvent(enum.Enum):
+    """Classification of a single SqueezeliteShmSource.read_new_checked() call."""
+
+    ADVANCE = "advance"            # normal: new samples, buf_index advanced <= VIS_BUF_SIZE//2
+    NO_DATA = "no_data"            # buf_index unchanged (also: exact full-lap aliasing — see docs)
+    TORN_READ = "torn_read"        # seqlock consistency check failed; samples discarded
+    OVERRUN = "overrun"            # buf_index advanced > VIS_BUF_SIZE//2 (fell behind writer)
+    FULL_LAP = "full_lap"          # v1 only: abs_write_pos advanced by exactly VIS_BUF_SIZE
+    MULTIPLE_LAPS = "multiple_laps"  # v1 only: abs_write_pos advanced by > VIS_BUF_SIZE
+    RESTART = "restart"            # running/rate change signals new producer session
+    SHM_REPLACED = "shm_replaced"  # buf_size changed — SHM segment replaced
+    GAP_EXPORT = "gap_export"      # v1 only: producer set gap_flag (trywrlock skipped export)
+
+
+@dataclass
+class ShmReadResult:
+    """Result of a single SHM read with continuity metadata."""
+
+    samples: np.ndarray       # mono float32; empty on non-ADVANCE events
+    event: ShmContinuityEvent
+    abs_write_pos: int        # monotonic absolute write position (v1: from SHM; v0: estimated)
+    n_delivered: int          # samples returned
+    n_lost: int               # estimated lost samples (0 on clean advance)
+    abi_version: int          # 0 = legacy, 1 = extended
+
+
+@dataclass
+class _ShmExtHeader:
+    """Parsed v1 extension block."""
+
+    magic: int
+    abi_version: int
+    flags: int
+    generation: int
+    abs_write_pos: int
+
+    @property
+    def gap_flag(self) -> bool:
+        return bool(self.flags & 0x01)
+
 
 class SqueezeliteShmSource:
     """Reads raw PCM from squeezelite's visualiser shared memory.
@@ -108,6 +182,14 @@ class SqueezeliteShmSource:
     def __init__(self) -> None:
         self._mm: mmap.mmap | None = None
         self._prev_index: int = 0
+        # Continuity tracking
+        self._abi_version: int = 0           # detected on open()
+        self._last_running: bool = False
+        self._last_rate: int = 0
+        self._last_buf_size: int = VIS_BUF_SIZE
+        self._prev_abs_write_pos: int = 0    # v1: from SHM; v0: estimated
+        self._abs_write_pos: int = 0         # monotonic consumer estimate
+        self._prev_generation: int = 0       # v1: producer restart counter
 
     def open(self, mac: str, *, _path: Path | None = None) -> None:
         """Map /dev/shm/squeezelite-{mac} into memory.
@@ -118,12 +200,29 @@ class SqueezeliteShmSource:
         path = _path if _path is not None else Path(f"/dev/shm/squeezelite-{mac}")
         fd = path.open("rb")
         try:
-            self._mm = mmap.mmap(fd.fileno(), _MMAP_SIZE, access=mmap.ACCESS_READ)
+            # Try v1 size first; fall back to v0 if file is smaller.
+            try:
+                self._mm = mmap.mmap(fd.fileno(), _MMAP_SIZE_V1, access=mmap.ACCESS_READ)
+                ext = self._read_ext_header()
+                if ext is not None:
+                    self._abi_version = ext.abi_version
+                    self._prev_abs_write_pos = ext.abs_write_pos
+                    self._abs_write_pos = ext.abs_write_pos
+                    self._prev_generation = ext.generation
+                    _log.debug("SHM v1 ABI detected (generation=%d)", ext.generation)
+                else:
+                    self._abi_version = 0
+            except (ValueError, OSError):
+                # File may be exactly v0 size; remap at v0 size.
+                self._mm = mmap.mmap(fd.fileno(), _MMAP_SIZE, access=mmap.ACCESS_READ)
+                self._abi_version = 0
         finally:
             fd.close()
-        # Snapshot the current write position so the first read_new() returns
-        # only samples written *after* open(), not the entire history buffer.
-        self._prev_index = self._read_header()[1]
+        hdr = self._read_header()
+        self._prev_index = hdr[1]
+        self._last_running = hdr[2]
+        self._last_rate = hdr[3]
+        self._last_buf_size = hdr[0]
 
     def close(self) -> None:
         """Unmap the shared memory segment."""
@@ -215,6 +314,214 @@ class SqueezeliteShmSource:
         # samples[0::2] = L channel, samples[1::2] = R channel.
         return (samples[0::2].astype(np.float32) + samples[1::2].astype(np.float32)) / (
             2.0 * 32768.0
+        )
+
+    def _read_ext_header(self) -> _ShmExtHeader | None:
+        """Read the v1 extension block; return None if magic absent or mmap too small."""
+        if self._mm is None:
+            return None
+        if len(self._mm) < _V2_EXT_OFFSET + _V2_EXT_SIZE:
+            return None
+        self._mm.seek(_V2_EXT_OFFSET)
+        raw = self._mm.read(_V2_EXT_SIZE)
+        magic, abi_ver, flags, reserved, generation, abs_write_pos = struct.unpack(
+            _V2_EXT_FMT, raw
+        )
+        if magic != SHM_ABI_V1_MAGIC:
+            return None
+        return _ShmExtHeader(
+            magic=magic,
+            abi_version=abi_ver,
+            flags=flags,
+            generation=generation,
+            abs_write_pos=abs_write_pos,
+        )
+
+    def read_new_checked(self) -> ShmReadResult:
+        """Read new PCM samples with full continuity classification.
+
+        Returns ShmReadResult with:
+          - samples: mono float32 (empty on non-ADVANCE events)
+          - event: continuity classification
+          - abs_write_pos: monotonic write position
+          - n_delivered / n_lost: accounting
+
+        Use this in preference to read_new() when the caller needs to signal
+        StreamInvalidated on continuity breaks (full-lap, restart, SHM replaced).
+        """
+        buf_size, buf_index, running, rate, updated = self._read_header()
+
+        # SHM replacement: buf_size field changed since last open.
+        if buf_size != self._last_buf_size:
+            self._last_buf_size = buf_size
+            self._prev_index = buf_index
+            self._last_running = running
+            self._last_rate = rate
+            return ShmReadResult(
+                samples=np.empty(0, dtype=np.float32),
+                event=ShmContinuityEvent.SHM_REPLACED,
+                abs_write_pos=self._abs_write_pos,
+                n_delivered=0,
+                n_lost=0,
+                abi_version=self._abi_version,
+            )
+
+        # Restart detection: running or rate changed.
+        prev_running = self._last_running
+        self._last_running = running
+        if rate != self._last_rate:
+            self._last_rate = rate
+            self._prev_index = buf_index
+            return ShmReadResult(
+                samples=np.empty(0, dtype=np.float32),
+                event=ShmContinuityEvent.RESTART,
+                abs_write_pos=self._abs_write_pos,
+                n_delivered=0,
+                n_lost=0,
+                abi_version=self._abi_version,
+            )
+        if not prev_running and running:
+            self._prev_index = buf_index
+            return ShmReadResult(
+                samples=np.empty(0, dtype=np.float32),
+                event=ShmContinuityEvent.RESTART,
+                abs_write_pos=self._abs_write_pos,
+                n_delivered=0,
+                n_lost=0,
+                abi_version=self._abi_version,
+            )
+
+        # v1: use abs_write_pos for precise continuity.
+        ext = self._read_ext_header() if self._abi_version >= 1 else None
+        if ext is not None:
+            # Generation change: producer restarted.
+            if self._prev_generation != 0 and ext.generation != self._prev_generation:
+                self._prev_generation = ext.generation
+                self._prev_abs_write_pos = ext.abs_write_pos
+                self._abs_write_pos = ext.abs_write_pos
+                self._prev_index = buf_index
+                return ShmReadResult(
+                    samples=np.empty(0, dtype=np.float32),
+                    event=ShmContinuityEvent.RESTART,
+                    abs_write_pos=self._abs_write_pos,
+                    n_delivered=0,
+                    n_lost=0,
+                    abi_version=self._abi_version,
+                )
+            self._prev_generation = ext.generation
+            delta_abs = ext.abs_write_pos - self._prev_abs_write_pos
+            self._prev_abs_write_pos = ext.abs_write_pos
+            self._abs_write_pos = ext.abs_write_pos
+            if ext.gap_flag:
+                self._prev_index = buf_index
+                return ShmReadResult(
+                    samples=np.empty(0, dtype=np.float32),
+                    event=ShmContinuityEvent.GAP_EXPORT,
+                    abs_write_pos=self._abs_write_pos,
+                    n_delivered=0,
+                    n_lost=0,
+                    abi_version=self._abi_version,
+                )
+            if delta_abs <= 0:
+                return ShmReadResult(
+                    samples=np.empty(0, dtype=np.float32),
+                    event=ShmContinuityEvent.NO_DATA,
+                    abs_write_pos=self._abs_write_pos,
+                    n_delivered=0,
+                    n_lost=0,
+                    abi_version=self._abi_version,
+                )
+            if delta_abs >= VIS_BUF_SIZE:
+                n_lost = int(delta_abs) - VIS_BUF_SIZE
+                self._prev_index = buf_index
+                return ShmReadResult(
+                    samples=np.empty(0, dtype=np.float32),
+                    event=(
+                        ShmContinuityEvent.MULTIPLE_LAPS
+                        if delta_abs > 2 * VIS_BUF_SIZE
+                        else ShmContinuityEvent.FULL_LAP
+                    ),
+                    abs_write_pos=self._abs_write_pos,
+                    n_delivered=0,
+                    n_lost=n_lost,
+                    abi_version=self._abi_version,
+                )
+
+        # v0 heuristic: compute n_new from buf_index modular arithmetic.
+        n_new = (buf_index - self._prev_index) % VIS_BUF_SIZE
+        if n_new == 0:
+            return ShmReadResult(
+                samples=np.empty(0, dtype=np.float32),
+                event=ShmContinuityEvent.NO_DATA,
+                abs_write_pos=self._abs_write_pos,
+                n_delivered=0,
+                n_lost=0,
+                abi_version=self._abi_version,
+            )
+
+        if n_new > VIS_BUF_SIZE // 2:
+            # Overrun: fell more than half buffer behind.
+            n_lost = n_new - VIS_BUF_SIZE // 2
+            self._prev_index = buf_index
+            self._abs_write_pos += n_new
+            return ShmReadResult(
+                samples=np.empty(0, dtype=np.float32),
+                event=ShmContinuityEvent.OVERRUN,
+                abs_write_pos=self._abs_write_pos,
+                n_delivered=0,
+                n_lost=n_lost,
+                abi_version=self._abi_version,
+            )
+
+        # Normal advance: read the new samples.
+        self._abs_write_pos += n_new
+        n_new -= n_new % 2  # round down to complete stereo frames
+        if n_new == 0:
+            self._prev_index = buf_index
+            return ShmReadResult(
+                samples=np.empty(0, dtype=np.float32),
+                event=ShmContinuityEvent.ADVANCE,
+                abs_write_pos=self._abs_write_pos,
+                n_delivered=0,
+                n_lost=0,
+                abi_version=self._abi_version,
+            )
+        start = (buf_index - n_new) % VIS_BUF_SIZE
+        buf_offset = _BUF_OFFSET_V1 if self._abi_version >= 1 else _BUF_OFFSET
+        assert self._mm is not None
+        if start + n_new <= VIS_BUF_SIZE:
+            self._mm.seek(buf_offset + start * 2)
+            raw = self._mm.read(n_new * 2)
+        else:
+            tail = VIS_BUF_SIZE - start
+            self._mm.seek(buf_offset + start * 2)
+            raw_tail = self._mm.read(tail * 2)
+            self._mm.seek(buf_offset)
+            raw_head = self._mm.read((n_new - tail) * 2)
+            raw = raw_tail + raw_head
+        _, buf_index_after, _, _, _ = self._read_header()
+        if buf_index_after != buf_index:
+            self._prev_index = buf_index_after
+            return ShmReadResult(
+                samples=np.empty(0, dtype=np.float32),
+                event=ShmContinuityEvent.TORN_READ,
+                abs_write_pos=self._abs_write_pos,
+                n_delivered=0,
+                n_lost=0,
+                abi_version=self._abi_version,
+            )
+        self._prev_index = buf_index
+        samples_i16 = np.frombuffer(raw, dtype=np.int16)
+        mono = (
+            samples_i16[0::2].astype(np.float32) + samples_i16[1::2].astype(np.float32)
+        ) / (2.0 * 32768.0)
+        return ShmReadResult(
+            samples=mono,
+            event=ShmContinuityEvent.ADVANCE,
+            abs_write_pos=self._abs_write_pos,
+            n_delivered=len(mono),
+            n_lost=0,
+            abi_version=self._abi_version,
         )
 
 

@@ -875,6 +875,26 @@ class BeatDetector:
     def reset(self) -> None:
         self._onset_pipeline = self._build_onset_pipeline()
 
+    def rebuild(
+        self,
+        onset_method: str,
+        onset_delta: float,
+        onset_alpha: float,
+        superflux_mu: int,
+        superflux_lag: int,
+        bass_hz: int,
+        mid_hz: int,
+    ) -> None:
+        """Replace the onset pipeline with new parameters. Atomic under GIL."""
+        self._onset_method = onset_method
+        self._onset_delta = onset_delta
+        self._onset_alpha = onset_alpha
+        self._superflux_mu = superflux_mu
+        self._superflux_lag = superflux_lag
+        self._bass_hz = bass_hz
+        self._mid_hz = mid_hz
+        self._onset_pipeline = self._build_onset_pipeline()
+
     def close(self) -> None:
         pass
 
@@ -949,6 +969,7 @@ class CanonicalAnalysisPipeline:
         self._pub_lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._source_sample_end: int = 0  # last real (non-padded) source sample position
 
     # ------------------------------------------------------------------
     # Properties
@@ -991,6 +1012,28 @@ class CanonicalAnalysisPipeline:
     ) -> StftOnsetPipeline | MultibandStftPipeline | SuperfluxStftPipeline:
         return self._beat_detector._onset_pipeline
 
+    def rebuild_beat_detector(self, profile: Profile) -> None:
+        """Rebuild the BeatDetector onset pipeline from new profile parameters.
+
+        Safe to call while the analysis thread runs — GIL ensures the assignment
+        to _onset_pipeline is atomic from the reader's perspective.
+        Onset warmup state resets; allow ~30 frames (~300 ms) before comparing
+        onset timings.
+        """
+        for proc in self._processors:
+            if isinstance(proc, BeatDetector):
+                proc.rebuild(
+                    onset_method=profile.onset_method,
+                    onset_delta=profile.onset_delta,
+                    onset_alpha=profile.onset_alpha,
+                    superflux_mu=profile.superflux_mu,
+                    superflux_lag=profile.superflux_lag,
+                    bass_hz=profile.bass_hz,
+                    mid_hz=profile.mid_hz,
+                )
+                return
+        log.warning("rebuild_beat_detector: no BeatDetector in _processors")
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
@@ -1002,6 +1045,7 @@ class CanonicalAnalysisPipeline:
         self._bar_stft.reset()
         self._pending_onset.clear()
         self._current_epoch_id = None
+        self._source_sample_end = 0
 
     def _build_features(
         self, bars: list[float], onset_batch: list[ProcessorUpdate]
@@ -1074,6 +1118,9 @@ class CanonicalAnalysisPipeline:
         hop = self._bar_stft.hop
         hop_starts = [frame.sample_pos + i * hop for i in range(len(mag_frames))]
 
+        # Track the last real (non-padded) source sample position for EOS interval clamping.
+        self._source_sample_end = frame.sample_pos + len(samples)
+
         shared_frame = SharedAnalysisFrame(
             pcm=samples,
             mag_frames=mag_frames,
@@ -1083,17 +1130,18 @@ class CanonicalAnalysisPipeline:
             hop_sample_starts=hop_starts,
         )
 
-        # Run all processors; accumulate onset updates in the pending queue.
-        spectrum_updates = self._spectrum_processor.feed(shared_frame)
-        beat_updates = self._beat_detector.feed(shared_frame)
-        self._pending_onset.extend(beat_updates)
+        # Run all processors generically; route bars→spectrum_updates, rest→pending_onset.
+        spectrum_updates: list[ProcessorUpdate] = []
+        for proc in self._processors:
+            for pu in proc.feed(shared_frame):
+                if pu.bars is not None:
+                    spectrum_updates.append(pu)
+                else:
+                    self._pending_onset.append(pu)
 
         records: list[PublicationRecord] = []
         n_updates = len(spectrum_updates)
-        effective_ids = (
-            self._spectrum_processor.processor_id,
-            self._beat_detector.processor_id,
-        )
+        effective_ids = tuple(proc.processor_id for proc in self._processors)
         for i, su in enumerate(spectrum_updates):
             # Last update drains all accumulated onset; earlier updates pop one each.
             # V2: N updates from N mag_frames — onset is 1:1 with frames.
@@ -1126,19 +1174,20 @@ class CanonicalAnalysisPipeline:
 
     def _flush_engine(self) -> list[PublicationRecord]:
         """Flush all processor carry buffers at clean EOS; do NOT clear _latest."""
-        spectrum_updates = self._spectrum_processor.flush()
-        beat_updates = self._beat_detector.flush()
-        self._pending_onset.extend(beat_updates)
+        spectrum_updates: list[ProcessorUpdate] = []
+        for proc in self._processors:
+            for pu in proc.flush():
+                if pu.bars is not None:
+                    spectrum_updates.append(pu)
+                else:
+                    self._pending_onset.append(pu)
 
         records: list[PublicationRecord] = []
         n_updates = len(spectrum_updates)
         if self._current_epoch_id is None:
             return records
         epoch_id = self._current_epoch_id
-        effective_ids = (
-            self._spectrum_processor.processor_id,
-            self._beat_detector.processor_id,
-        )
+        effective_ids = tuple(proc.processor_id for proc in self._processors)
         for i, su in enumerate(spectrum_updates):
             if i == n_updates - 1:
                 onset_batch = list(self._pending_onset)
@@ -1150,11 +1199,17 @@ class CanonicalAnalysisPipeline:
                 self._latest = features
                 self._pub_seq += 1
                 seq = self._pub_seq
+            # Clamp sample_end to the last real source sample (not zero-padded STFT extent).
+            pub_sample_end = (
+                min(su.sample_end, self._source_sample_end)
+                if self._source_sample_end > 0
+                else su.sample_end
+            )
             record = PublicationRecord(
                 sequence=seq,
                 epoch=epoch_id,
                 sample_pos=su.sample_start,
-                sample_end=su.sample_end,
+                sample_end=pub_sample_end,
                 features=features,
                 effective_engine_id=self._spectrum_processor.processor_id,
                 effective_processor_ids=effective_ids,
@@ -2454,6 +2509,10 @@ class SyncEngine:
             if profile.use_hpss_separation:
                 self._pcm_hpss = PcmHpss(self._shm_source.sample_rate)
                 log.info("HPSS separation enabled (pipeline rebuild)")
+        # For pcm_pipeline sessions the analyser IS a CanonicalAnalysisPipeline;
+        # rebuild its BeatDetector so the new onset parameters take effect.
+        if isinstance(self._analyser, CanonicalAnalysisPipeline):
+            self._analyser.rebuild_beat_detector(profile)
         log.info(
             "[diag] update_onset_pipeline: method=%s (BandNormaliser EMA preserved, "
             "frame counter=%d)",
