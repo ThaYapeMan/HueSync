@@ -114,7 +114,7 @@ _DEFAULT_EXERTION_CLIP: float = 3.0
 # CSV columns — order is fixed for reproducibility.
 _BAR_COLS = [f"bar_{i:02d}" for i in range(_DEFAULT_BARS)]
 CSV_COLUMNS: list[str] = (
-    ["t_s", "backend", "effective_backend"]
+    ["t_s", "backend", "effective_backend", "effective_engine"]
     + _BAR_COLS
     + [
         "bass",
@@ -135,6 +135,12 @@ CSV_COLUMNS: list[str] = (
         "peak_ema",         # v2_peak_ema: global reference at this moment
         "bars_smooth_mean", # mean(v2_bar_smooth) (explicit label)
         "bars_smooth_max",  # max(v2_bar_smooth)
+        # PublicationRecord audit fields — one column each so the CSV can be
+        # diffed against the raw analyser output without re-running.
+        "sequence",
+        "epoch",
+        "sample_start",
+        "sample_end",
     ]
 )
 
@@ -423,6 +429,7 @@ def analyse_pcm(
     violations: list[str] = []
     source_pos: int = 0  # source-rate stereo frame counter
     _last_rec: list[object] = []  # capture last PublicationRecord for metadata
+    _max_sample_end: list[int] = [0]  # track authoritative source end for duration metadata
 
     def _capture_row(features: object, sample_pos: int, rec: object | None = None) -> None:
         """Record one AudioFeatures snapshot as a CSV row."""
@@ -431,6 +438,9 @@ def analyse_pcm(
             "t_s": round(t_s, 6),
             "backend": backend,
             "effective_backend": (
+                getattr(rec, "effective_engine_id", backend) if rec else backend
+            ),
+            "effective_engine": (
                 getattr(rec, "effective_engine_id", backend) if rec else backend
             ),
         }
@@ -473,10 +483,22 @@ def analyse_pcm(
             if not math.isfinite(v):
                 violations.append(f"t={t_s:.3f} {field} non-finite: {v}")
 
+        # PublicationRecord audit columns — always emit; use 0/"" for records
+        # that could not be reconstructed (e.g. flush before any epoch).
+        row["sequence"] = int(getattr(rec, "sequence", 0)) if rec is not None else 0
+        row["epoch"] = str(getattr(rec, "epoch", "")) if rec is not None else ""
+        row["sample_start"] = (
+            int(getattr(rec, "sample_pos", sample_pos)) if rec is not None else int(sample_pos)
+        )
+        row["sample_end"] = int(getattr(rec, "sample_end", 0)) if rec is not None else 0
+
         rows.append(row)
         if rec is not None:
             _last_rec.clear()
             _last_rec.append(rec)
+            end = int(getattr(rec, "sample_end", 0))
+            if end > _max_sample_end[0]:
+                _max_sample_end[0] = end
 
     def _push_and_capture(hop_frame: AnalysisPcmFrame) -> None:
         """Feed one HOP-sized canonical frame; capture snapshots from returned records."""
@@ -532,14 +554,31 @@ def analyse_pcm(
         list(getattr(last_rec, "effective_processor_ids", []))
         if last_rec else []
     )
+    # SharedAnalysisFrame is fixed to a 2048-sample Hamming window (StereoMagStft).
+    # The underlying spectrum engine may use a different internal FFT (cavacore),
+    # so report both explicitly instead of conflating them.
+    engine_obj = getattr(pipeline, "_engine", None) or engine
+    spec_engine_info: dict[str, Any] = {
+        "id": pipeline.effective_spectrum_backend,
+    }
+    if hasattr(engine_obj, "window_size"):
+        spec_engine_info["fft"] = int(engine_obj.window_size)
     info: dict[str, Any] = {
         "backend": backend,
         "effective_backend": pipeline.effective_spectrum_backend,
+        "effective_engine": pipeline.effective_spectrum_backend,
         "effective_processor_ids": effective_processor_ids,
+        # Shared analysis FFT (StereoMagStft): fixed 2048 Hamming for onset + V2.
+        "shared_analysis_fft": WINDOW_SIZE,
+        "shared_analysis_window": "hamming",
+        # Spectrum engine's internal transform (may differ from shared_analysis_*).
+        "spectrum_engine": pipeline.effective_spectrum_backend,
+        "spectrum_engine_details": spec_engine_info,
+        # Legacy field names, kept for CSV-consumer compatibility.
         "fft_size": WINDOW_SIZE,
         "onset_fft_size": WINDOW_SIZE,
-        "hop": hop,
         "window": "hamming",
+        "hop": hop,
         "canonical_rate": CANONICAL_RATE,
         "n_bars": _DEFAULT_BARS,
         "lower_hz": _DEFAULT_LOWER_HZ,
@@ -552,6 +591,9 @@ def analyse_pcm(
         "bass_hz": _DEFAULT_BASS_HZ,
         "mid_hz": _DEFAULT_MID_HZ,
         "exertion_clip": _DEFAULT_EXERTION_CLIP,
+        # Source duration derived from the maximum publication sample_end so
+        # that padding tails are excluded from the reported duration.
+        "max_sample_end": _max_sample_end[0],
         "violations": violations,
     }
     return rows, info
@@ -584,6 +626,12 @@ def write_meta(
 ) -> None:
     hop = pipeline_info["hop"]
     canonical_rate = pipeline_info["canonical_rate"]
+    max_sample_end = int(pipeline_info.get("max_sample_end", 0))
+    # Source-authoritative duration: max PublicationRecord.sample_end divided
+    # by the canonical rate.  This excludes any zero-padding tail introduced
+    # by soxr/STFT and reflects real analysed audio only.
+    source_duration_s = round(max_sample_end / canonical_rate, 6) if max_sample_end > 0 else 0.0
+    # Legacy row-based estimate, retained for backward compatibility.
     analysed_s = round(n_rows * hop / canonical_rate, 3) if n_rows > 0 else 0.0
 
     meta: dict[str, Any] = {
@@ -604,6 +652,7 @@ def write_meta(
         },
         "n_rows": n_rows,
         "analysed_duration_s": analysed_s,
+        "source_duration_s": source_duration_s,
         "violations": pipeline_info.get("violations", []),
     }
     meta_path.write_text(json.dumps(meta, indent=2))

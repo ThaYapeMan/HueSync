@@ -808,14 +808,27 @@ def _write_shm_v1(
     abs_write_pos: int,
     running: bool = True,
     rate: int = 44100,
-    gap_flag: int = 0,
+    write_seq: int = 0,
+    gap_seq: int = 0,
 ) -> None:
-    """Write a synthetic v1 SHM segment with extended header."""
+    """Write a synthetic v1 SHM segment with extended header.
+
+    Layout: magic(4), abi_version(2), flags(2), write_seq(4), generation(8),
+    abs_write_pos(8) in stereo frames, gap_seq(8), pad(4).  write_seq must be
+    even for the seqlock coherent-read protocol to accept the snapshot.
+    """
     legacy_hdr = _struct.pack(
         _HDR_FMT, VIS_BUF_SIZE, buf_index % VIS_BUF_SIZE, int(running), rate, 0
     )
     ext_hdr = _struct.pack(
-        _V2_EXT_FMT, SHM_ABI_V1_MAGIC, 1, gap_flag, 0, generation, abs_write_pos
+        _V2_EXT_FMT,
+        SHM_ABI_V1_MAGIC,     # magic
+        1,                     # abi_version
+        0,                     # flags (reserved)
+        write_seq,             # seqlock counter (even = stable)
+        generation,            # producer lifetime ID
+        abs_write_pos,         # stereo-frame counter
+        gap_seq,               # skipped-export counter
     )
     data = bytes(_HDR_OFFSET) + legacy_hdr + ext_hdr + bytes(VIS_BUF_SIZE * 2)
     assert len(data) == _MMAP_SIZE_V1, f"Expected {_MMAP_SIZE_V1}, got {len(data)}"
@@ -889,34 +902,37 @@ def test_shm_restart_on_rate_change(tmp_path):
 
 def test_shm_v1_full_lap_detectable(tmp_path):
     p = tmp_path / "shm"
-    _write_shm_v1(p, buf_index=0, generation=1, abs_write_pos=1000)
+    # abs_write_pos is in stereo frames; ring capacity is VIS_BUF_SIZE // 2.
+    frame_capacity = VIS_BUF_SIZE // 2
+    _write_shm_v1(p, buf_index=0, generation=1, abs_write_pos=500)
     src = SqueezeliteShmSource()
     src.open("x", _path=p)
-    # Advance abs_write_pos by exactly VIS_BUF_SIZE.
-    _write_shm_v1(p, buf_index=0, generation=1, abs_write_pos=1000 + VIS_BUF_SIZE)
+    # Advance abs_write_pos by exactly one full lap.
+    _write_shm_v1(p, buf_index=0, generation=1, abs_write_pos=500 + frame_capacity)
     result = src.read_new_checked()
     assert result.event == ShmContinuityEvent.FULL_LAP
 
 
 def test_shm_v1_multiple_laps(tmp_path):
     p = tmp_path / "shm"
+    frame_capacity = VIS_BUF_SIZE // 2
     _write_shm_v1(p, buf_index=0, generation=1, abs_write_pos=0)
     src = SqueezeliteShmSource()
     src.open("x", _path=p)
     # Advance by 3 full laps.
-    _write_shm_v1(p, buf_index=0, generation=1, abs_write_pos=3 * VIS_BUF_SIZE)
+    _write_shm_v1(p, buf_index=0, generation=1, abs_write_pos=3 * frame_capacity)
     result = src.read_new_checked()
     assert result.event == ShmContinuityEvent.MULTIPLE_LAPS
 
 
-def test_shm_v1_gap_export(tmp_path):
+def test_shm_v1_gap_sequence(tmp_path):
     p = tmp_path / "shm"
-    _write_shm_v1(p, buf_index=0, generation=1, abs_write_pos=0)
+    _write_shm_v1(p, buf_index=0, generation=1, abs_write_pos=0, gap_seq=0)
     src = SqueezeliteShmSource()
     src.open("x", _path=p)
-    _write_shm_v1(p, buf_index=100, generation=1, abs_write_pos=100, gap_flag=1)
+    _write_shm_v1(p, buf_index=100, generation=1, abs_write_pos=50, gap_seq=1)
     result = src.read_new_checked()
-    assert result.event == ShmContinuityEvent.GAP_EXPORT
+    assert result.event == ShmContinuityEvent.GAP_SEQUENCE
 
 
 def test_shm_producer_generation_change(tmp_path):
@@ -990,3 +1006,318 @@ def test_acceptance_uses_registry():
     from huesync.spectrum_engine import ENGINES
     assert "v2" in ENGINES
     assert "cavacore" in ENGINES  # registered even if not available on this system
+
+
+# ---------------------------------------------------------------------------
+# H1: seqlock coherent read
+# ---------------------------------------------------------------------------
+
+
+def test_shm_v1_seqlock_mid_write_rejected(tmp_path):
+    """A persistently odd write_seq (writer never finishes) surfaces as TORN_READ."""
+    p = tmp_path / "shm"
+    _write_shm_v1(p, buf_index=0, generation=1, abs_write_pos=0, write_seq=1)
+    src = SqueezeliteShmSource()
+    src.open("x", _path=p)
+    result = src.read_new_checked()
+    assert result.event in (
+        ShmContinuityEvent.NO_DATA,
+        ShmContinuityEvent.TORN_READ,
+    ), f"expected NO_DATA or TORN_READ, got {result.event}"
+
+
+# ---------------------------------------------------------------------------
+# H2: abs position is not double-counted
+# ---------------------------------------------------------------------------
+
+
+def test_shm_v1_abs_write_pos_used_verbatim(tmp_path):
+    """abs_write_pos from SHM is used as-is; consumer does not add delivered frames."""
+    p = tmp_path / "shm"
+    _write_shm_v1(p, buf_index=100, generation=1, abs_write_pos=50)
+    src = SqueezeliteShmSource()
+    src.open("x", _path=p)
+    _write_shm_v1(p, buf_index=200, generation=1, abs_write_pos=100)
+    result = src.read_new_checked()
+    assert result.event == ShmContinuityEvent.ADVANCE
+    assert result.abs_write_pos == 100
+
+
+# ---------------------------------------------------------------------------
+# H3: gap_seq observed exactly once
+# ---------------------------------------------------------------------------
+
+
+def test_shm_v1_gap_seq_observed_exactly_once(tmp_path):
+    p = tmp_path / "shm"
+    _write_shm_v1(p, buf_index=0, generation=1, abs_write_pos=0, gap_seq=0)
+    src = SqueezeliteShmSource()
+    src.open("x", _path=p)
+    _write_shm_v1(p, buf_index=50, generation=1, abs_write_pos=25, gap_seq=1)
+    r1 = src.read_new_checked()
+    assert r1.event == ShmContinuityEvent.GAP_SEQUENCE
+
+    _write_shm_v1(p, buf_index=100, generation=1, abs_write_pos=50, gap_seq=1)
+    r2 = src.read_new_checked()
+    assert r2.event == ShmContinuityEvent.ADVANCE
+
+
+# ---------------------------------------------------------------------------
+# H4: producer generation change detected between polls
+# ---------------------------------------------------------------------------
+
+
+def test_shm_v1_generation_change_detected(tmp_path):
+    p = tmp_path / "shm"
+    _write_shm_v1(p, buf_index=0, generation=1, abs_write_pos=0)
+    src = SqueezeliteShmSource()
+    src.open("x", _path=p)
+    _write_shm_v1(p, buf_index=10, generation=1, abs_write_pos=5)
+    src.read_new_checked()  # consume the initial advance
+    _write_shm_v1(p, buf_index=10, generation=2, abs_write_pos=0)
+    result = src.read_new_checked()
+    assert result.event == ShmContinuityEvent.RESTART
+
+
+# ---------------------------------------------------------------------------
+# H5: abs_write_pos regression = restart
+# ---------------------------------------------------------------------------
+
+
+def test_shm_v1_abs_write_pos_regression_is_restart(tmp_path):
+    p = tmp_path / "shm"
+    _write_shm_v1(p, buf_index=0, generation=1, abs_write_pos=5000)
+    src = SqueezeliteShmSource()
+    src.open("x", _path=p)
+    _write_shm_v1(p, buf_index=10, generation=1, abs_write_pos=10)
+    result = src.read_new_checked()
+    assert result.event == ShmContinuityEvent.RESTART
+
+
+# ---------------------------------------------------------------------------
+# H6: BeatDetector concurrent rebuild + feed
+# ---------------------------------------------------------------------------
+
+
+def test_beat_detector_concurrent_rebuild_feed_safe():
+    """Interleaving rebuild() with feed() must not raise or corrupt state."""
+    bd = BeatDetector(
+        onset_method="combined", onset_delta=0.1, onset_alpha=0.9,
+        superflux_mu=3, superflux_lag=2, bass_hz=250, mid_hz=2000,
+    )
+    frame = SharedAnalysisFrame(
+        pcm=np.zeros((480, 2), dtype=np.float32),
+        mag_frames=[np.zeros(1025, dtype=np.float32)] * 3,
+        epoch_id="ep-1", sample_start=0, sample_end=480,
+        hop_sample_starts=[0, 160, 320],
+    )
+    errors: list[Exception] = []
+
+    def feeder() -> None:
+        for _ in range(200):
+            try:
+                bd.feed(frame)
+            except Exception as exc:  # noqa: BLE001 - test aggregation
+                errors.append(exc)
+
+    def rebuilder() -> None:
+        methods = ["combined", "multiband", "combined", "superflux"]
+        for i in range(100):
+            try:
+                bd.rebuild(
+                    onset_method=methods[i % 4],
+                    onset_delta=0.1, onset_alpha=0.9,
+                    superflux_mu=3, superflux_lag=2,
+                    bass_hz=250, mid_hz=2000,
+                )
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+    t1 = threading.Thread(target=feeder)
+    t2 = threading.Thread(target=rebuilder)
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+    assert not errors, f"Concurrent errors: {errors}"
+
+
+# ---------------------------------------------------------------------------
+# H7: stop() returns bool and blocks on live workers
+# ---------------------------------------------------------------------------
+
+
+def test_cap_stop_returns_bool_clean():
+    """stop() returns True when the worker terminated cleanly."""
+    cap = _make_cap()
+    cap.start()
+    assert cap.stop() is True
+
+
+# ---------------------------------------------------------------------------
+# H8: atomic PublicationRecord state
+# ---------------------------------------------------------------------------
+
+
+def test_cap_pub_seq_matches_last_record_sequence():
+    cap = _make_cap()
+    _feed_warmup(cap)
+    recs = cap.feed(_make_frame(sample_pos=6 * _HOP))
+    if not recs:
+        pytest.skip("No publication produced during warmup range")
+    assert cap.pub_seq == recs[-1].sequence
+    drained = cap.drain_publications()
+    assert any(r.sequence == recs[-1].sequence for r in drained)
+
+
+# ---------------------------------------------------------------------------
+# H9: EOS features survive TemporarilyNoData
+# ---------------------------------------------------------------------------
+
+
+def test_eos_latest_survives_temporary_no_data():
+    cap = _make_cap()
+    for i in range(10):
+        cap.feed(_make_frame(sample_pos=i * _HOP))
+    before = cap.latest()
+    if before is None:
+        pytest.skip("No publication produced")
+    cap.end_of_stream()
+    # After a clean EOS the latest publication must still be reachable —
+    # short source gaps do not clear it.
+    assert cap.latest() is not None
+
+
+# ---------------------------------------------------------------------------
+# H10: STFT sample positions are chunk-independent
+# ---------------------------------------------------------------------------
+
+
+def test_v2_positions_chunk_independent():
+    """Same audio fed as 480-sample chunks vs 100-sample chunks → identical positions."""
+    rng = np.random.default_rng(42)
+    audio_mono = rng.standard_normal(480 * 20).astype(np.float32) * 0.1
+    audio = np.column_stack([audio_mono, audio_mono])
+
+    def _run(chunk_size: int) -> list[int]:
+        cap = _make_cap()
+        positions: list[int] = []
+        pos = 0
+        for i in range(0, len(audio), chunk_size):
+            block = audio[i:i + chunk_size]
+            frame = AnalysisPcmFrame(
+                samples=block, sample_pos=pos,
+                epoch_id="ep-1", source_id="t", over_range=False,
+            )
+            for rec in cap.feed(frame):
+                positions.append(rec.sample_pos)
+            pos += len(block)
+        return positions
+
+    pos_480 = _run(480)
+    pos_100 = _run(100)
+    assert pos_480 == pos_100, (
+        f"positions differ between chunk sizes:\n480: {pos_480[:5]}\n100: {pos_100[:5]}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# H11: CAVA EOS clamps sample_end
+# ---------------------------------------------------------------------------
+
+
+def test_cava_eos_tail_clamped():
+    """A 480-sample block followed by a 1-sample tail must not report sample_end > 481."""
+    cap = _make_cap()
+    for i in range(10):
+        cap.feed(_make_frame(sample_pos=i * _HOP))
+    cap.feed(AnalysisPcmFrame(
+        samples=np.ones((1, 2), dtype=np.float32),
+        sample_pos=10 * _HOP, epoch_id="ep-1", source_id="t", over_range=False,
+    ))
+    flush_recs = cap.end_of_stream()
+    real_end = 10 * _HOP + 1
+    for rec in flush_recs:
+        assert rec.sample_end <= real_end, (
+            f"flush record sample_end={rec.sample_end} exceeds real source end {real_end}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# H12: v1-required SquzeezliteShmStereoSource rejects v0
+# ---------------------------------------------------------------------------
+
+
+def test_stereo_source_rejects_v0_when_require_v1(tmp_path):
+    """SqueezeliteShmStereoSource.open(require_v1=True) raises for v0-only SHM."""
+    from huesync.pcm_source import SqueezeliteShmStereoSource
+    p = tmp_path / "shm"
+    header = _struct.pack(_HDR_FMT, VIS_BUF_SIZE, 0, 1, 44100, 0)
+    p.write_bytes(bytes(_HDR_OFFSET) + header + bytes(VIS_BUF_SIZE * 2))
+    src = SqueezeliteShmStereoSource()
+    with pytest.raises(RuntimeError, match="v1 ABI"):
+        src.open("x", _path=p, require_v1=True)
+
+
+# ---------------------------------------------------------------------------
+# H13: v1 PCM does not overlap with the extension bytes
+# ---------------------------------------------------------------------------
+
+
+def test_stereo_source_v1_buf_offset_is_120(tmp_path):
+    """v1 mode reads PCM from offset 120, not 80 (the extension is between)."""
+    from huesync.pcm_source import (
+        _BUF_OFFSET_V1,
+        SqueezeliteShmStereoSource,
+    )
+    p = tmp_path / "shm"
+    _write_shm_v1(p, buf_index=0, generation=1, abs_write_pos=0)
+    src = SqueezeliteShmStereoSource()
+    src.open("x", _path=p, require_v1=False)  # accept either
+    assert src._buf_offset() == _BUF_OFFSET_V1
+
+
+# ---------------------------------------------------------------------------
+# H14: effective_processor_ids limited to contributors
+# ---------------------------------------------------------------------------
+
+
+def test_effective_processor_ids_only_contributors():
+    """A processor that emits no updates must not appear in effective_processor_ids."""
+
+    class _NoOutputProc:
+        processor_id = "no_output"
+
+        def feed(self, frame):
+            return []
+
+        def flush(self):
+            return []
+
+        def reset(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+    cap = _make_cap()
+    cap._processors = (*cap._processors, _NoOutputProc())
+    _feed_warmup(cap)
+    recs = cap.feed(_make_frame(sample_pos=6 * _HOP))
+    for rec in recs:
+        assert "no_output" not in rec.effective_processor_ids
+
+
+# ---------------------------------------------------------------------------
+# H15: bounded queue drop counter
+# ---------------------------------------------------------------------------
+
+
+def test_pub_queue_overflow_pub_dropped_non_negative():
+    """pub_dropped_count is always >= 0 and never regresses within a single drain window."""
+    cap = _make_cap()
+    for i in range(2000):
+        cap.feed(_make_frame(sample_pos=i * _HOP))
+    assert cap.pub_dropped_count >= 0
+    cap.drain_publications()
+    assert cap.pub_dropped_count == 0

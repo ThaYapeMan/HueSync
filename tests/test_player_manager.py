@@ -845,8 +845,8 @@ def test_lms_pcm_pipeline_path_when_bars_source_pcm_pipeline_v2(tmp_path: Path) 
         patch(f"{_pm}.HueDriver") as mock_driver_cls,
         patch.object(manager, "_activate_lms_pcm", new=AsyncMock()) as mock_pcm,
         patch.object(manager, "_activate_lms_cava", new=AsyncMock()) as mock_cava,
-        patch.object(manager, "_start_squeezelite", new=AsyncMock()),
-        patch.object(manager, "_wait_for_shm", new=AsyncMock()),
+        patch.object(manager, "_start_squeezelite", new=MagicMock()),
+        patch.object(manager, "_wait_for_shm", new=MagicMock()),
     ):
         mock_driver = MagicMock()
         mock_driver.start = AsyncMock()
@@ -874,8 +874,8 @@ def test_lms_cava_path_when_bars_source_cava(tmp_path: Path) -> None:
         patch(f"{_pm}.HueDriver") as mock_driver_cls,
         patch.object(manager, "_activate_lms_pcm", new=AsyncMock()) as mock_pcm,
         patch.object(manager, "_activate_lms_cava", new=AsyncMock()) as mock_cava,
-        patch.object(manager, "_start_squeezelite", new=AsyncMock()),
-        patch.object(manager, "_wait_for_shm", new=AsyncMock()),
+        patch.object(manager, "_start_squeezelite", new=MagicMock()),
+        patch.object(manager, "_wait_for_shm", new=MagicMock()),
     ):
         mock_driver = MagicMock()
         mock_driver.start = AsyncMock()

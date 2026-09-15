@@ -348,6 +348,14 @@ async def _apply_coupling_action(
 
     Called after entity saves so the Profile reflects the updated values.
     Uses _build_engine_profile from player_manager (single source of truth).
+
+    Routing depends on ``profile.bars_source``:
+      * pcm_pipeline sessions:  spectrum / band changes rebuild the running
+                                CanonicalAnalysisPipeline via
+                                ``replace_pcm_analyser`` — there is no cava
+                                process to restart.
+      * cava sessions:          spectrum / band changes are handled by
+                                ``restart_cava`` (external CAVA / FIFO path).
     """
     profile = _build_engine_profile(coupling, storage)
     if not profile:
@@ -357,17 +365,22 @@ async def _apply_coupling_action(
     if changed & _C_DEACTIVATE_FIELDS:
         await manager.deactivate()
         return
-    # spectrum_backend swap on a pcm_pipeline session: rebuild the analysis
-    # worker with the new engine without restarting squeezelite or Hue.
-    if "spectrum_backend" in changed and profile.bars_source == "pcm_pipeline":
-        manager.replace_pcm_analyser(profile)
-        manager.update_render(profile, mellow_profile)
-        return
-    # analyser_id swap: treat as cava + PCM change (new Analyser replaces all
-    # its fields: bars, cutoffs, onset params).  energy_profile_id alone falls
-    # through to update_render() only.
-    if changed & (_C_CAVA_FIELDS | {"analyser_id"}):
-        await manager.restart_cava()
+
+    # A new SpectrumEngine (spectrum_backend swap) or any change to the bar
+    # geometry (bars / cutoffs) or the Analyser identity (analyser_id) needs
+    # the analyser to be rebuilt.  Route via the appropriate path for the
+    # active session's bars_source.
+    spectrum_rebuild_fields = {
+        "spectrum_backend", "bars", "lower_cutoff_freq", "higher_cutoff_freq",
+    }
+    needs_spectrum_rebuild = bool(changed & (spectrum_rebuild_fields | {"analyser_id"}))
+
+    if needs_spectrum_rebuild:
+        if profile.bars_source == "pcm_pipeline":
+            manager.replace_pcm_analyser(profile)
+        else:
+            await manager.restart_cava()
+
     if changed & (_C_PCM_FIELDS | {"analyser_id"}):
         manager.update_onset_pipeline(profile)
     manager.update_render(profile, mellow_profile)
@@ -846,9 +859,9 @@ async def patch_analyser(ac_id: str, request: Request, body: AnalyserPatchBody):
             else:
                 try:
                     await _apply_coupling_action(coupling, storage, manager, active_fields)
-                except RuntimeError as exc:
-                    # Runtime activation failed; roll back persisted config so the
-                    # saved state matches what is actually running.
+                except (RuntimeError, OSError) as exc:
+                    # Runtime activation failed; roll back persisted config so
+                    # the saved state matches what is actually running.
                     storage.save_analyser(old_ac)
                     raise HTTPException(
                         status_code=409,

@@ -159,8 +159,14 @@ def test_invalidation_clears_latest_via_run():
         bars=[0.5] * 30, bass=0.5, mid=0.5, full=0.5,
         centroid=0.5, sustained_energy=None,
     )
-    with p._pipeline._lock:
-        p._pipeline._latest = stale
+    # Plant a synthetic PublicationRecord so p.latest() returns non-None
+    # before the invalidation lands.
+    from huesync.spectrum_engine import PublicationRecord
+    with p._pipeline._pub_lock:
+        p._pipeline._latest_pub = PublicationRecord(
+            sequence=0, epoch="stale", sample_pos=0, sample_end=0,
+            features=stale, effective_engine_id="v2",
+        )
 
     p.start()
     done.wait(timeout=2.0)
@@ -371,7 +377,7 @@ def test_shm_torn_read_returns_stream_invalidated(tmp_path: Path) -> None:
     _write_shm_vis_t(p, buf_index=2, buffer=bytes(buf))
 
     src = SqueezeliteShmStereoSource()
-    src.open("x", _path=p)
+    src.open("x", _path=p, require_v1=False)
     src._prev_index = 0
 
     # Intercept _read_header so 2nd call (post-copy seqlock check) advances buf_index.
@@ -432,8 +438,14 @@ def test_worker_exception_clears_latest():
         bars=[0.8] * 30, bass=0.8, mid=0.8, full=0.8,
         centroid=0.5, sustained_energy=None,
     )
-    with p._pipeline._lock:
-        p._pipeline._latest = stale
+    # Plant a synthetic PublicationRecord so p.latest() returns non-None
+    # before the invalidation lands.
+    from huesync.spectrum_engine import PublicationRecord
+    with p._pipeline._pub_lock:
+        p._pipeline._latest_pub = PublicationRecord(
+            sequence=0, epoch="stale", sample_pos=0, sample_end=0,
+            features=stale, effective_engine_id="v2",
+        )
 
     p.start()
     crash_event.wait(timeout=2.0)

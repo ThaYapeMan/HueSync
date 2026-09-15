@@ -82,7 +82,7 @@ def test_shm_stereo_no_data():
     shm = _make_shm_file(buf_index=0)
     try:
         src = SqueezeliteShmStereoSource()
-        src.open("aa:bb:cc:dd:ee:ff", _path=shm)
+        src.open("aa:bb:cc:dd:ee:ff", _path=shm, require_v1=False)
         result = src.read()
         assert isinstance(result, TemporarilyNoData)
         src.close()
@@ -98,7 +98,7 @@ def test_shm_stereo_data_result_type():
     shm = _make_shm_file(buf_index=buf_index, buf_data=buf_bytes)
     try:
         src = SqueezeliteShmStereoSource()
-        src.open("aa:bb:cc:dd:ee:ff", _path=shm)
+        src.open("aa:bb:cc:dd:ee:ff", _path=shm, require_v1=False)
         src._prev_index = 0
         result = src.read()
         assert isinstance(result, DataResult)
@@ -116,7 +116,7 @@ def test_shm_stereo_lr_preserved():
     shm = _make_shm_file(buf_index=n_frames * 2, buf_data=buf_bytes)
     try:
         src = SqueezeliteShmStereoSource()
-        src.open("aa:bb:cc:dd:ee:ff", _path=shm)
+        src.open("aa:bb:cc:dd:ee:ff", _path=shm, require_v1=False)
         src._prev_index = 0
         result = src.read()
         assert isinstance(result, DataResult)
@@ -136,7 +136,7 @@ def test_shm_stereo_no_downmix():
     shm = _make_shm_file(buf_index=n_frames * 2, buf_data=buf_bytes)
     try:
         src = SqueezeliteShmStereoSource()
-        src.open("test:mac", _path=shm)
+        src.open("test:mac", _path=shm, require_v1=False)
         src._prev_index = 0
         result = src.read()
         assert isinstance(result, DataResult)
@@ -155,7 +155,7 @@ def test_shm_stereo_samples_immutable():
     shm = _make_shm_file(buf_index=n_frames * 2, buf_data=buf_bytes)
     try:
         src = SqueezeliteShmStereoSource()
-        src.open("test:mac", _path=shm)
+        src.open("test:mac", _path=shm, require_v1=False)
         src._prev_index = 0
         result = src.read()
         assert isinstance(result, DataResult)
@@ -171,7 +171,7 @@ def test_shm_stereo_fell_behind_returns_invalidated():
     shm = _make_shm_file(buf_index=VIS_BUF_SIZE // 2 + 2)
     try:
         src = SqueezeliteShmStereoSource()
-        src.open("test:mac", _path=shm)
+        src.open("test:mac", _path=shm, require_v1=False)
         src._prev_index = 0
         result = src.read()
         assert isinstance(result, StreamInvalidated)
@@ -187,7 +187,7 @@ def test_shm_stereo_complete_frames_only():
     shm = _make_shm_file(buf_index=1)
     try:
         src = SqueezeliteShmStereoSource()
-        src.open("test:mac", _path=shm)
+        src.open("test:mac", _path=shm, require_v1=False)
         src._prev_index = 0
         result = src.read()
         assert isinstance(result, TemporarilyNoData)
@@ -201,7 +201,7 @@ def test_shm_stereo_source_id_format():
     shm = _make_shm_file()
     try:
         src = SqueezeliteShmStereoSource()
-        src.open("aa:bb:cc:dd:ee:ff", _path=shm)
+        src.open("aa:bb:cc:dd:ee:ff", _path=shm, require_v1=False)
         assert src.source_id == "lms:aa:bb:cc:dd:ee:ff"
         src.close()
     finally:
@@ -215,7 +215,7 @@ def test_shm_stereo_frame_dtype():
     shm = _make_shm_file(buf_index=n_frames * 2, buf_data=buf_bytes)
     try:
         src = SqueezeliteShmStereoSource()
-        src.open("test:mac", _path=shm)
+        src.open("test:mac", _path=shm, require_v1=False)
         src._prev_index = 0
         result = src.read()
         assert isinstance(result, DataResult)
@@ -232,7 +232,7 @@ def test_shm_stereo_channels_field():
     shm = _make_shm_file(buf_index=n_frames * 2, buf_data=buf_bytes)
     try:
         src = SqueezeliteShmStereoSource()
-        src.open("test:mac", _path=shm)
+        src.open("test:mac", _path=shm, require_v1=False)
         src._prev_index = 0
         result = src.read()
         assert isinstance(result, DataResult)
@@ -258,7 +258,7 @@ def test_shm_stereo_wraparound():
     shm = _make_shm_file(buf_index=4, buf_data=bytes(buf))
     try:
         src = SqueezeliteShmStereoSource()
-        src.open("test:mac", _path=shm)
+        src.open("test:mac", _path=shm, require_v1=False)
         src._prev_index = VIS_BUF_SIZE - 4
         result = src.read()
         assert isinstance(result, DataResult)

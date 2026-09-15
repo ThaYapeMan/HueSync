@@ -124,8 +124,10 @@ def test_csv_columns_exact(rows_from_sine: list[dict]) -> None:
 
 
 def test_csv_columns_count() -> None:
-    # t_s(1) + backend(1) + effective_backend(1) + bars(30) + scalars(13) + conditioning(3) = 49
-    assert len(CSV_COLUMNS) == 49
+    # t_s(1) + backend(1) + effective_backend(1) + effective_engine(1)
+    # + bars(30) + scalars(13) + conditioning(3)
+    # + audit(sequence, epoch, sample_start, sample_end = 4) = 54
+    assert len(CSV_COLUMNS) == 54
 
 
 def test_csv_bar_columns_named_correctly() -> None:
@@ -190,8 +192,13 @@ def test_deterministic_same_raw_pcm(sine_raw_pcm: bytes) -> None:
     rows_a, _ = analyse_pcm(sine_raw_pcm)
     rows_b, _ = analyse_pcm(sine_raw_pcm)
     assert len(rows_a) == len(rows_b), "Row count differs between runs"
+    # The "epoch" column is a random UUID emitted by AudioCanonicalizer and
+    # is intentionally non-deterministic; every other column must match.
+    _non_deterministic = {"epoch"}
     for i, (ra, rb) in enumerate(zip(rows_a, rows_b, strict=True)):
         for col in CSV_COLUMNS:
+            if col in _non_deterministic:
+                continue
             assert ra[col] == rb[col], (
                 f"Column '{col}' differs at row {i}: {ra[col]} vs {rb[col]}"
             )
@@ -505,7 +512,13 @@ def test_ffmpeg_deterministic_via_file(ffmpeg: str | None, sine_wav: Path) -> No
 
     rows_a, _ = analyse_pcm(raw_a)
     rows_b, _ = analyse_pcm(raw_b)
-    assert rows_a == rows_b, "analyse_pcm must produce identical output for identical input"
+    # The "epoch" column is a random UUID from AudioCanonicalizer; strip it
+    # before comparing to keep the rest of the row deterministic assertion.
+    def _strip_epoch(rows: list[dict]) -> list[dict]:
+        return [{k: v for k, v in r.items() if k != "epoch"} for r in rows]
+    assert _strip_epoch(rows_a) == _strip_epoch(rows_b), (
+        "analyse_pcm must produce identical output for identical input"
+    )
 
 
 def test_ffmpeg_start_duration(ffmpeg: str | None, sine_wav: Path) -> None:
