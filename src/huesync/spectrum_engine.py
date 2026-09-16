@@ -490,24 +490,67 @@ class CavaCoreSpectrumEngine:
     def feed(self, pcm: np.ndarray, shared: SharedAnalysis) -> list[SpectrumUpdate]:
         """Legacy carry-buffered entry point — kept for compatibility.
 
-        Prefer ``feed_block`` in new code; it returns a per-block interval so
+        Prefer ``feed_block`` in new code; it returns per-block intervals so
         the SpectrumProcessor does not have to reconstruct positions from
-        ``len(updates)`` (which is unreliable when the backend coalesces
-        multiple executions into a single returned bar array).
+        the length of the returned bar list (the underlying cavacore
+        backend coalesces multiple executed blocks into a single returned
+        bar array — the LAST block's bars).
+
+        BLOCKER 7 fix: the returned ``SpectrumUpdate.sample_pos`` is the
+        canonical block-start of the executed block, tracked through the
+        same ``_next_exec_start`` counter as ``feed_block`` so callers get
+        consistent positions across the two entry points.  A call that
+        feeds ``M`` frames while the internal carry already held ``P``
+        frames executes ``(P + M) // BLOCK_SIZE`` complete blocks; the
+        returned update belongs to the LAST of those and its sample_pos is
+        computed accordingly (not the pre-fix ``_epoch_samples -
+        BLOCK_SIZE`` heuristic, which was off by up to ``BLOCK_SIZE - 1``
+        whenever ``len(shared.pcm)`` was not a multiple of the block).
         """
+        pending_before = self._cava.pending_frames
+        n_in = len(shared.pcm)
         result = self._cava.execute(shared.pcm)
-        self._epoch_samples += len(shared.pcm)
-        if result is None:
+        pending_after = self._cava.pending_frames
+        blocks_executed = (pending_before + n_in - pending_after) // self._BLOCK_SIZE
+        self._epoch_samples += n_in
+        if result is None or blocks_executed <= 0:
             return []
-        pos = max(0, self._epoch_samples - self._BLOCK_SIZE)
-        return [SpectrumUpdate(engine_id="cavacore", bars=result.tolist(), sample_pos=pos)]
+        last_block_start = (
+            self._next_exec_start + (blocks_executed - 1) * self._BLOCK_SIZE
+        )
+        self._next_exec_start += blocks_executed * self._BLOCK_SIZE
+        return [
+            SpectrumUpdate(
+                engine_id="cavacore",
+                bars=result.tolist(),
+                sample_pos=last_block_start,
+            )
+        ]
 
     def flush(self) -> list[SpectrumUpdate]:
+        """Legacy flush entry point.
+
+        BLOCKER 7 fix: the returned ``sample_pos`` is the canonical start
+        of the block executed by cavacore's flush — which is exactly
+        ``_next_exec_start`` (the next scheduled block, whose leading
+        ``pending_frames`` samples are the real audio tail; the remainder
+        is zero-padding).  The pre-fix heuristic reused
+        ``_epoch_samples - BLOCK_SIZE`` and was off by the size of the
+        real tail (e.g. 481 fed → tail at frame 480 reported as 1).
+        """
         result = self._cava.flush()
         if result is None:
             return []
-        pos = max(0, self._epoch_samples - self._BLOCK_SIZE)
-        return [SpectrumUpdate(engine_id="cavacore", bars=result.tolist(), sample_pos=pos)]
+        block_start = self._next_exec_start
+        self._next_exec_start += self._BLOCK_SIZE
+        self._epoch_samples += self._BLOCK_SIZE
+        return [
+            SpectrumUpdate(
+                engine_id="cavacore",
+                bars=result.tolist(),
+                sample_pos=block_start,
+            )
+        ]
 
     def flush_block(self, source_end: int | None = None) -> tuple[np.ndarray, int, int] | None:
         """Zero-pad-and-execute the carry buffer at clean EOS.

@@ -1,8 +1,7 @@
 diff --git a/Makefile b/Makefile
-index 78511dc..f80dda2 100644
 --- a/Makefile
 +++ b/Makefile
-@@ -32,7 +32,7 @@ SOURCES_DSD      = dsd.c dop.c dsd2pcm/dsd2pcm.c
+@@ -32,7 +32,7 @@
  SOURCES_FF       = ffmpeg.c
  SOURCES_ALAC     = alac.c alac_wrapper.cpp
  SOURCES_RESAMPLE = process.c resample.c
@@ -12,7 +11,6 @@ index 78511dc..f80dda2 100644
  SOURCES_GPIO     = gpio.c
  SOURCES_FAAD     = faad.c
 diff --git a/output_vis.c b/output_vis.c
-index c9abb0e..ab8a437 100644
 --- a/output_vis.c
 +++ b/output_vis.c
 @@ -28,6 +28,10 @@
@@ -26,7 +24,7 @@ index c9abb0e..ab8a437 100644
  #if OSX
  #include <mach/clock.h>
  #include <mach/mach.h>
-@@ -44,6 +48,12 @@ static int pthread_rwlock_timedwrlock( pthread_rwlock_t * restrict rwlock, const
+@@ -44,6 +48,12 @@
  #define VIS_BUF_SIZE 16384
  #define VIS_LOCK_NS  1000000 // ns to wait for vis wrlock
  
@@ -39,7 +37,7 @@ index c9abb0e..ab8a437 100644
  static struct vis_t {
  	pthread_rwlock_t rwlock;
  	u32_t buf_size;
-@@ -51,6 +61,7 @@ static struct vis_t {
+@@ -51,6 +61,7 @@
  	bool running;
  	u32_t rate;
  	time_t updated;
@@ -47,7 +45,7 @@ index c9abb0e..ab8a437 100644
  	s16_t buffer[VIS_BUF_SIZE];
  } *vis_mmap = NULL;
  
-@@ -89,16 +100,26 @@ void _vis_export(struct buffer *outputbuf, struct outputstate *output, frames_t
+@@ -89,16 +100,33 @@
  		
  		if (err) {
  			LOG_DEBUG("failed to get wrlock - skipping visulizer export");
@@ -58,10 +56,16 @@ index c9abb0e..ab8a437 100644
 +			 * the next successful end_write pair. */
 +			vis_shm_v1_record_gap(&vis_mmap->huesync_v1_ext);
  		} else {
--			
-+
+ 			
  			if (silence) {
++				/* HueSync v1: silence transition changes ``running``, which
++				 * the consumer treats as part of the coherent snapshot.
++				 * Wrap the write in the seqlock pair so a racing reader
++				 * cannot observe stale abs_write_pos alongside the new
++				 * running=false marker. */
++				vis_shm_v1_begin_write(&vis_mmap->huesync_v1_ext);
  				vis_mmap->running = false;
++				vis_shm_v1_end_write(&vis_mmap->huesync_v1_ext, 0);
  			} else {
  				frames_t vis_cnt = out_frames;
  				s32_t *ptr = (s32_t *) outputbuf->readp;
@@ -77,13 +81,7 @@ index c9abb0e..ab8a437 100644
  				if (!output->current_replay_gain) {
  					while (vis_cnt--) {
  						vis_mmap->buffer[i++] = *(ptr++) >> 16;
-@@ -112,13 +133,18 @@ void _vis_export(struct buffer *outputbuf, struct outputstate *output, frames_t
- 						if (i == VIS_BUF_SIZE) i = 0;
- 					}
- 				}
--				
-+
- 				vis_mmap->updated = time(NULL);
+@@ -117,6 +145,11 @@
  				vis_mmap->running = true;
  				vis_mmap->buf_index = i;
  				vis_mmap->rate = output->current_sample_rate;
@@ -93,12 +91,33 @@ index c9abb0e..ab8a437 100644
 +				vis_shm_v1_end_write(&vis_mmap->huesync_v1_ext,
 +				                    (uint64_t)n_stereo_frames);
  			}
--			
-+
+ 			
  			pthread_rwlock_unlock(&vis_mmap->rwlock);
- 		}
+@@ -127,7 +160,12 @@
+ void vis_stop(void) {
+ 	if (vis_mmap) {
+ 		pthread_rwlock_wrlock(&vis_mmap->rwlock);
++		/* HueSync v1: stop transition changes ``running``.  Wrap it in the
++		 * seqlock pair so consumers never observe a partial state (running
++		 * false, abs_write_pos still advancing) between the two writes. */
++		vis_shm_v1_begin_write(&vis_mmap->huesync_v1_ext);
+ 		vis_mmap->running = false;
++		vis_shm_v1_end_write(&vis_mmap->huesync_v1_ext, 0);
+ 		pthread_rwlock_unlock(&vis_mmap->rwlock);
  	}
-@@ -159,7 +185,22 @@ void output_vis_init(log_level level, u8_t *mac) {
+ }
+@@ -155,11 +193,33 @@
+ 		pthread_rwlockattr_init(&attr);
+ 		pthread_rwlockattr_setpshared(&attr, PTHREAD_PROCESS_SHARED);
+ 		pthread_rwlock_init(&vis_mmap->rwlock, &attr);
++		/* HueSync v1: mark write_seq odd BEFORE mutating any field the
++		 * consumer treats as part of a coherent snapshot.  mmap zeroed
++		 * write_seq, which is even, and a racing reader could otherwise
++		 * see the legacy fields partially populated with a stable
++		 * seqlock counter.  begin_write flips it to odd; end_write inside
++		 * vis_shm_v1_init flips it to even once every field is set. */
++		vis_shm_v1_begin_write(&vis_mmap->huesync_v1_ext);
+ 		vis_mmap->buf_size = VIS_BUF_SIZE;
  		vis_mmap->running = false;
  		vis_mmap->rate = 44100;
  		pthread_rwlockattr_destroy(&attr);

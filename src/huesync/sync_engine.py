@@ -1012,6 +1012,34 @@ _CAP_POLL_S: float = 0.005
 _CAP_SAMPLE_RATE: int = AudioCanonicalizer.TARGET_RATE  # 48000
 
 
+class _DeactivatedPipeline:
+    """Sentinel ``AudioPipeline`` installed by ``replace_analyser`` when the
+    runtime cannot be restored to a working analyser (old-stop timeout with
+    no ``rebuild_old`` callback, or the rebuild itself failed).
+
+    Every ``latest()`` returns ``None``; the pipeline never produces frames.
+    This is the explicit deactivated state required by the BLOCKER 3 audit
+    (option B): callers of ``self._analyser`` observe a consistent
+    no-output pipeline rather than a dead reference to the timed-out old
+    analyser whose worker is still shutting down.
+    """
+
+    def start(self) -> None:  # noqa: D401 — protocol conformance
+        return None
+
+    def stop(self) -> bool:
+        # There is nothing to stop; report a clean stop so downstream
+        # teardown paths that check the return value continue smoothly.
+        return True
+
+    def latest(self) -> AudioFeatures | None:
+        return None
+
+    @property
+    def effective_spectrum_backend(self) -> str:
+        return "deactivated"
+
+
 class CanonicalAnalysisPipeline:
     """Engine-agnostic canonical 48 kHz stereo PCM analysis pipeline.
 
@@ -1281,26 +1309,18 @@ class CanonicalAnalysisPipeline:
     def _process_canonical_frame(self, frame: AnalysisPcmFrame) -> list[PublicationRecord]:
         """Process one AnalysisPcmFrame; return new PublicationRecords.
 
-        Composition policy (items 20-22): every processor in ``self._processors``
-        may contribute zero or more ``ProcessorUpdate`` records per canonical
-        frame.  A ``PublicationRecord`` is emitted whenever ANY processor
-        produced output — publication is NOT gated on the SpectrumProcessor
-        specifically.  This allows Beat-only publications (e.g. onset triggered
-        during cavacore's carry warmup) and future Loudness-only publications.
-
-        Contributor accounting: ``effective_processor_ids`` lists only the
-        processors that produced ≥1 update THIS frame.  A processor whose
-        carry buffer is still warming up (no output) is NOT in the list, even
-        when its previous output is carried forward via ``_last_bars``.
-
-        Interval merging (item 21): all ProcessorUpdates from one canonical
-        call describe the same canonical interval
-        (``[frame.sample_pos, frame.sample_pos + len(samples))``).  Multiple
-        SpectrumProcessor updates (V2: N per N mag_frames) create N
-        publications; onset accompanies them 1:1 with a final drain on the
-        last publication.  When SpectrumProcessor produces no updates but
-        another processor did, we emit a single publication for the whole
-        canonical interval.
+        Composition policy: every processor in ``self._processors`` may
+        contribute zero or more ``ProcessorUpdate`` records per canonical
+        frame.  ProcessorUpdates from all processors are grouped by their
+        **exact** ``(sample_start, sample_end)`` key, and one
+        ``PublicationRecord`` is emitted per unique interval.  A processor
+        that emitted no update for a given interval does NOT appear in that
+        publication's ``effective_processor_ids``.  If the SpectrumProcessor
+        contributed nothing to an interval, the publication carries forward
+        the last known bars but still records only the processors that
+        actually produced an update at that interval (BLOCKER 6: no
+        bounding-union, no list-position pairing, no fabricated
+        contributor provenance).
         """
         epoch_id: str = frame.epoch_id
         samples: np.ndarray = frame.samples
@@ -1340,91 +1360,132 @@ class CanonicalAnalysisPipeline:
             hop_sample_starts=hop_starts,
         )
 
-        # Run all processors generically; route bars→spectrum_updates, rest→pending_onset.
         spectrum_updates: list[ProcessorUpdate] = []
         other_updates: list[ProcessorUpdate] = []
-        contributing_ids: list[str] = []
         for proc in self._processors:
-            pus = proc.feed(shared_frame)
-            if pus:
-                contributing_ids.append(proc.processor_id)
-            for pu in pus:
+            for pu in proc.feed(shared_frame):
                 if pu.bars is not None:
                     spectrum_updates.append(pu)
                 else:
                     other_updates.append(pu)
 
-        # Update _last_bars whenever SpectrumProcessor produced output.
+        # Update _last_bars whenever the SpectrumProcessor produced output;
+        # the latest emitted bars become the carry-forward source for
+        # subsequent intervals that lack a fresh spectrum contribution.
         if spectrum_updates:
             self._last_bars = list(spectrum_updates[-1].bars or [])
 
-        # Queue other_updates (onset etc.) for the next publication.
-        self._pending_onset.extend(other_updates)
+        # Merge previously-pending "other" updates (whose intervals have not
+        # yet been published because no processor emitted an aligning
+        # interval in prior frames) with this frame's other updates.
+        merged_others = list(self._pending_onset) + other_updates
+        self._pending_onset = []
+
+        return self._publish_by_interval(
+            epoch_id=epoch_id,
+            spectrum_updates=spectrum_updates,
+            other_updates=merged_others,
+            clamp_end=None,
+        )
+
+    def _publish_by_interval(
+        self,
+        *,
+        epoch_id: str,
+        spectrum_updates: list[ProcessorUpdate],
+        other_updates: list[ProcessorUpdate],
+        clamp_end: int | None,
+    ) -> list[PublicationRecord]:
+        """Emit one PublicationRecord per exact ``(sample_start, sample_end)``
+        interval observed across ``spectrum_updates`` and ``other_updates``.
+
+        - ``spectrum_updates``: ProcessorUpdates carrying ``bars`` (the last
+          per interval wins if a processor happens to emit multiple at the
+          same interval; in practice one processor emits one per interval).
+        - ``other_updates``: ProcessorUpdates without ``bars`` (onset, future
+          loudness, etc.).  Multiple contributors at the same interval merge
+          into the same publication.
+        - ``clamp_end``: when non-None, drop intervals whose ``sample_start``
+          is at or past ``clamp_end`` (pure zero-padding at EOS) and clamp
+          each publication's ``sample_end`` to at most ``clamp_end``.  The
+          key used for grouping is the ORIGINAL, unclamped
+          ``(sample_start, sample_end)`` — clamping only affects the
+          value published, so two updates that agree on their own interval
+          before clamping still merge into the same record.
+
+        Publications are emitted in ascending ``(sample_start, sample_end)``
+        order — the "publications must not go backwards" invariant survives.
+        """
+        # Group by exact interval key.  We keep separate dicts for spectrum
+        # and others so the merge policy stays explicit rather than
+        # accidental positional pairing.
+        spectrum_by_key: dict[tuple[int, int], ProcessorUpdate] = {}
+        others_by_key: dict[tuple[int, int], list[ProcessorUpdate]] = {}
+        contributors_by_key: dict[tuple[int, int], list[str]] = {}
+        insertion_order: list[tuple[int, int]] = []
+
+        def _note_key(k: tuple[int, int]) -> None:
+            if k not in spectrum_by_key and k not in others_by_key:
+                # First sight of this interval; will be added to
+                # insertion_order once one of the dicts receives an entry.
+                pass
+            if k not in insertion_order:
+                insertion_order.append(k)
+
+        for su in spectrum_updates:
+            key = (su.sample_start, su.sample_end)
+            _note_key(key)
+            spectrum_by_key[key] = su
+            contributors_by_key.setdefault(key, [])
+            if su.processor_id not in contributors_by_key[key]:
+                contributors_by_key[key].append(su.processor_id)
+
+        for ou in other_updates:
+            key = (ou.sample_start, ou.sample_end)
+            _note_key(key)
+            others_by_key.setdefault(key, []).append(ou)
+            contributors_by_key.setdefault(key, [])
+            if ou.processor_id not in contributors_by_key[key]:
+                contributors_by_key[key].append(ou.processor_id)
+
+        # Chronological order: sort by (sample_start, sample_end) so the
+        # publication stream stays monotonic across processors with
+        # different cadences.
+        insertion_order.sort(key=lambda k: (k[0], k[1]))
 
         records: list[PublicationRecord] = []
-        n_updates = len(spectrum_updates)
-        effective_ids = tuple(contributing_ids)
+        for key in insertion_order:
+            start, end = key
+            if clamp_end is not None:
+                if clamp_end > 0 and start >= clamp_end:
+                    # Interval sits entirely in zero-padding; drop it — but
+                    # do not silently reassign its "other" updates to a
+                    # neighbouring interval.  If those updates need to
+                    # survive (they were the sole contributor here), a
+                    # future policy could re-attach them; today they are
+                    # discarded, matching the pre-refactor flush behavior.
+                    continue
+                pub_end = min(end, clamp_end) if clamp_end > 0 else end
+            else:
+                pub_end = end
 
-        if n_updates == 0:
-            # No spectrum output.  Publish a single record only if SOMETHING
-            # else contributed this frame (Beat-only, Loudness-only, etc.).
-            if not contributing_ids:
-                return records
-            onset_batch = list(self._pending_onset)
-            self._pending_onset.clear()
-            # Carry-forward bars if available; empty list otherwise.  Note:
-            # SpectrumProcessor's ID is NOT in contributing_ids in this branch.
-            bars_for_publication = list(self._last_bars) if self._last_bars else []
-            features = self._build_features(bars_for_publication, onset_batch)
-            # BLOCKER 6: use the union of the contributing ProcessorUpdates'
-            # own intervals, NOT the transport (canonical) frame interval.
-            # This preserves the semantics that each ProcessorUpdate's
-            # sample_start/sample_end is the authoritative time range for
-            # its features (e.g. an onset detected mid-frame).
-            pub_start, pub_end = _union_interval(
-                onset_batch, canonical_start, canonical_end
-            )
+            su = spectrum_by_key.get(key)
+            these_others = others_by_key.get(key, [])
+            if su is not None:
+                bars = list(su.bars or [])
+            elif self._last_bars:
+                bars = list(self._last_bars)
+            else:
+                bars = []
+
+            features = self._build_features(bars, these_others)
             record = self._publish(
                 epoch_id=epoch_id,
-                sample_start=pub_start,
+                sample_start=start,
                 sample_end=pub_end,
                 features=features,
                 effective_engine_id=self._spectrum_processor.processor_id,
-                effective_processor_ids=effective_ids,
-            )
-            records.append(record)
-            return records
-
-        prev_start = -1
-        for i, su in enumerate(spectrum_updates):
-            # Last update drains all accumulated onset; earlier updates pop one each.
-            # V2: N updates from N mag_frames — onset is 1:1 with frames.
-            # Cavacore: 0 or 1 update — drains all accumulated onset at once.
-            if i == n_updates - 1:
-                onset_batch = list(self._pending_onset)
-                self._pending_onset.clear()
-            else:
-                onset_batch = [self._pending_onset.pop(0)] if self._pending_onset else []
-
-            if prev_start >= 0 and su.sample_start < prev_start:
-                # Defensive: a processor emitted an out-of-order update
-                # (sample_start earlier than the previous publication in the
-                # same canonical call).  Log so acceptance tests catch it,
-                # but proceed rather than tearing the pipeline down.
-                log.warning(
-                    "ProcessorUpdate ordering: %s sample_start=%d < previous %d",
-                    su.processor_id, su.sample_start, prev_start,
-                )
-            prev_start = su.sample_start
-
-            features = self._build_features(su.bars or [], onset_batch)
-            record = self._publish(
-                epoch_id=epoch_id,
-                sample_start=su.sample_start,
-                sample_end=su.sample_end,
-                features=features,
-                effective_engine_id=self._spectrum_processor.processor_id,
-                effective_processor_ids=effective_ids,
+                effective_processor_ids=tuple(contributors_by_key[key]),
             )
             records.append(record)
         return records
@@ -1437,89 +1498,35 @@ class CanonicalAnalysisPipeline:
         during short gaps.  _latest_pub is only cleared on epoch transitions
         or StreamInvalidated.
 
-        Same generic composition policy as _process_canonical_frame: publish
-        when ANY processor contributes flush output; effective_processor_ids
-        contains only actual contributors.
+        Same interval-keyed composition policy as _process_canonical_frame:
+        publications are grouped by exact ``(sample_start, sample_end)``,
+        with an EOS clamp so intervals that would extend past the last real
+        source sample are trimmed (and pure-zero-padding intervals dropped).
         """
         spectrum_updates: list[ProcessorUpdate] = []
         other_updates: list[ProcessorUpdate] = []
-        contributing_ids: list[str] = []
         for proc in self._processors:
-            pus = proc.flush()
-            if pus:
-                contributing_ids.append(proc.processor_id)
-            for pu in pus:
+            for pu in proc.flush():
                 if pu.bars is not None:
                     spectrum_updates.append(pu)
                 else:
                     other_updates.append(pu)
 
-        self._pending_onset.extend(other_updates)
-
-        records: list[PublicationRecord] = []
-        n_updates = len(spectrum_updates)
         if self._current_epoch_id is None:
-            return records
+            return []
         epoch_id = self._current_epoch_id
-        effective_ids = tuple(contributing_ids)
 
-        if n_updates == 0:
-            # No spectrum flush.  Publish only if another processor produced
-            # flush output (Beat/Loudness EOS).  If nothing contributed, we
-            # emit nothing — the source has nothing new to say.
-            if not contributing_ids:
-                return records
-            onset_batch = list(self._pending_onset)
-            self._pending_onset.clear()
-            bars_for_publication = list(self._last_bars) if self._last_bars else []
-            # BLOCKER 6: prefer the ProcessorUpdate intervals themselves; only
-            # fall back to the source-end anchor when the flush updates carry
-            # no interval information.
-            pub_start, pub_end = _union_interval(
-                onset_batch, self._source_sample_end, self._source_sample_end
-            )
-            features = self._build_features(bars_for_publication, onset_batch)
-            record = self._publish(
-                epoch_id=epoch_id,
-                sample_start=pub_start,
-                sample_end=pub_end,
-                features=features,
-                effective_engine_id=self._spectrum_processor.processor_id,
-                effective_processor_ids=effective_ids,
-            )
-            records.append(record)
-            return records
+        # Merge any onset that was pending from prior canonical frames so
+        # nothing is silently dropped at EOS.
+        merged_others = list(self._pending_onset) + other_updates
+        self._pending_onset = []
 
-        for i, su in enumerate(spectrum_updates):
-            if i == n_updates - 1:
-                onset_batch = list(self._pending_onset)
-                self._pending_onset.clear()
-            else:
-                onset_batch = [self._pending_onset.pop(0)] if self._pending_onset else []
-            # Clamp sample_end to the last real source sample (not zero-padded STFT extent).
-            pub_sample_end = (
-                min(su.sample_end, self._source_sample_end)
-                if self._source_sample_end > 0
-                else su.sample_end
-            )
-            # If the flush-record's sample_start is past the real source end,
-            # the block is pure zero-padding — drop it.
-            if (
-                self._source_sample_end > 0
-                and su.sample_start >= self._source_sample_end
-            ):
-                continue
-            features = self._build_features(su.bars or [], onset_batch)
-            record = self._publish(
-                epoch_id=epoch_id,
-                sample_start=su.sample_start,
-                sample_end=pub_sample_end,
-                features=features,
-                effective_engine_id=self._spectrum_processor.processor_id,
-                effective_processor_ids=effective_ids,
-            )
-            records.append(record)
-        return records
+        return self._publish_by_interval(
+            epoch_id=epoch_id,
+            spectrum_updates=spectrum_updates,
+            other_updates=merged_others,
+            clamp_end=self._source_sample_end,
+        )
 
     # ------------------------------------------------------------------
     # Synchronous interface — acceptance script / testing only
@@ -1767,27 +1774,6 @@ class PcmAudioPipelineV2:
 # ---------------------------------------------------------------------------
 # Helpers shared by CavaPipeline and ColourModeEffect
 # ---------------------------------------------------------------------------
-
-
-def _union_interval(
-    updates: list[ProcessorUpdate],
-    default_start: int,
-    default_end: int,
-) -> tuple[int, int]:
-    """Return the (min sample_start, max sample_end) across ProcessorUpdates.
-
-    BLOCKER 6: publication intervals must derive from the ProcessorUpdates
-    themselves — the transport (canonical) frame interval is a fallback used
-    only when no updates carry provenance (e.g. no contributor produced any
-    output this frame).  This lets Beat-only and Loudness-only publications
-    preserve their true feature intervals instead of inheriting the wider
-    transport window.
-    """
-    if not updates:
-        return default_start, default_end
-    starts = [u.sample_start for u in updates]
-    ends = [u.sample_end for u in updates]
-    return min(starts), max(ends)
 
 
 def _band_average(frame: bytes, start: float, end: float) -> float:
@@ -2927,20 +2913,23 @@ class SyncEngine:
         """Transactionally replace the running analyser.
 
         Contract (real transaction — either the new analyser is running and
-        installed, or the old one is running and still installed):
+        installed, or the runtime is in an explicit deactivated state):
 
-        1. Stop the old analyser (bounded 2 s timeout).  A timeout aborts the
-           replacement without touching the candidate — the caller must close
-           the candidate.
+        1. Stop the old analyser (bounded 2 s timeout).
         2. Attempt candidate.start().
         3. On success: commit ``self._analyser = candidate``.
-        4. On failure: close the candidate (exactly once), then attempt to
-           restart the old analyser so the runtime keeps producing frames.
-           If ``rebuild_old`` is supplied, it is used to construct a fresh
-           equivalent when the previously-stopped analyser cannot be resumed
-           (processors already closed by stop()).  If restart still fails,
-           ``self._analyser`` is left pointing at the (dead) old analyser and
-           the exception is re-raised — the caller must deactivate.
+        4. On old-stop timeout OR candidate-start failure:
+           - Close the (unused) candidate exactly once via its idempotent
+             stop().  The candidate must not leak.
+           - Do NOT close the old analyser's processors ourselves — the old
+             worker is still running (in the timeout case) or has already
+             closed them (in the clean-stop-then-start-failed case).
+           - If ``rebuild_old`` is supplied, construct a fresh equivalent
+             and start it; commit that as ``self._analyser``.
+           - Otherwise, install a ``_DeactivatedPipeline`` sentinel so
+             ``self._analyser`` never points at a dead reference (BLOCKER 3
+             audit requirement: "no runtime pointing at dead analyser").
+           - Re-raise a descriptive ``RuntimeError``.
 
         Note: ``self._analyser`` is NEVER assigned to the candidate before
         ``candidate.start()`` returns successfully.  This is the invariant
@@ -2949,16 +2938,59 @@ class SyncEngine:
         old = self._analyser
         clean_stop = old.stop()
         if not clean_stop:
-            # Old worker did not exit within the 2 s timeout — do NOT commit
-            # anything and do NOT close the candidate for the caller.  The
-            # runtime is left with the old analyser as ``self._analyser``
-            # (BLOCKER 3, Problem C): once the worker eventually exits its
-            # finally block closes the OLD processors, and the caller can
-            # attempt another replacement at that point.  The caller owns
-            # the candidate it constructed and is responsible for closing it.
+            # BLOCKER 3, timeout branch: the old worker did not exit within
+            # its 2 s stop timeout.  It is still running and OWNS its
+            # processors — the old worker's finally block will close them
+            # exactly once when it eventually exits, so we MUST NOT touch
+            # them from here (audit requirement: "OLD PROCESSOR NOT CLOSED
+            # EARLY").  What we must do here:
+            #
+            #   a) Close the (unused) candidate exactly once so it does
+            #      not leak native resources (audit requirement: "TIMEOUT
+            #      CANDIDATE CLOSED EXACTLY ONCE").  Its stop() is
+            #      idempotent thanks to the ``_processors_closed`` guard.
+            try:
+                new_analyser.stop()
+            except Exception:  # noqa: BLE001 — best-effort cleanup
+                log.exception(
+                    "replace_analyser: candidate.stop() raised during timeout rollback"
+                )
+            #   b) Transition ``self._analyser`` to a usable or explicit
+            #      deactivated state — the audit forbids leaving the
+            #      runtime pointing at the timed-out old pipeline.
+            restored = False
+            if rebuild_old is not None:
+                rebuilt: AudioPipeline | None = None
+                try:
+                    rebuilt = rebuild_old()
+                    rebuilt.start()
+                    self._analyser = rebuilt
+                    restored = True
+                except Exception:  # noqa: BLE001 — best-effort restore
+                    log.exception(
+                        "replace_analyser: rebuild_old() failed after old-stop timeout"
+                    )
+                    if rebuilt is not None:
+                        try:
+                            rebuilt.stop()
+                        except Exception:  # noqa: BLE001
+                            log.exception(
+                                "replace_analyser: failed rebuilt.stop() during timeout rollback"
+                            )
+            if not restored:
+                # Explicit deactivated state — a sentinel pipeline that
+                # never produces frames, so ``self._analyser`` is
+                # consistent and callers observe the failure via
+                # latest()==None rather than by dereferencing a dying
+                # object.
+                self._analyser = _DeactivatedPipeline()
+                log.error(
+                    "replace_analyser: old analyser stop timed out and rebuild "
+                    "unavailable; runtime installed a deactivated sentinel"
+                )
             raise RuntimeError(
                 "Old analyser worker did not stop within the 2s timeout; "
-                "replacement aborted — old pipeline remains owner."
+                f"{'old analyser rebuilt' if restored else 'runtime deactivated'}"
             )
 
         # Old has stopped cleanly and has closed its processors (H1 protocol).
@@ -2998,16 +3030,20 @@ class SyncEngine:
                                 "replace_analyser: failed rebuild candidate stop() raised"
                             )
             if not restored:
-                # Leave self._analyser pointing at the dead old analyser so
-                # subsequent teardown paths are consistent.  Caller must
-                # deactivate.
+                # Install the deactivated sentinel so ``self._analyser``
+                # is not left pointing at the already-stopped old
+                # pipeline (whose processors were closed by its own
+                # clean stop() above).  The audit prohibits leaving a
+                # dead reference in place — callers see the failure via
+                # latest()==None on the sentinel.
+                self._analyser = _DeactivatedPipeline()
                 log.error(
                     "replace_analyser: candidate failed to start and old cannot "
-                    "be resumed; runtime is degraded"
+                    "be resumed; runtime installed a deactivated sentinel"
                 )
             raise RuntimeError(
                 f"Candidate analyser failed to start: {start_exc}; "
-                f"{'old analyser restored' if restored else 'runtime degraded'}"
+                f"{'old analyser restored' if restored else 'runtime deactivated'}"
             ) from start_exc
 
         # SUCCESS: only now commit the reference.

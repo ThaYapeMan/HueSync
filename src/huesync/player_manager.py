@@ -809,27 +809,42 @@ class PlayerManager:
         Re-reads the profile from storage so that frequency-cutoff changes
         saved via PATCH /api/profiles/{id} take effect.  Squeezelite keeps
         running and the Hue Entertainment session stays open throughout.
+
+        Transactional contract (BLOCKER 4): a failed ``_start_cava`` MUST
+        NOT leave the runtime with a mutated ``session.profile`` and no
+        cava process.  On failure we restore ``session.profile`` /
+        ``session.coupling`` / the sync engine's profile to the pre-call
+        snapshot and attempt to relaunch cava with the old profile; if
+        that relaunch also fails, ``session.cava`` is left ``None`` as an
+        explicit inactive-cava state (the caller then rolls back persisted
+        storage so the three views — storage, session, runtime — agree).
         """
         if self._active is None:
             raise RuntimeError("No active session")
         session = self._active
 
-        if session.coupling:
-            # Reload coupling from storage so any FK changes (e.g. analyser_id
-            # swapped via PATCH) are reflected when rebuilding the profile.
-            fresh = self.storage.get_coupling(session.coupling.id)
-            if fresh is None:
-                raise RuntimeError("Active coupling has been deleted from storage")
-            session.coupling = fresh
-            profile = _build_engine_profile(fresh, self.storage)
-            if profile is None:
-                raise RuntimeError("Active coupling has broken FK references")
-        else:
+        if not session.coupling:
             raise RuntimeError("No active coupling — cannot restart cava")
-        session.profile = profile
-        if session.sync_engine is not None:
-            session.sync_engine.update_profile(profile)
 
+        # Reload coupling from storage so any FK changes (e.g. analyser_id
+        # swapped via PATCH) are reflected when rebuilding the profile.
+        fresh = self.storage.get_coupling(session.coupling.id)
+        if fresh is None:
+            raise RuntimeError("Active coupling has been deleted from storage")
+        profile = _build_engine_profile(fresh, self.storage)
+        if profile is None:
+            raise RuntimeError("Active coupling has broken FK references")
+
+        # Snapshot the pre-call runtime state.  These references stay live
+        # until we either commit the new profile (success path) or roll
+        # back (failure path).
+        old_profile = session.profile
+        old_coupling = session.coupling
+
+        # Tear down the old cava process now — we need the FIFO free
+        # before starting a new writer.  session.cava is set to None
+        # immediately so a partial failure below never leaves us pointing
+        # at a terminated process.
         if session.cava and session.cava.poll() is None:
             session.cava.terminate()
             try:
@@ -838,7 +853,44 @@ class PlayerManager:
                 session.cava.kill()
         session.cava = None
 
-        self._start_cava(session, profile)
+        # Tentatively commit the new profile.
+        session.coupling = fresh
+        session.profile = profile
+        if session.sync_engine is not None:
+            session.sync_engine.update_profile(profile)
+
+        try:
+            self._start_cava(session, profile)
+        except Exception:
+            log.exception(
+                "restart_cava: _start_cava(new profile=%s) failed — rolling back",
+                profile.name,
+            )
+            # BLOCKER 4: restore the pre-call snapshot so session/runtime
+            # match what the caller is about to roll storage back to.
+            session.coupling = old_coupling
+            session.profile = old_profile
+            if session.sync_engine is not None:
+                try:
+                    session.sync_engine.update_profile(old_profile)
+                except Exception:  # noqa: BLE001 — best-effort rollback
+                    log.exception("restart_cava: rollback update_profile raised")
+            # Best-effort restore of a usable cava process.  If this also
+            # fails, session.cava stays None — an EXPLICIT inactive-cava
+            # state (session.cava is None; downstream visibility via
+            # normal cava.poll() checks).  The caller (api.py) rolls
+            # persisted storage back so all three views agree.
+            try:
+                self._start_cava(session, old_profile)
+            except Exception:  # noqa: BLE001 — best-effort restore
+                log.exception(
+                    "restart_cava: rollback _start_cava(old profile) failed — "
+                    "session has no cava process, runtime is in explicit "
+                    "inactive-cava state"
+                )
+                session.cava = None
+            raise
+
         log.info("cava restarted for profile %s", profile.name)
 
     def update_onset_pipeline(self, profile: Profile) -> None:

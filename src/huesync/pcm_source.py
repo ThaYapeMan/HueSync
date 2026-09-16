@@ -925,6 +925,17 @@ class SqueezeliteShmStereoSource:
         # abi_version is not equal to SHM_ABI_VERSION.  Subsequent reads
         # short-circuit to StreamInvalidated so the caller can rebuild.
         self._unsupported_abi: bool = False
+        # Recorded from open() so post-open remaps enforce the same policy
+        # the caller originally opted into.  Under ``require_v1=True`` the
+        # reader must NEVER fall back to the v0 read path — the audit
+        # (BLOCKER 2) called out that pre-fix behaviour explicitly.
+        self._require_v1: bool = True
+        # PENDING_REMAP state: set when a segment replacement was detected
+        # but the new inode could not yet be fully validated (file absent,
+        # write_seq still odd, or the v1-sized mmap not yet available).
+        # Read() then returns StreamInvalidated and retries the remap on
+        # every subsequent read cycle until the new segment stabilises.
+        self._pending_remap: bool = False
 
     def open(
         self,
@@ -948,6 +959,7 @@ class SqueezeliteShmStereoSource:
         """
         path = _path if _path is not None else Path(f"/dev/shm/squeezelite-{mac}")
         self._path = path
+        self._require_v1 = require_v1
         fd = path.open("rb")
         try:
             # Try v1 size first; fall back to v0 if file is smaller.
@@ -1090,23 +1102,34 @@ class SqueezeliteShmStereoSource:
         return (st.st_dev, st.st_ino) != self._shm_dev_ino
 
     def _remap_after_replacement(self) -> bool:
-        """Unmap the old (orphaned) segment and re-map the new one at ``self._path``.
+        """Attempt to adopt the replacement SHM segment at ``self._path``.
 
         BLOCKER 2: detecting a replacement is not enough — we must actually
         release the stale mapping and adopt the new inode, otherwise the
-        reader keeps returning old PCM forever.
+        reader keeps returning old PCM forever.  And when the new segment
+        is only *partially* present (file absent, v1-sized mmap not yet
+        possible, or ``write_seq`` still odd because the producer is
+        mid-init) the reader must stay in a PENDING_REMAP state and retry
+        on each subsequent read cycle — falling back to ``_read_v0()``
+        under ``require_v1=True`` would silently deliver misinterpreted
+        header bytes as PCM.
 
-        Returns True when the new segment is fully mapped, validated and
-        the reader is ready to consume PCM from it.  Returns False when the
-        new file is temporarily absent or its v1 extension block is still
-        in the initialization-in-progress state (write_seq odd); the caller
-        should propagate a StreamInvalidated for this read and retry on the
-        next read cycle without keeping the old mapping live.
+        Returns True only when a fully-validated mapping is in place and
+        the reader is ready to consume PCM from it.  Returns False when
+        remap is incomplete: ``self._pending_remap`` is True so the next
+        read() call retries, and the old mapping has already been released
+        (so we cannot accidentally continue serving stale PCM).  When the
+        replacement carries an unsupported ABI version this method returns
+        False permanently — ``self._unsupported_abi`` is set and no amount
+        of retrying will change the outcome.
         """
         if self._path is None:
+            self._pending_remap = True
             return False
-        # Release the old mmap immediately; the writer's new inode is
-        # unrelated to the fd/mmap pair we are currently holding.
+
+        # Release the old mmap.  The writer's new inode is unrelated to
+        # the fd/mmap pair we are currently holding, and a subsequent read
+        # from the stale mapping would return the pre-replacement audio.
         if self._mm is not None:
             try:
                 self._mm.close()
@@ -1124,47 +1147,89 @@ class SqueezeliteShmStereoSource:
         self._prev_rate = 0
         self._prev_updated = 0
         self._abi_version = 0
+        # _shm_dev_ino stays None until the new inode is fully validated —
+        # a half-mapped segment is not a legitimate "current" inode.
         self._shm_dev_ino = None
 
         try:
             fd = self._path.open("rb")
         except OSError:
+            # Producer has unlinked the segment but not yet recreated it.
+            # Enter PENDING_REMAP and retry on the next read cycle.
+            self._pending_remap = True
             return False
         try:
             try:
                 self._mm = mmap.mmap(fd.fileno(), _MMAP_SIZE_V1, access=mmap.ACCESS_READ)
             except (ValueError, OSError):
+                # v1-sized mmap failed (file smaller than v1 layout).
+                # If the caller requires v1 this is not usable yet — keep
+                # retrying rather than mapping the smaller v0 window,
+                # because bytes at the v0 buffer offset (80) would be
+                # interpreted as PCM but actually live inside the v1
+                # extension block on a real v1 segment.
+                if self._require_v1:
+                    self._pending_remap = True
+                    return False
+                # require_v1=False: v0 fallback is acceptable.
                 try:
                     self._mm = mmap.mmap(fd.fileno(), _MMAP_SIZE, access=mmap.ACCESS_READ)
                 except (ValueError, OSError):
+                    self._pending_remap = True
                     return False
             try:
                 st = os.fstat(fd.fileno())
-                self._shm_dev_ino = (st.st_dev, st.st_ino)
+                new_dev_ino: tuple[int, int] | None = (st.st_dev, st.st_ino)
             except OSError:
-                self._shm_dev_ino = None
+                new_dev_ino = None
         finally:
             fd.close()
 
-        # Revalidate the v1 extension: magic + exact abi_version + writer not
-        # currently mid-initialisation (write_seq must be even; a coherent
-        # read enforces this).
-        ext = self._read_ext_coherent()
-        if ext is None or ext.magic != SHM_ABI_V1_MAGIC:
-            # No v1 producer active on the replacement segment.  Keep the
-            # mapping (so a later read may still succeed) but mark ABI as
-            # v0 fallback and clear generation state.
+        # Peek at the raw extension header BEFORE running the seqlock
+        # coherent-read loop.  This lets us distinguish (v0 legacy, no
+        # magic), (v1 with future ABI version), and (v1 with matching ABI
+        # but writer mid-init) — three cases that need three different
+        # policies.
+        peek = self._read_ext_header()
+        if peek is None or peek.magic != SHM_ABI_V1_MAGIC:
+            # No v1 magic on the replacement segment.
+            if self._require_v1:
+                # Do NOT accept a legacy v0 segment when v1 was required.
+                # The producer may still be finishing its v1 init; keep
+                # retrying rather than silently serving v0 header bytes
+                # from the PCM path.
+                self._pending_remap = True
+                return False
+            # require_v1=False: accept v0 fallback.
+            self._shm_dev_ino = new_dev_ino
+            self._pending_remap = False
             self._abi_version = 0
+            _, buf_index, running, rate, updated = self._read_header()
+            self._prev_index = buf_index
+            self._prev_running = running
+            self._prev_rate = rate
+            self._prev_updated = updated
             return True
-        if ext.abi_version != SHM_ABI_VERSION:
-            # Unsupported ABI on the new segment.  Mark and let subsequent
-            # reads surface as StreamInvalidated via the unsupported_abi
-            # short-circuit.
+        if peek.abi_version != SHM_ABI_VERSION:
+            # Future producer's layout — cannot be interpreted safely.
+            # This is permanent (retrying will not change the ABI); mark
+            # unsupported so read() short-circuits to StreamInvalidated on
+            # every subsequent call and NEVER falls through to _read_v0.
             self._unsupported_abi = True
-            self._abi_version = 0
-            return True
-        # Fresh generation is established from the new object; subsequent
-        # reads compute delta_frames against this baseline.
+            self._pending_remap = False
+            self._shm_dev_ino = new_dev_ino
+            return False
+        # Magic + abi_version match; require a coherent snapshot (writer
+        # must not be mid-init).  If write_seq stays persistently odd
+        # (initialization has not completed), stay in PENDING_REMAP.
+        ext = self._read_ext_coherent()
+        if ext is None:
+            self._pending_remap = True
+            return False
+
+        # Full validation succeeded — adopt the new mapping.
+        self._shm_dev_ino = new_dev_ino
+        self._pending_remap = False
         self._abi_version = ext.abi_version
         self._prev_generation = ext.generation
         self._abs_write_pos_frames = ext.abs_write_pos
@@ -1447,26 +1512,47 @@ class SqueezeliteShmStereoSource:
         is present (the production default) the read is coherent under a
         seqlock and stream continuity is authoritative rather than heuristic.
         """
-        # If open() detected an unsupported v1 ABI version and the caller
-        # elected to continue anyway (require_v1=False), every subsequent
-        # read must surface as an invalidation — there is no safe fallback.
+        # If open() or a previous remap detected an unsupported v1 ABI
+        # version, every subsequent read surfaces as an invalidation —
+        # there is no safe fallback.
         if self._unsupported_abi:
             return StreamInvalidated(
                 cause=InvalidationCause.UNKNOWN, known_lost_samples=None
             )
-        # Detect SHM segment replacement: squeezelite's post-restart segment
-        # has a different inode at the same path.  Our mmap still maps the
-        # old (unlinked) file, so continuing to read it would silently return
-        # stale data.  Release the orphaned mapping, remap the new inode
-        # under the same path, and surface a StreamInvalidated for this read
-        # so the caller enters a fresh epoch on the next cycle.
-        if self._detect_shm_replacement():
+        # SHM replacement handling.  Two entry points:
+        #   1. ``_pending_remap`` — a previous read cycle detected the
+        #      replacement but could not fully validate the new inode (file
+        #      absent, write_seq odd, etc.).  Retry on every read until
+        #      validation succeeds.
+        #   2. ``_detect_shm_replacement`` — first-time observation of a
+        #      new inode at the same path.
+        # In either case, do NOT fall through to ``_read_v0()`` under
+        # ``require_v1=True``.  A half-validated segment interpreted as v0
+        # would surface v1 header bytes at offset 80 as PCM.
+        if self._pending_remap or self._detect_shm_replacement():
             self._remap_after_replacement()
+            if (
+                self._pending_remap
+                or self._unsupported_abi
+                or (self._require_v1 and self._abi_version < 1)
+            ):
+                return StreamInvalidated(
+                    cause=InvalidationCause.UNKNOWN, known_lost_samples=None
+                )
+            # Successful remap: surface one StreamInvalidated so callers
+            # enter a fresh epoch, then serve PCM on the next cycle.
             return StreamInvalidated(
                 cause=InvalidationCause.UNKNOWN, known_lost_samples=None
             )
         if self._abi_version >= 1:
             return self._read_v1()
+        if self._require_v1:
+            # Defensive: reaching here would mean a v0 mapping is live but
+            # v1 was required — treat as invalidation rather than serve
+            # v0 heuristic PCM.
+            return StreamInvalidated(
+                cause=InvalidationCause.UNKNOWN, known_lost_samples=None
+            )
         return self._read_v0()
 
 

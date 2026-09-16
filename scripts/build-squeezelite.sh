@@ -9,7 +9,10 @@
 #      source tree.
 #   3. Apply squeezelite/output_vis_v1.patch to hook the v1 producer into
 #      output_vis.c and the build.
-#   4. Compile.
+#   4. Compile with -DVISEXPORT (always enabled — this is why HueSync
+#      rebuilds squeezelite in the first place), asserting that the
+#      producer objects (output_vis.o, output_vis_v1.o) are part of the
+#      build plan before linking.
 #   5. Install to $INSTALL_DIR (default: /usr/local/bin).
 #
 # The script is idempotent: re-running it wipes the previous checkout and
@@ -118,12 +121,54 @@ fi
 # ---------------------------------------------------------------------------
 # [4] Build
 # ---------------------------------------------------------------------------
-echo "[4/5] Building squeezelite..."
+#
+# The upstream Makefile only compiles the visualiser producer sources
+# (output_vis.c, output_vis_v1.c) when OPTS contains ``-DVISEXPORT``.
+# Without that macro the HueSync SHM producer is silently omitted from
+# the binary and consumers never see a v1 segment.  Because -DVISEXPORT
+# is HueSync's ENTIRE reason to rebuild squeezelite, we always inject it
+# into OPTS and refuse to install a binary that lacks the producer.
+#
+# Callers can still extend OPTS via the environment (e.g.
+# ``OPTS="-DNO_FAAD"``); we splice -DVISEXPORT in as well.
+echo "[4/5] Building squeezelite (with -DVISEXPORT)..."
+EXTRA_OPTS="${OPTS:-}"
+case " $EXTRA_OPTS " in
+    *" -DVISEXPORT "*) : ;;
+    *) EXTRA_OPTS="${EXTRA_OPTS:+$EXTRA_OPTS }-DVISEXPORT" ;;
+esac
 (
     cd "$BUILD_DIR/squeezelite"
-    # OPTS lets the caller trim features (e.g. -DNO_FAAD).  Default matches
-    # the upstream release build.
-    make -j"$(nproc)" ${OPTS:+"OPTS=$OPTS"}
+    # Wipe any prior objects so this build's compile lines are what the
+    # inspection step below actually sees.
+    make -s clean >/dev/null 2>&1 || true
+    # ``make -n`` prints the commands make would run, without running
+    # them.  We capture that trace and assert the two producer objects
+    # are compiled and linked in — a build that silently omitted them
+    # would still succeed today, and that is exactly the regression this
+    # script now catches.
+    make -n -j1 OPTS="$EXTRA_OPTS" > /tmp/huesync-squeezelite-plan.txt
+    if ! grep -qE '(^| )output_vis\.o( |$)' /tmp/huesync-squeezelite-plan.txt; then
+        echo "error: build plan does not include output_vis.o — visualiser producer missing" >&2
+        echo "       (is -DVISEXPORT reaching the upstream Makefile?)" >&2
+        exit 1
+    fi
+    if ! grep -qE '(^| )output_vis_v1\.o( |$)' /tmp/huesync-squeezelite-plan.txt; then
+        echo "error: build plan does not include output_vis_v1.o — HueSync v1 producer missing" >&2
+        exit 1
+    fi
+
+    make -j"$(nproc)" OPTS="$EXTRA_OPTS"
+
+    # Post-build sanity: the object files must actually exist on disk.
+    if [[ ! -f output_vis.o ]]; then
+        echo "error: output_vis.o was not produced by the build" >&2
+        exit 1
+    fi
+    if [[ ! -f output_vis_v1.o ]]; then
+        echo "error: output_vis_v1.o was not produced by the build" >&2
+        exit 1
+    fi
 )
 
 # ---------------------------------------------------------------------------
