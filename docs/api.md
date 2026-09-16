@@ -44,3 +44,11 @@ analysis contract used by acceptance. Sequence orders delivery; sample intervals
 event time and may be older for delayed processors. Historical bars have explicit
 carried_spectrum_interval provenance and are not fresh contributor IDs. `/ws/preview`
 is a live preview, not a lossless analysis event log.
+
+## Current terminology only
+
+Use `/api/effects` and `/api/energy-profiles`. Retired entity-name routes are removed;
+request schemas reject unknown fields rather than silently discarding them. The
+WebSocket status payload uses `effect_type` (the same field consumed by the current
+frontend). Publication records use `effective_spectrum_backend` for actual Spectrum
+identity. Persisted history is migrated by the installer, never by HTTP aliases.

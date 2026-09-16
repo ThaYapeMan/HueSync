@@ -3,6 +3,8 @@
 import tempfile
 from pathlib import Path
 
+import pytest
+
 from huesync.models import (
     Analyser,
     Controller,
@@ -48,11 +50,11 @@ def test_controller_from_dict_defaults_type_to_hue():
     assert c.type == ControllerType.HUE
 
 
-def test_controller_from_dict_strips_unknown_keys():
+def test_controller_from_dict_rejects_unknown_keys():
     d = Controller(name="test").to_dict()
     d["future_field"] = "ignored"
-    c = Controller.from_dict(d)
-    assert not hasattr(c, "future_field")
+    with pytest.raises(TypeError):
+        Controller.from_dict(d)
 
 
 # ---------------------------------------------------------------------------
@@ -72,15 +74,15 @@ def test_player_roundtrip():
     assert p2.alsa_device == p.alsa_device
 
 
-def test_player_from_dict_strips_unknown_keys():
+def test_player_from_dict_rejects_unknown_keys():
     d = VirtualPlayer().to_dict()
     d["legacy"] = "gone"
-    p = VirtualPlayer.from_dict(d)
-    assert not hasattr(p, "legacy")
+    with pytest.raises(TypeError):
+        VirtualPlayer.from_dict(d)
 
 
 # ---------------------------------------------------------------------------
-# Zone round-trip (was LightProvider)
+# Zone round-trip
 # ---------------------------------------------------------------------------
 
 
@@ -111,11 +113,11 @@ def test_analyser_roundtrip():
     assert ac2.bars == 48
 
 
-def test_analyser_from_dict_strips_unknown_keys():
+def test_analyser_from_dict_rejects_unknown_keys():
     d = Analyser().to_dict()
     d["future_param"] = 42
-    ac = Analyser.from_dict(d)
-    assert not hasattr(ac, "future_param")
+    with pytest.raises(TypeError):
+        Analyser.from_dict(d)
 
 
 # ---------------------------------------------------------------------------
@@ -134,11 +136,6 @@ def test_scene_roundtrip():
     assert e2.exertion_clip == 4.0
 
 
-def test_scene_bad_color_mode_falls_back():
-    d = Effect().to_dict()
-    d["color_mode"] = "bass_brightness"  # legacy value — should migrate to spectrum_rgb
-    e = Effect.from_dict(d)
-    assert e.effect_type == "spectrum_rgb"
 
 
 # ---------------------------------------------------------------------------
@@ -146,7 +143,7 @@ def test_scene_bad_color_mode_falls_back():
 # ---------------------------------------------------------------------------
 
 
-def test_crossfader_roundtrip():
+def test_energy_profile_roundtrip():
     cf = EnergyProfile(name="My CF", high_energy_effect_id="sc-1",
                     low_energy_effect_id="sc-2", blend_start=0.2,
                     blend_end=0.8, blend_response=0.05)
@@ -175,28 +172,8 @@ def test_coupling_roundtrip():
     assert c2.enabled is False
 
 
-def test_coupling_backward_compat_light_provider_id():
-    """Old dicts with light_provider_id are automatically remapped to zone_id."""
-    d = {
-        "id": "c-1", "name": "Test", "player_id": "p1",
-        "analyser_id": "ac1", "light_provider_id": "lp1",
-        "energy_profile_id": "cf1", "enabled": True,
-    }
-    c = Coupling.from_dict(d)
-    assert c.zone_id == "lp1"
-    assert not hasattr(c, "light_provider_id")
 
 
-def test_coupling_backward_compat_analysis_config_id():
-    """Old dicts with analysis_config_id are automatically remapped to analyser_id."""
-    d = {
-        "id": "c-1", "name": "Test", "player_id": "p1",
-        "analysis_config_id": "ac1", "zone_id": "z1",
-        "energy_profile_id": "cf1", "enabled": True,
-    }
-    c = Coupling.from_dict(d)
-    assert c.analyser_id == "ac1"
-    assert not hasattr(c, "analysis_config_id")
 
 
 # ---------------------------------------------------------------------------
@@ -261,7 +238,7 @@ def test_storage_delete_player():
 
 
 # ---------------------------------------------------------------------------
-# Storage CRUD — Zone (was LightProvider)
+# Storage CRUD — Zone
 # ---------------------------------------------------------------------------
 
 
@@ -333,7 +310,7 @@ def test_storage_delete_scene():
 # ---------------------------------------------------------------------------
 
 
-def test_storage_save_and_get_crossfader():
+def test_storage_save_and_get_energy_profile():
     s = make_storage()
     cf = EnergyProfile(name="CF", high_energy_effect_id="sc-1", blend_start=0.2)
     s.save_energy_profile(cf)
@@ -343,7 +320,7 @@ def test_storage_save_and_get_crossfader():
     assert fetched.blend_start == 0.2
 
 
-def test_storage_delete_crossfader():
+def test_storage_delete_energy_profile():
     s = make_storage()
     cf = EnergyProfile()
     s.save_energy_profile(cf)
@@ -391,57 +368,8 @@ def test_storage_active_coupling_id_roundtrip():
 # ---------------------------------------------------------------------------
 
 
-def test_storage_backfills_new_collections_on_old_file():
-    """A config.json written before Phase 2 gains the new keys on read."""
-    import json
-
-    d = tempfile.mkdtemp()
-    path = Path(d) / "config.json"
-    # Write an old-style config with no Phase-2 keys.
-    path.write_text(json.dumps({
-        "player_latencies": [],
-        "active_profile_id": None,
-    }))
-    s = Storage(path)
-    # Must not raise; new collections must be empty lists / None.
-    assert s.list_controllers() == []
-    assert s.list_virtual_players() == []
-    assert s.list_couplings() == []
-    assert s.get_active_coupling_id() is None
 
 
-def test_storage_backfill_migrates_players_key_to_virtual_players():
-    """Old config with 'players' key is transparently migrated to 'virtual_players'.
-
-    Legacy 'name' field is silently dropped; other fields are preserved.
-    """
-    import json
-
-    d = tempfile.mkdtemp()
-    path = Path(d) / "config.json"
-    path.write_text(json.dumps({
-        "players": [
-            {
-                "id": "p-1",
-                "name": "Old Player",
-                "lms_host": "10.0.0.1",
-                "lms_port": 9000,
-                "player_name": "HueSync",
-                "player_mac": "aa:bb:cc:dd:ee:ff",
-                "alsa_device": "",
-            }
-        ],
-        "player_latencies": [],
-        "active_profile_id": None,
-    }))
-    s = Storage(path)
-    players = s.list_virtual_players()
-    assert len(players) == 1
-    assert players[0].id == "p-1"
-    assert players[0].lms_host == "10.0.0.1"
-    assert players[0].player_mac == "aa:bb:cc:dd:ee:ff"
-    assert not hasattr(players[0], "name")
-    assert players[0].player_mac == "aa:bb:cc:dd:ee:ff"
 
 
 # ---------------------------------------------------------------------------

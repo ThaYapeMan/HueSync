@@ -24,12 +24,7 @@ export const BARS_SOURCE_OPTIONS = [
 
 // Canonical list of colour modes — kept as deprecated alias.
 // New code should use EFFECTS instead.
-export const COLOUR_MODES = [
-  { value: 'spectrum_rgb', label: 'Spectrum RGB' },
-  { value: 'mono_pulse',   label: 'Mono Pulse' },
-] as const
 
-export type ColourMode = typeof COLOUR_MODES[number]['value']
 
 // Canonical list of effects.  Keep in sync with EFFECT_IDS in models.py.
 export const EFFECTS = [

@@ -45,3 +45,9 @@ SHM v1 and the pinned producer build; do not fall back to legacy mono/v0 semanti
 See [deployment-lxc.md](docs/deployment-lxc.md) before deployment. The dev environment
 may have Python/toolchains; inspect it rather than assuming it lacks them.
 Native runtime/performance claims require target evidence, not green stub tests.
+
+The repository installer (`scripts/install-huesync.sh`) owns standard deployment,
+dependencies, builds and explicit persisted-schema migration. Current runtime accepts
+schema version 1 only; historical conversions belong exclusively to migration code.
+See [cutover inventory](docs/compatibility-cutover.md). Never add runtime fallbacks
+for historical entity names or regenerate tracked commit constants.

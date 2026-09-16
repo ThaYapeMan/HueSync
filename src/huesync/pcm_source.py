@@ -48,13 +48,8 @@ _log = logging.getLogger(__name__)
 class PcmSource(Protocol):
     """Source-agnostic interface for raw PCM audio streams.
 
-    Any audio source (squeezelite SHM, AirPlay named pipe, Roon, etc.)
-    implements this interface. PcmAudioPipeline (sync_engine.py) operates
-    exclusively on PcmSource and never on source-type-specific details.
-
-    Adding a new VirtualPlayer type requires only a new PcmSource adapter;
-    PcmAudioPipeline itself never changes. See CLAUDE.md for the full
-    extension pattern.
+    Mono PCM tap contract for the intentionally supported external CAVA/FIFO
+    route. Canonical ingress uses SourceReadResult and decoded stereo frames.
     """
 
     def open(self) -> None: ...
@@ -804,87 +799,6 @@ AIRPLAY_BYTES_PER_FRAME: int = AIRPLAY_CHANNELS * AIRPLAY_SAMPLE_WIDTH  # 4
 _AIRPLAY_STALE_S: float = 2.0
 
 
-class AirPlayPipeSource:
-    """Reads raw PCM from shairport-sync's named pipe.
-
-    Implements PcmSource. shairport-sync writes S16_LE stereo at 44100 Hz
-    to AIRPLAY_PIPE; this class converts it to mono float32 using the same
-    L+R average as SqueezeliteShmSource.
-
-    The pipe is opened non-blocking so open() never stalls waiting for
-    shairport-sync to connect. read_new() returns an empty array (EAGAIN)
-    when shairport-sync has not yet started streaming.
-
-    running returns True when audio data was received within the last
-    _AIRPLAY_STALE_S seconds, enabling the UI to distinguish "waiting for
-    AirPlay connection" from "receiving audio".
-    """
-
-    def __init__(self, path: Path = AIRPLAY_PIPE) -> None:
-        self._path = path
-        self._fd: int | None = None
-        self._last_data_t: float | None = None
-        self._remainder: bytes = b""
-
-    def open(self) -> None:
-        """Open the pipe non-blocking. Raises OSError if it does not exist."""
-        self._fd = os.open(self._path, os.O_RDONLY | os.O_NONBLOCK)
-        self._last_data_t = None
-        self._remainder = b""
-
-    def close(self) -> None:
-        if self._fd is not None:
-            try:
-                os.close(self._fd)
-            except OSError:
-                pass
-            self._fd = None
-
-    @property
-    def sample_rate(self) -> int:
-        return AIRPLAY_SAMPLE_RATE
-
-    @property
-    def running(self) -> bool:
-        if self._last_data_t is None:
-            return False
-        return time.monotonic() - self._last_data_t < _AIRPLAY_STALE_S
-
-    def read_new(self) -> np.ndarray:
-        """Return mono float32 samples from the pipe, or empty if none available."""
-        if self._fd is None:
-            return np.empty(0, dtype=np.float32)
-        try:
-            raw = os.read(self._fd, 65536)  # up to 64 KB = ~370 ms @ 44100 Hz stereo
-        except OSError as exc:
-            if exc.errno == errno.EAGAIN:
-                return np.empty(0, dtype=np.float32)
-            raise
-        if not raw:
-            return np.empty(0, dtype=np.float32)
-
-        # Prepend any sub-frame bytes carried from the previous read so that
-        # partial frames never cause an L/R channel misalignment.
-        combined = self._remainder + raw
-        n_frames = len(combined) // AIRPLAY_BYTES_PER_FRAME
-        if n_frames == 0:
-            self._remainder = combined
-            return np.empty(0, dtype=np.float32)
-
-        self._remainder = combined[n_frames * AIRPLAY_BYTES_PER_FRAME :]
-        self._last_data_t = time.monotonic()
-        samples = np.frombuffer(combined[: n_frames * AIRPLAY_BYTES_PER_FRAME], dtype=np.int16)
-        # Interleaved stereo s16 → mono float32 in [−1.0, 1.0].
-        return (samples[0::2].astype(np.float32) + samples[1::2].astype(np.float32)) / (
-            2.0 * 32768.0
-        )
-
-
-# ---------------------------------------------------------------------------
-# SqueezeliteShmStereoSource — new stereo decoded-source adapter
-# ---------------------------------------------------------------------------
-
-
 class SqueezeliteShmStereoSource:
     """Reads stereo decoded float32 PCM from squeezelite's visualiser SHM.
 
@@ -1574,7 +1488,7 @@ class SqueezeliteShmStereoSource:
 class AirPlayPipeStereoSource:
     """Reads stereo decoded float32 PCM from shairport-sync's named pipe.
 
-    Alongside (not replacing) the legacy AirPlayPipeSource.  Returns
+    Returns
     SourceReadResult with a stereo DecodedSourceFrame.
 
     Source contract: 44100 Hz, S16_LE, 2 channels (stereo).
@@ -1582,8 +1496,7 @@ class AirPlayPipeStereoSource:
 
     IMPORTANT — one ingress reader:
     Only one instance may read from the production FIFO at a time.  A FIFO
-    is not broadcast.  Do not instantiate both this class and AirPlayPipeSource
-    against the same path simultaneously.
+    is not broadcast. Do not open a second reader against the same path.
 
     Lifecycle:
     - EAGAIN (no data) → TemporarilyNoData

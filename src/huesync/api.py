@@ -49,11 +49,15 @@ router = APIRouter(prefix="/api")
 
 
 class ControllerPairBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     host: str
     name: str = "Hue Bridge"
 
 
 class PlayerLatencyCreateBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     player_mac: str
     name: str | None = None
     strategy: str = "fixed"
@@ -71,6 +75,8 @@ class PlayerLatencyPatchBody(BaseModel):
 
 
 class ControllerCreateBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     name: str = "Controller"
     type: str = "hue"
     host: str
@@ -87,6 +93,8 @@ class ControllerPatchBody(BaseModel):
 
 
 class VirtualPlayerCreateBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     type: str = "LMS"
     lms_host: str = ""
     lms_port: int = 9000
@@ -109,6 +117,8 @@ class VirtualPlayerPatchBody(BaseModel):
 
 
 class ZoneCreateBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     name: str = "Zone"
     controller_id: str
     entertainment_area_id: str
@@ -124,6 +134,8 @@ class ZonePatchBody(BaseModel):
 
 
 class AnalyserCreateBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     name: str = "Default Analysis"
     onset_method: str = "combined"
     onset_delta: float = 0.1
@@ -155,6 +167,8 @@ class AnalyserPatchBody(BaseModel):
 
 
 class EffectCreateBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     name: str = "Default Effect"
     effect_type: str = "spectrum_rgb"
     effect_speed: float = 1.0
@@ -182,6 +196,8 @@ class EffectPatchBody(BaseModel):
 
 
 class EnergyProfileCreateBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     name: str = "Default EnergyProfile"
     high_energy_effect_id: str
     low_energy_effect_id: str = ""
@@ -201,6 +217,8 @@ class EnergyProfilePatchBody(BaseModel):
 
 
 class CouplingCreateBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     name: str
     player_id: str
     analyser_id: str
@@ -210,6 +228,8 @@ class CouplingCreateBody(BaseModel):
 
 
 class CouplingPatchBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     """Omnibus PATCH body; routes each field to the appropriate sub-entity.
 
     Priority categories (high to low):
@@ -922,7 +942,7 @@ async def clone_analyser(ac_id: str, request: Request):
 
 
 # ---------------------------------------------------------------------------
-# Effects  (canonical: /effects; deprecated alias: /scenes)
+# Effects
 # ---------------------------------------------------------------------------
 
 
@@ -1019,34 +1039,8 @@ async def clone_effect(effect_id: str, request: Request):
     return new_effect.to_dict()
 
 
-# Deprecated aliases — /scenes kept for backward compatibility; remove in Fase 5.
-@router.get("/scenes", deprecated=True)
-async def list_scenes(request: Request):
-    return await list_effects_route(request)
-
-
-@router.post("/scenes", status_code=201, deprecated=True)
-async def create_scene(request: Request, body: EffectCreateBody):
-    return await create_effect_route(request, body)
-
-
-@router.get("/scenes/{scene_id}", deprecated=True)
-async def get_scene(scene_id: str, request: Request):
-    return await get_effect_route(scene_id, request)
-
-
-@router.patch("/scenes/{scene_id}", deprecated=True)
-async def patch_scene(scene_id: str, request: Request, body: EffectPatchBody):
-    return await patch_effect_route(scene_id, request, body)
-
-
-@router.delete("/scenes/{scene_id}", status_code=204, deprecated=True)
-async def delete_scene(scene_id: str, request: Request):
-    return await delete_effect_route(scene_id, request)
-
-
 # ---------------------------------------------------------------------------
-# EnergyProfiles  (canonical: /energy-profiles; deprecated alias: /crossfaders)
+# EnergyProfiles
 # ---------------------------------------------------------------------------
 
 
@@ -1131,32 +1125,6 @@ async def clone_energy_profile(ep_id: str, request: Request):
     return new_ep.to_dict()
 
 
-# Deprecated aliases — /crossfaders kept for backward compatibility; remove in Fase 5.
-@router.get("/crossfaders", deprecated=True)
-async def list_crossfaders(request: Request):
-    return await list_energy_profiles_route(request)
-
-
-@router.post("/crossfaders", status_code=201, deprecated=True)
-async def create_crossfader(request: Request, body: EnergyProfileCreateBody):
-    return await create_energy_profile_route(request, body)
-
-
-@router.get("/crossfaders/{cf_id}", deprecated=True)
-async def get_crossfader(cf_id: str, request: Request):
-    return await get_energy_profile_route(cf_id, request)
-
-
-@router.patch("/crossfaders/{cf_id}", deprecated=True)
-async def patch_crossfader(cf_id: str, request: Request, body: EnergyProfilePatchBody):
-    return await patch_energy_profile_route(cf_id, request, body)
-
-
-@router.delete("/crossfaders/{cf_id}", status_code=204, deprecated=True)
-async def delete_crossfader(cf_id: str, request: Request):
-    return await delete_energy_profile_route(cf_id, request)
-
-
 # ---------------------------------------------------------------------------
 # Couplings
 # ---------------------------------------------------------------------------
@@ -1200,6 +1168,8 @@ async def deactivate_coupling(request: Request):
 
 
 class RestartCouplingCavaBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     """Optionally update frequency cutoffs and/or band boundaries while restarting cava.
 
     Saving these avoids going through PATCH /couplings/{id}, which could trigger
@@ -1264,9 +1234,9 @@ async def restart_coupling_cava(
         if body.higher_cutoff_freq is not None:
             proposed_analyser.higher_cutoff_freq = body.higher_cutoff_freq
 
-        crossfader = storage.get_energy_profile(coupling.energy_profile_id)
-        if crossfader is not None:
-            effect = storage.get_effect(crossfader.high_energy_effect_id)
+        energy_profile = storage.get_energy_profile(coupling.energy_profile_id)
+        if energy_profile is not None:
+            effect = storage.get_effect(energy_profile.high_energy_effect_id)
             if effect is not None:
                 changed_effect = False
                 if body.bass_hz is not None:

@@ -8,28 +8,35 @@ legacy external CAVA/FIFO is separate. Native live deployment **REQUIRES LXC VAL
 Pinned upstream: `ralph-irving/squeezelite` at
 `c7c4248ddd70e47dbfeba0bf4a8a7ec08d8a995c`.
 
-From the HueSync repository on the intended target, after installing dependencies:
+For a standard installation, from the repository:
 
 ```sh
-sudo bash scripts/build-squeezelite.sh
+sudo ./scripts/install-huesync.sh
 ```
 
-The script clones and verifies the pinned commit, copies `vis_shm_v1.h` and
-`output_vis_v1.c`, dry-runs/applies `output_vis_v1.patch`, forces `-DVISEXPORT`,
-checks that `output_vis.o` and `output_vis_v1.o` occur in the build plan, builds,
-checks the produced objects and installs `/usr/local/bin/squeezelite` by default.
-No manual producer patching is required. `OPTS` can add flags; VISEXPORT remains enabled.
-Changing upstream requires deliberately regenerating/testing the patch and updating
-its pin. The script's temporary build directory is recreated on each run.
+The repository installer is the authoritative standard deployment path. It provisions
+all build/runtime dependencies and invokes `scripts/build-squeezelite.sh` automatically.
+The helper remains available for isolated developer builds with dependencies already
+present; it is not a second standard deployment procedure.
 
-Dependencies include git, build-essential, libasound2-dev, libflac-dev, libmad0-dev,
-libmpg123-dev, libvorbis-dev, libfaad-dev, libopus-dev and libssl-dev. They are not
-installed by this script. HueSync's Python package additionally needs libfftw3-dev;
-that is a CAVA Core build requirement, not a Squeezelite FFT dependency.
-See [installation](../docs/installation.md).
+The helper clones and verifies the pin, copies `vis_shm_v1.h` and `output_vis_v1.c`,
+dry-runs/applies `output_vis_v1.patch`, forces VISEXPORT, checks both producer objects
+in the make plan, compiles them and performs the full link. The installer copies the
+result to `/usr/local/bin/squeezelite`, compares bytes and records SHA256 provenance.
+The service PATH selects this binary ahead of any packaged Squeezelite.
+The helper also builds `huesync-squeezelite-fifo` from unpatched pinned upstream
+with VISEXPORT, specifically for external CAVA's byte-80 ring layout. That binary
+is selected only by `bars_source=cava`; canonical PCM always uses the v1 binary.
+Neither route falls back to a distro executable.
 
-Restart the actual running Squeezelite after installation and verify its executable
-path. A successful build plan is not an object compile; compiled producer objects
+The standard build enables the default PCM/FLAC/Vorbis/MP3/AAC codecs and VISEXPORT;
+optional Opus/FFmpeg/ALAC/resampler flags are not enabled. AirPlay dependencies and
+CAVA Core's FFTW dependency are provisioned separately by the same top-level installer.
+See [installation](../docs/installation.md) for stages and verification boundaries.
+
+The standard installer stops the previous service before installing binaries;
+newly activated players use the matching executable. For manual developer builds,
+restart the actual running process and verify its executable path. A successful build plan is not an object compile; compiled producer objects
 are not a full link, deployment or live continuity test.
 
 ## ABI layout

@@ -1,76 +1,119 @@
 # Installation
 
-Target: Linux with Python 3.11+ and systemd. Commands below are target setup instructions,
-not a claim that target runtime validation has passed. See [LXC deployment](deployment-lxc.md).
-
-## Base package and native build
-
-For Debian/Ubuntu, as root:
+**The repository installer is the authoritative standard deployment path.**
+Target: Debian 13 / trixie, x86_64, with a booted systemd instance. Other targets
+fail explicitly. This is the supported code path; clean-target execution still
+requires real LXC validation. Do not confuse local tests with a completed deployment.
 
 ```sh
-apt-get update
-apt-get install -y git python3 python3-venv build-essential libfftw3-dev
-cd /opt
-git clone https://github.com/ThaYapeMan/HueSync.git huesync
-cd /opt/huesync
-python3 -m venv .venv
-.venv/bin/pip install .
+git clone https://github.com/ThaYapeMan/HueSync.git
+cd HueSync
+sudo ./scripts/install-huesync.sh
 ```
 
-The Hatch build hook compiles `_libcavacore.so` and packages it in a platform wheel.
-A source install requires GCC and FFTW headers even if you intend to select V2.
-Native loading, wheel clean-install and allocation stress still require target checks.
+The initial clone requires Git and access to GitHub. The installer owns all further
+package/build knowledge. Use a dedicated HueSync container with outbound HTTPS and
+Debian apt repositories. Pairing a Hue Bridge and selecting a player/Zone/Coupling
+remain application configuration through `http://<host>:8420`, not manual JSON edits.
 
-## LMS routes
+## What it installs
 
-For external CAVA/FIFO, install the external `cava` program. For canonical LMS PCM,
-build the pinned patched Squeezelite; a stock v0 visualizer is rejected.
+| Component | Build requirements | Runtime requirements / method |
+|---|---|---|
+| HueSync | Python venv, build/Hatchling, compiler | Fresh wheel-installed venv; dependencies from pyproject.toml |
+| CAVA Core | GCC, libfftw3-dev | Packaged native library plus FFTW runtime pulled by apt |
+| Squeezelite | GCC/make/patch, ALSA and codec headers | Pinned patched binary at /usr/local/bin/squeezelite; VISEXPORT mandatory |
+| Squeezelite default codecs | FLAC, Vorbis/Ogg, MAD, MPG123, FAAD development packages | Matching shared libraries: PCM/FLAC/Vorbis/MP3/AAC; no optional Opus/FFmpeg/ALAC/resampler flags |
+| External CAVA/FIFO | Debian CAVA + same pinned Squeezelite source | `cava` plus dedicated `huesync-squeezelite-fifo` producer; separate derived-bars route |
+| AirPlay 2 | Autotools, FFmpeg, crypto/plist/Avahi/soxr/systemd development packages | Pinned shairport-sync + nqptp source builds, Avahi, capabilities, managed FIFO |
+| Frontend | Private Node 22.22.0 archive, pinned SHA256; npm ci | Compiled assets in wheel; Node is not a runtime requirement |
+| Services | systemd, polkit | huesync user/audio group, repository unit, narrow receiver-restart authorization |
+
+Exact apt package arrays are in `scripts/install-huesync.sh`. Build headers remain
+installed for subsequent updates and `--check`; the installer does not purge packages
+that another application might need. No curl-to-shell bootstrap or global pip install
+is used. Python package versions follow pyproject constraints (not a fully locked
+Python dependency set); each fresh release resolves them again.
+
+## Installation stages and ownership
+
+1. Verify OS/architecture, systemd and clean tracked Git state; lock installation.
+2. Provision packages/account; archive the selected Git commit into a temporary tree.
+3. Build frontend and native wheel there; install into a fresh release venv.
+4. Build/link pinned Squeezelite; stop existing HueSync/audio services before replacing
+   binaries. Build pinned AirPlay sources without starting the receiver.
+5. Run explicit persisted-data migration from the candidate environment. Back up exact
+   original bytes, validate schema/references, then atomically replace the JSON file.
+6. Install the existing repository systemd layout and verify artifacts/import/native
+   initialization/schema/commit. Switch `/opt/huesync/.venv` to the verified release.
+7. Start services and check their status and the local HTTP API.
+
+The venv remains at its original absolute path under `/opt/huesync/releases/`; it is
+never relocated. The existing service still executes `/opt/huesync/.venv/bin/huesync`.
+A previous real `.venv` directory is archived rather than destroyed. Release directories
+are retained for diagnostics; they are not automatically garbage-collected or used as
+an automatic cross-schema rollback. Configuration remains `/etc/huesync/config.json`.
+No credentials are replaced by defaults.
+
+Failures are explicit and stop the installer. If failure occurs after services were
+stopped, they remain stopped: correct the reported cause and rerun the installer.
+It does not claim a transaction across apt, native binaries, services and schema changes.
+Do not start an old application against newly migrated data. Migration failure leaves
+the original file intact and does not start the new runtime.
+
+## Migration
+
+Current persisted schema is **version 1**. See [configuration](configuration.md).
+Unversioned entity configurations are converted once, including historical collection
+and reference names. Backup:
+
+```text
+/etc/huesync/config.json.pre-v1.<SHA256-of-original>.bak
+```
+
+Backups are mode 0600. Repeated migration of current data does not rewrite it or make
+another backup. Unequal old/new aliases, malformed data, duplicate IDs, dangling
+nonempty references or unknown fields fail. No silent winner is chosen. Unrecognized
+pre-entity datasets fail with the original intact; they require a deliberate migration
+extension, not runtime aliases. Keep the old backup until target acceptance is complete.
+
+## Checks and updates
 
 ```sh
-apt-get install -y cava libasound2-dev libflac-dev libmad0-dev libmpg123-dev   libvorbis-dev libfaad-dev libopus-dev libssl-dev
-cd /opt/huesync
-bash scripts/build-squeezelite.sh
+sudo ./scripts/install-huesync.sh --check
+git pull --ff-only
+sudo ./scripts/install-huesync.sh
+journalctl -u huesync -u shairport-sync -u nqptp
 ```
 
-The script installs `/usr/local/bin/squeezelite`, automatically applies SHM v1 and
-forces VISEXPORT. It does not install its build dependencies. See the
-[producer guide](../squeezelite/README.md). Verify which binary the service actually
-launches; installing a new binary does not upgrade a running old process.
+`--check` performs no apt/build/migration/service-start operation. It checks current
+schema, installed wheel location and Git metadata, binary SHA256/provenance, shared
+libraries, native CAVA smoke execution, frontend/FIFO, unit validity and service state.
+Use sudo to read private configuration. It does not read live PCM or activate a player.
+`scripts/update.sh` is a convenience wrapper for pull plus this same installer.
 
-For paced LMS playback, provision snd-dummy on the host and pass the audio devices
-into the LXC. Do not substitute an unpaced null device without measuring behavior.
+Installed commit metadata is generated in the wheel from the checked-out revision;
+it never rewrites a tracked `_commit.py`. Building from an isolated archive supplies
+that revision explicitly. A source-tree import without generated metadata reports
+`unknown`; the installed application must match `git rev-parse --short HEAD`.
 
-## AirPlay
+## Target boundaries
 
-Run `scripts/setup-airplay.sh` on the intended Linux target after reviewing its
-service/dependency changes. It configures the shairport-sync PCM FIFO ingress.
-Use `scripts/validate.sh` and logs to verify it; do not attach another reader to the
-production FIFO while HueSync owns it.
+The LXC host must provide paced ALSA devices (normally snd-dummy) for LMS. The installer
+adds audio-group membership, but cannot create host devices or change host mappings.
+Do not substitute an unpaced null sink. AirPlay uses the managed global shairport-sync
+instance; network multicast and timing ports must be available. The installer does not
+change unrelated firewall, host-kernel or container configuration.
 
-## Service
+Native memory stress, live producer continuity, realtime performance and visual A/B
+remain **REQUIRES LXC VALIDATION**. See [deployment checklist](deployment-lxc.md).
 
-The supplied unit uses user/group `huesync`, working directory `/opt/huesync`,
-`/opt/huesync/.venv/bin/huesync` and `/etc/huesync/config.json`.
-Create the account and writable config directory before enabling it:
+### Two producer ABIs, one deployment authority
 
-```sh
-id huesync >/dev/null 2>&1 || useradd --system --home /opt/huesync --shell /usr/sbin/nologin huesync
-install -d -o huesync -g huesync /etc/huesync
-cp /opt/huesync/systemd/huesync.service /etc/systemd/system/
-systemctl daemon-reload
-systemctl enable --now huesync
-```
-
-Grant required audio-device access for the selected ingress according to the target's
-group/device mapping. Review the unit's wildcard SHM cleanup and its user permissions: it is intended for a
-dedicated HueSync host/container, not unrelated visualizer users.
-Open `http://<host>:8420` on a trusted network. Configure controller credentials and
-an Entertainment zone through the UI/API. These installation instructions do not
-add an authentication/reverse-proxy policy.
-
-## Updates
-
-From the existing target checkout, as root: `bash scripts/update.sh`. It fast-forward
-pulls, installs HueSync native prerequisites, installs Python dependencies and restarts
-the service. It does **not** rebuild Squeezelite or provision all producer dependencies.
-Rebuild the producer deliberately when its pinned revision/patch changes.
+Canonical LMS uses `/usr/local/bin/squeezelite` with HueSync SHM v1 (ring at byte
+120). External CAVA expects the upstream SHM ring at byte 80. The installer therefore
+also builds `/usr/local/bin/huesync-squeezelite-fifo` from the same pinned revision,
+with VISEXPORT but without the v1 patch. Runtime selects it only for `bars_source=cava`.
+There is no fallback between these executables; a missing binary is an explicit error.
+Both hashes are verified against the installation manifest. This preserves the
+intentional external-FIFO feature without weakening canonical v1 requirements.

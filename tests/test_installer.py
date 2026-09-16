@@ -50,7 +50,7 @@ def test_phase3_imports_available() -> None:
     )
     from huesync.pcm_source import AirPlayPipeStereoSource  # noqa: F401
     from huesync.sync_engine import (  # noqa: F401
-        PcmAudioPipelineV2,
+        CanonicalAnalysisPipeline,
         StereoMagStft,
     )
 
@@ -380,20 +380,12 @@ def test_validate_script_exists() -> None:
     )
 
 
-def test_update_script_contains_pip_install() -> None:
-    """scripts/update.sh must run pip install to synchronize Python dependencies."""
+def test_update_delegates_to_authoritative_installer() -> None:
     script = (ROOT / "scripts" / "update.sh").read_text()
-    assert "pip" in script and "install" in script, (
-        "scripts/update.sh must call pip install to update Python dependencies"
-    )
-
-
-def test_update_script_contains_service_restart() -> None:
-    """scripts/update.sh must restart the huesync service after updating."""
-    script = (ROOT / "scripts" / "update.sh").read_text()
-    assert "systemctl restart huesync" in script, (
-        "scripts/update.sh must restart huesync after dependency update"
-    )
+    assert 'exec "$REPO_DIR/scripts/install-huesync.sh"' in script
+    assert 'pip install' not in script
+    installer = (ROOT / "scripts" / "install-huesync.sh").read_text()
+    assert 'systemctl restart avahi-daemon nqptp shairport-sync huesync' in installer
 
 
 def test_update_script_contains_git_pull() -> None:

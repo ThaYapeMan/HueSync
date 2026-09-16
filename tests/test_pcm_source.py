@@ -10,7 +10,6 @@ import logging
 import mmap
 import os
 import struct
-import struct as _struct
 from pathlib import Path
 
 import numpy as np
@@ -27,17 +26,11 @@ from huesync.pcm_source import (
     _V2_EXT_FMT,
     _V2_EXT_OFFSET,
     _V2_EXT_SIZE,
-    AIRPLAY_BYTES_PER_FRAME,
-    AIRPLAY_CHANNELS,
-    AIRPLAY_SAMPLE_RATE,
-    AIRPLAY_SAMPLE_WIDTH,
     SHM_ABI_V1_MAGIC,
     VIS_BUF_SIZE,
     WINDOW_SIZE,
-    AirPlayPipeSource,
     DataResult,
     PcmHpss,
-    PcmSource,
     PcmStft,
     SqueezeliteShmSource,
     SqueezeliteShmStereoSource,
@@ -557,191 +550,6 @@ def test_hpss_output_is_float_pairs() -> None:
         assert 0.0 <= h <= 1.0
 
 
-# ---------------------------------------------------------------------------
-# AirPlayPipeSource
-# ---------------------------------------------------------------------------
-
-
-def _stereo_s16le(left: int, right: int, n_frames: int = 1) -> bytes:
-    """Build S16_LE stereo bytes: n_frames × (L, R)."""
-    frame = _struct.pack("<hh", left, right)
-    return frame * n_frames
-
-
-def test_airplay_contract_constants() -> None:
-    """Explicit PCM contract constants must be consistent with each other."""
-    assert AIRPLAY_CHANNELS == 2
-    assert AIRPLAY_SAMPLE_WIDTH == 2  # S16_LE
-    assert AIRPLAY_BYTES_PER_FRAME == AIRPLAY_CHANNELS * AIRPLAY_SAMPLE_WIDTH
-
-
-def test_airplay_source_satisfies_protocol() -> None:
-    """AirPlayPipeSource must satisfy the PcmSource Protocol at runtime."""
-    assert isinstance(AirPlayPipeSource(), PcmSource)
-
-
-def test_airplay_sample_rate() -> None:
-    src = AirPlayPipeSource()
-    assert src.sample_rate == AIRPLAY_SAMPLE_RATE
-
-
-def test_airplay_running_false_before_data() -> None:
-    """running must be False until read_new() has returned non-empty samples."""
-    src = AirPlayPipeSource()
-    assert src.running is False
-
-
-def test_airplay_read_new_without_open_returns_empty() -> None:
-    src = AirPlayPipeSource()
-    result = src.read_new()
-    assert len(result) == 0
-    assert result.dtype == np.float32
-
-
-def test_airplay_read_new_stereo_to_mono() -> None:
-    """S16_LE stereo → average L+R → float32 in [−1, 1]."""
-    r_fd, w_fd = os.pipe()
-    try:
-        # Write one stereo frame: L=16384 (0.5), R=−16384 (−0.5) → average 0.0
-        os.write(w_fd, _stereo_s16le(16384, -16384))
-        src = AirPlayPipeSource()
-        src._fd = r_fd  # inject the read end directly
-        src._last_data_t = None
-        result = src.read_new()
-        src._fd = None  # prevent double-close
-    finally:
-        os.close(w_fd)
-        try:
-            os.close(r_fd)
-        except OSError:
-            pass
-
-    assert len(result) == 1
-    assert result.dtype == np.float32
-    assert abs(result[0]) < 1e-5  # (0.5 + −0.5) / 2 = 0.0
-
-
-def test_airplay_read_new_unity_amplitude() -> None:
-    """Maximum positive s16 value must map to ≈ 1.0 when both channels equal."""
-    r_fd, w_fd = os.pipe()
-    try:
-        os.write(w_fd, _stereo_s16le(32767, 32767))
-        src = AirPlayPipeSource()
-        src._fd = r_fd
-        src._last_data_t = None
-        result = src.read_new()
-        src._fd = None
-    finally:
-        os.close(w_fd)
-        try:
-            os.close(r_fd)
-        except OSError:
-            pass
-
-    assert len(result) == 1
-    assert abs(result[0] - 32767 / 32768.0) < 1e-4
-
-
-def test_airplay_running_true_after_data() -> None:
-    """running must be True immediately after read_new() returns data."""
-    r_fd, w_fd = os.pipe()
-    try:
-        os.write(w_fd, _stereo_s16le(1000, 1000, n_frames=4))
-        src = AirPlayPipeSource()
-        src._fd = r_fd
-        src._last_data_t = None
-        src.read_new()
-        src._fd = None
-        assert src.running is True
-    finally:
-        os.close(w_fd)
-        try:
-            os.close(r_fd)
-        except OSError:
-            pass
-
-
-def test_airplay_incomplete_frame_carried() -> None:
-    """Trailing bytes that do not complete a stereo frame are carried to the next read."""
-    r_fd, w_fd = os.pipe()
-    try:
-        # Write 1 complete frame (4 bytes) + 1 orphan byte.
-        os.write(w_fd, _stereo_s16le(100, 200) + b"\xff")
-        src = AirPlayPipeSource()
-        src._fd = r_fd
-        src._last_data_t = None
-        result = src.read_new()
-        remainder = src._remainder
-        src._fd = None
-    finally:
-        os.close(w_fd)
-        try:
-            os.close(r_fd)
-        except OSError:
-            pass
-
-    assert len(result) == 1  # only the complete frame decoded
-    assert remainder == b"\xff"  # orphan byte is held for the next read
-
-
-def test_airplay_partial_frame_joined_across_reads() -> None:
-    """A frame split across two reads is decoded correctly on the second read."""
-    r_fd, w_fd = os.pipe()
-    try:
-        # First read delivers 3 bytes (incomplete frame of 4).
-        os.write(w_fd, b"\x00\x40\x00")  # first 3 of 4 bytes for L=0x4000, R=...
-        src = AirPlayPipeSource()
-        src._fd = r_fd
-        src._last_data_t = None
-        result1 = src.read_new()
-
-        # Second read delivers the missing byte plus another complete frame.
-        frame2 = _stereo_s16le(1000, -1000)
-        os.write(w_fd, b"\x80" + frame2)  # completes first frame + adds second
-        result2 = src.read_new()
-        src._fd = None
-    finally:
-        os.close(w_fd)
-        try:
-            os.close(r_fd)
-        except OSError:
-            pass
-
-    assert len(result1) == 0  # incomplete frame — nothing yet
-    assert src._remainder == b""  # all bytes now consumed
-    assert len(result2) == 2  # first (reconstructed) + second frame
-
-
-def test_airplay_no_channel_swap_after_partial_read() -> None:
-    """L/R channels must not swap after a read that left sub-frame remainder bytes."""
-    r_fd, w_fd = os.pipe()
-    try:
-        # Frame: L=+32767 (~1.0), R=0 → mono ≈ 0.5
-        frame = _stereo_s16le(32767, 0)
-        # Split: write first 3 bytes, then the last byte.
-        os.write(w_fd, frame[:3])
-        src = AirPlayPipeSource()
-        src._fd = r_fd
-        src._last_data_t = None
-        src.read_new()  # partial — carries 3 bytes
-
-        os.write(w_fd, frame[3:4])  # final byte of first frame
-        result = src.read_new()
-        src._fd = None
-    finally:
-        os.close(w_fd)
-        try:
-            os.close(r_fd)
-        except OSError:
-            pass
-
-    assert len(result) == 1
-    # L=32767, R=0 → (32767 + 0) / (2 × 32768) ≈ 0.5
-    assert abs(result[0] - 32767 / (2.0 * 32768.0)) < 1e-4
-
-
-# ---------------------------------------------------------------------------
-# SqueezeliteShmStereoSource — continuity and restart detection tests
 # ---------------------------------------------------------------------------
 
 

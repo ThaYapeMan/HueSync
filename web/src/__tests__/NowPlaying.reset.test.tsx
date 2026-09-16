@@ -43,7 +43,7 @@ const MOCK_STATUS: SocketStatus = {
   latency_warning: null,
   processes: { squeezelite: true, cava: true },
   bridge_connected: false,
-  color_mode: 'spectrum_rgb',
+  effect_type: 'spectrum_rgb',
   onset_method: 'combined',
   lower_cutoff_freq: APPLIED_LOW,
   higher_cutoff_freq: APPLIED_HIGH,

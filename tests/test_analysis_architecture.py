@@ -373,9 +373,9 @@ def test_beat_detector_combined_has_no_band_fields():
 
 def test_beat_detector_reset_rebuilds_onset_pipeline():
     bd = _make_beat_detector()
-    old_id = id(bd._onset_pipeline)
+    old_id = id(bd._state.onset_pipeline)
     bd.reset()
-    assert id(bd._onset_pipeline) != old_id
+    assert id(bd._state.onset_pipeline) != old_id
 
 
 def test_beat_detector_reset_rebuild_race_preserves_new_config():
@@ -480,18 +480,17 @@ def test_cap_processors_tuple_contains_both():
     assert "beat_detector" in ids
 
 
-def test_cap_backward_compat_engine_property():
-    """_engine property returns the SpectrumEngine inside SpectrumProcessor."""
+def test_cap_spectrum_processor_owns_engine():
+    """Composition owns the actual engine without CAP forwarding aliases."""
     engine = V2SpectrumEngine(n_bars=8, lower_hz=50.0, upper_hz=10000.0)
     cap = _make_cap(engine=engine)
-    assert cap._engine is engine
+    assert cap._spectrum_processor._engine is engine
 
 
-def test_cap_backward_compat_onset_pipeline_property():
-    """_onset_pipeline property returns BeatDetector's onset pipeline."""
+def test_cap_has_no_removed_private_aliases():
     cap = _make_cap()
-    op = cap._onset_pipeline
-    assert op is cap._beat_detector._onset_pipeline
+    assert not hasattr(cap, "_engine")
+    assert not hasattr(cap, "_onset_pipeline")
 
 
 def test_cap_publication_record_has_new_fields():
@@ -507,13 +506,13 @@ def test_cap_publication_record_has_new_fields():
     assert "beat_detector" in rec.effective_processor_ids
 
 
-def test_cap_effective_engine_id_matches_spectrum_processor():
+def test_cap_effective_spectrum_backend_matches_spectrum_processor():
     cap = _make_cap()
     _feed_warmup(cap)
     recs = cap.feed(_make_frame(sample_pos=6 * _HOP))
     if not recs:
         pytest.skip("No publication produced")
-    assert recs[0].effective_engine_id == "v2"
+    assert recs[0].effective_spectrum_backend == "v2"
 
 
 def test_cap_drain_publications_returns_records(monkeypatch):
@@ -542,16 +541,16 @@ def test_cap_reset_dsp_resets_all_processors():
     cap = _make_cap()
     _feed_warmup(cap)
     engine_before = id(cap._spectrum_processor._engine)
-    onset_id_before = id(cap._beat_detector._onset_pipeline)
+    onset_id_before = id(cap._beat_detector._state.onset_pipeline)
 
     cap._reset_dsp()
 
     # SpectrumProcessor.reset() calls engine.reset() (not replace, same engine instance)
     assert id(cap._spectrum_processor._engine) == engine_before
     # BeatDetector.reset() rebuilds onset pipeline
-    assert id(cap._beat_detector._onset_pipeline) != onset_id_before
+    assert id(cap._beat_detector._state.onset_pipeline) != onset_id_before
     assert cap._current_epoch_id is None
-    assert cap._pending_onset == []
+    assert len(cap._bar_history) <= 1000
 
 
 # ---------------------------------------------------------------------------
@@ -787,7 +786,7 @@ def test_publication_record_default_new_fields():
         epoch="ep-1",
         sample_pos=0,
         features=None,
-        effective_engine_id="v2",
+        effective_spectrum_backend="v2",
     )
     assert rec.sample_end == 0
     assert rec.effective_processor_ids == ()
@@ -800,7 +799,7 @@ def test_publication_record_new_fields_set():
         sample_pos=0,
         sample_end=480,
         features=None,
-        effective_engine_id="v2",
+        effective_spectrum_backend="v2",
         effective_processor_ids=("v2", "beat_detector"),
     )
     assert rec.sample_end == 480
@@ -885,8 +884,8 @@ def test_h3_rebuild_beat_detector_updates_active_processor():
         bass_hz=250,
         mid_hz=2000,
     )
-    assert bd._onset_method == "combined"
-    old_pipeline = bd._onset_pipeline
+    assert bd._state.onset_method == "combined"
+    old_pipeline = bd._state.onset_pipeline
 
     bd.rebuild(
         onset_method="multiband",
@@ -897,10 +896,10 @@ def test_h3_rebuild_beat_detector_updates_active_processor():
         bass_hz=300,
         mid_hz=2500,
     )
-    assert bd._onset_method == "multiband"
-    assert bd._onset_delta == pytest.approx(0.2)
-    assert bd._bass_hz == 300
-    assert bd._onset_pipeline is not old_pipeline  # new object
+    assert bd._state.onset_method == "multiband"
+    assert bd._state.onset_delta == pytest.approx(0.2)
+    assert bd._state.bass_hz == 300
+    assert bd._state.onset_pipeline is not old_pipeline  # new object
 
 
 def test_h3_cap_rebuild_beat_detector():
@@ -908,7 +907,7 @@ def test_h3_cap_rebuild_beat_detector():
     cap = _make_cap()
 
     bd_before = next(p for p in cap._processors if isinstance(p, BeatDetector))
-    old_pipeline = bd_before._onset_pipeline
+    old_pipeline = bd_before._state.onset_pipeline
 
     # Build a Profile with new onset settings using keyword args.
     profile = Profile(
@@ -924,8 +923,8 @@ def test_h3_cap_rebuild_beat_detector():
 
     bd_after = next(p for p in cap._processors if isinstance(p, BeatDetector))
     assert bd_after is bd_before  # same object, rebuilt in place
-    assert bd_after._onset_method == "multiband"
-    assert bd_after._onset_pipeline is not old_pipeline
+    assert bd_after._state.onset_method == "multiband"
+    assert bd_after._state.onset_pipeline is not old_pipeline
 
 
 # ---------------------------------------------------------------------------
@@ -1810,7 +1809,7 @@ def test_queue_overflow_exact_drops():
             sample_start=i * _HOP,
             sample_end=(i + 1) * _HOP,
             features=features,
-            effective_engine_id="v2",
+            effective_spectrum_backend="v2",
             effective_processor_ids=("v2",),
         )
     maxlen = 1000
@@ -1909,7 +1908,7 @@ def test_publication_atomicity_lock_covers_all_state():
     )
     rec = cap._publish(
         epoch_id="ep-1", sample_start=0, sample_end=_HOP,
-        features=features, effective_engine_id="v2",
+        features=features, effective_spectrum_backend="v2",
         effective_processor_ids=("v2",),
     )
     # After a single _publish call, all three views must agree.

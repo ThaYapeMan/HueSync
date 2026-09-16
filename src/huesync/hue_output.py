@@ -32,8 +32,8 @@ from .types import Colour, Position, Scene
 class HueOutputConfig:
     """Groups the Hue-specific output fields that live on a Profile.
 
-    Profile still stores these as flat fields for JSON backwards
-    compatibility; PlayerManager assembles a HueOutputConfig at activation
+    The internal runtime Profile carries these as flat fields; PlayerManager
+    assembles a HueOutputConfig at activation
     time rather than touching the Profile's serialisation.
     """
 

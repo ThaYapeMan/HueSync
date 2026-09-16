@@ -1,11 +1,11 @@
-"""Integration and A/B tests for CavaCoreAudioPipeline.
+"""Integration and A/B tests for CanonicalAnalysisPipeline.
 
 Tests are skipped when the shared library has not been compiled yet.
 Build it with:  pip install .   (requires libfftw3-dev on the host).
 
 A/B comparison:
-  Same canonical PCM → PcmAudioPipelineV2  (V2 bars)
-                     → CavaCoreAudioPipeline (CAVA bars)
+  Same canonical PCM → CanonicalAnalysisPipeline  (V2 bars)
+                     → CanonicalAnalysisPipeline (CAVA bars)
 
 The key question is: are the two implementations independent?  They must
 produce *different* bars (confirming CAVA runs its own FFT, not the V2 path),
@@ -21,6 +21,7 @@ from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
+from pipeline_factory import make_pipeline
 
 # ---------------------------------------------------------------------------
 # Skip guard
@@ -34,8 +35,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 from huesync.canonicalizer import AnalysisPcmFrame  # noqa: E402
-from huesync.cavacore_pipeline import CavaCoreAudioPipeline  # noqa: E402
-from huesync.sync_engine import PcmAudioPipelineV2  # noqa: E402
+from huesync.sync_engine import CanonicalAnalysisPipeline  # noqa: E402
 from huesync.types import AudioFeatures  # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -84,20 +84,20 @@ _DEFAULT_KWARGS: dict = dict(
 )
 
 
-def _make_cava_pipeline(**kwargs) -> CavaCoreAudioPipeline:
+def _make_cava_pipeline(**kwargs) -> CanonicalAnalysisPipeline:
     src = MagicMock()
     src.running = True
     kw = dict(_DEFAULT_KWARGS)
     kw.update(kwargs)
-    return CavaCoreAudioPipeline(source=src, **kw)
+    return make_pipeline(backend="cavacore", source=src, **kw)
 
 
-def _make_v2_pipeline(**kwargs) -> PcmAudioPipelineV2:
+def _make_v2_pipeline(**kwargs) -> CanonicalAnalysisPipeline:
     src = MagicMock()
     src.running = True
     kw = dict(_DEFAULT_KWARGS)
     kw.update(kwargs)
-    return PcmAudioPipelineV2(source=src, **kw)
+    return make_pipeline(source=src, **kw)
 
 
 def _feed(pipeline: object, stereo: np.ndarray, chunk: int = _HOP) -> None:
@@ -287,7 +287,10 @@ def test_processing_latency_per_hop() -> None:
     per_hop_ms = elapsed / len(frames) * 1000
     realtime_ms = _HOP / _CANONICAL_RATE * 1000  # 10 ms
 
-    print(f"\n  CavaCoreAudioPipeline: {per_hop_ms:.3f} ms per hop ({realtime_ms:.1f} ms realtime)")
+    print(
+        f"\n  CanonicalAnalysisPipeline: {per_hop_ms:.3f} ms per hop "
+        f"({realtime_ms:.1f} ms realtime)"
+    )
     assert per_hop_ms < realtime_ms, (
         f"Processing slower than realtime: {per_hop_ms:.3f} ms > {realtime_ms:.1f} ms per hop"
     )
@@ -428,25 +431,25 @@ def test_onset_fanout_two_half_blocks() -> None:
 
     stft_call_count = [0]
     stft_total_frames = [0]
-    orig_stft = p._pipeline._bar_stft.push
+    orig_stft = p._bar_stft.push
 
     def tracked_stft(samples: np.ndarray) -> list:
         stft_call_count[0] += 1
         stft_total_frames[0] += len(samples)
         return orig_stft(samples)
 
-    p._pipeline._bar_stft.push = tracked_stft  # type: ignore[method-assign]
+    p._bar_stft.push = tracked_stft  # type: ignore[method-assign]
 
     cava_none = [0]
     cava_hit = [0]
-    orig_exec = p._pipeline._engine._cava.execute
+    orig_exec = p._spectrum_processor._engine._cava.execute
 
     def tracked_execute(samples: np.ndarray):  # type: ignore[return]
         result = orig_exec(samples)
         (cava_hit if result is not None else cava_none)[0] += 1
         return result
 
-    p._pipeline._engine._cava.execute = tracked_execute  # type: ignore[method-assign]
+    p._spectrum_processor._engine._cava.execute = tracked_execute  # type: ignore[method-assign]
 
     half = np.zeros((240, 2), dtype=np.float32)
     p.feed(_make_canonical_frame(half, sample_pos=0))
@@ -469,22 +472,22 @@ def test_onset_identical_pcm_reaches_both_branches() -> None:
     p = _make_cava_pipeline()
 
     stft_received: list[np.ndarray] = []
-    orig_stft = p._pipeline._bar_stft.push
+    orig_stft = p._bar_stft.push
 
     def capture_stft(s: np.ndarray) -> list:
         stft_received.append(s.copy())
         return orig_stft(s)
 
-    p._pipeline._bar_stft.push = capture_stft  # type: ignore[method-assign]
+    p._bar_stft.push = capture_stft  # type: ignore[method-assign]
 
     cava_received: list[np.ndarray] = []
-    orig_exec = p._pipeline._engine._cava.execute
+    orig_exec = p._spectrum_processor._engine._cava.execute
 
     def capture_exec(s: np.ndarray):  # type: ignore[return]
         cava_received.append(s.copy())
         return orig_exec(s)
 
-    p._pipeline._engine._cava.execute = capture_exec  # type: ignore[method-assign]
+    p._spectrum_processor._engine._cava.execute = capture_exec  # type: ignore[method-assign]
 
     pcm = _sine_stereo(440.0, _HOP)
     p.feed(_make_canonical_frame(pcm))
@@ -502,13 +505,13 @@ def test_arbitrary_chunk_segmentation_delivers_all_pcm_to_stft() -> None:
     p = _make_cava_pipeline()
 
     total_stft_frames = [0]
-    orig_stft = p._pipeline._bar_stft.push
+    orig_stft = p._bar_stft.push
 
     def counting_stft(s: np.ndarray) -> list:
         total_stft_frames[0] += len(s)
         return orig_stft(s)
 
-    p._pipeline._bar_stft.push = counting_stft  # type: ignore[method-assign]
+    p._bar_stft.push = counting_stft  # type: ignore[method-assign]
 
     for chunk_size in [73, 100, 50, 200, 57]:
         p.feed(_make_canonical_frame(np.zeros((chunk_size, 2), dtype=np.float32)))
@@ -529,11 +532,11 @@ def test_clean_eos_tail_flushed() -> None:
 
     pcm = _sine_stereo(440.0, 239)
     p.feed(_make_canonical_frame(pcm))
-    assert p._pipeline._engine._cava.pending_frames == 239
+    assert p._spectrum_processor._engine._cava.pending_frames == 239
 
     p.end_of_stream()
 
-    assert p._pipeline._engine._cava.pending_frames == 0, (
+    assert p._spectrum_processor._engine._cava.pending_frames == 0, (
         "carry buffer must be empty after EOS flush"
     )
 
@@ -544,11 +547,11 @@ def test_invalidated_stream_discards_pending_without_flush() -> None:
 
     pcm = _sine_stereo(440.0, 239)
     p.feed(_make_canonical_frame(pcm))
-    assert p._pipeline._engine._cava.pending_frames == 239
+    assert p._spectrum_processor._engine._cava.pending_frames == 239
 
-    p._pipeline._reset_dsp()
+    p._reset_dsp()
 
-    assert p._pipeline._engine._cava.pending_frames == 0, (
+    assert p._spectrum_processor._engine._cava.pending_frames == 0, (
         "new backend after reset must have no pending frames"
     )
 
@@ -558,9 +561,9 @@ def test_pending_onset_cleared_on_epoch_reset() -> None:
     p = _make_cava_pipeline()
 
     _feed(p, _sine_stereo(1000.0, _HOP))
-    p._pipeline._reset_dsp()
+    p._reset_dsp()
 
-    assert p._pipeline._pending_onset == [], (
+    assert len(p._bar_history) <= 1000, (
         "_pending_onset must be empty after _reset_dsp()"
     )
 
@@ -572,11 +575,11 @@ def test_eos_flush_with_non_silent_carry() -> None:
     _feed(p, _sine_stereo(440.0, _HOP * 10))  # warm up STFT + cavacore
     # Feed a partial block to leave audio in the carry buffer.
     p.feed(_make_canonical_frame(_sine_stereo(440.0, 239)))
-    assert p._pipeline._engine._cava.pending_frames > 0
+    assert p._spectrum_processor._engine._cava.pending_frames > 0
 
     p.end_of_stream()
 
-    assert p._pipeline._engine._cava.pending_frames == 0
+    assert p._spectrum_processor._engine._cava.pending_frames == 0
 
 
 # ---------------------------------------------------------------------------
@@ -598,13 +601,13 @@ def test_profile_invalid_spectrum_backend_rejected() -> None:
 
 
 def test_cavacore_pipeline_effective_backend_is_cavacore() -> None:
-    """CavaCoreAudioPipeline.effective_spectrum_backend must return 'cavacore'."""
+    """CanonicalAnalysisPipeline.effective_spectrum_backend must return 'cavacore'."""
     p = _make_cava_pipeline()
     assert p.effective_spectrum_backend == "cavacore"
 
 
 def test_v2_pipeline_effective_backend_is_v2() -> None:
-    """PcmAudioPipelineV2.effective_spectrum_backend must return 'v2'."""
+    """CanonicalAnalysisPipeline.effective_spectrum_backend must return 'v2'."""
     p = _make_v2_pipeline()
     assert p.effective_spectrum_backend == "v2"
 
@@ -615,7 +618,8 @@ def test_v2_pipeline_effective_backend_is_v2() -> None:
 
 
 def test_factory_selects_v2_for_v2_backend() -> None:
-    """_make_canonical_pipeline returns PcmAudioPipelineV2 when profile.spectrum_backend='v2'."""
+    """
+_make_canonical_pipeline returns CanonicalAnalysisPipeline when profile.spectrum_backend='v2'."""
     from huesync.models import Profile
     from huesync.player_manager import _make_canonical_pipeline
 
@@ -623,13 +627,13 @@ def test_factory_selects_v2_for_v2_backend() -> None:
     src.running = True
     profile = Profile(spectrum_backend="v2", bars=30)
     pipeline = _make_canonical_pipeline(src, profile)
-    assert isinstance(pipeline, PcmAudioPipelineV2)
+    assert isinstance(pipeline, CanonicalAnalysisPipeline)
     assert pipeline.effective_spectrum_backend == "v2"
 
 
 def test_factory_selects_cavacore_for_cavacore_backend() -> None:
-    """_make_canonical_pipeline returns CavaCoreAudioPipeline for spectrum_backend='cavacore'."""
-    from huesync.cavacore_pipeline import CavaCoreAudioPipeline
+    """
+_make_canonical_pipeline returns CanonicalAnalysisPipeline for spectrum_backend='cavacore'."""
     from huesync.models import Profile
     from huesync.player_manager import _make_canonical_pipeline
 
@@ -637,13 +641,12 @@ def test_factory_selects_cavacore_for_cavacore_backend() -> None:
     src.running = True
     profile = Profile(spectrum_backend="cavacore", bars=30)
     pipeline = _make_canonical_pipeline(src, profile)
-    assert isinstance(pipeline, CavaCoreAudioPipeline)
+    assert isinstance(pipeline, CanonicalAnalysisPipeline)
     assert pipeline.effective_spectrum_backend == "cavacore"
 
 
 def test_factory_same_source_accepted_by_both_backends() -> None:
     """Same mock source is accepted by both factory outputs — proves source-agnostic design."""
-    from huesync.cavacore_pipeline import CavaCoreAudioPipeline
     from huesync.models import Profile
     from huesync.player_manager import _make_canonical_pipeline
 
@@ -651,8 +654,8 @@ def test_factory_same_source_accepted_by_both_backends() -> None:
     src.running = True
     v2 = _make_canonical_pipeline(src, Profile(spectrum_backend="v2", bars=30))
     cava = _make_canonical_pipeline(src, Profile(spectrum_backend="cavacore", bars=30))
-    assert isinstance(v2, PcmAudioPipelineV2)
-    assert isinstance(cava, CavaCoreAudioPipeline)
+    assert isinstance(v2, CanonicalAnalysisPipeline)
+    assert isinstance(cava, CanonicalAnalysisPipeline)
 
 
 # ---------------------------------------------------------------------------

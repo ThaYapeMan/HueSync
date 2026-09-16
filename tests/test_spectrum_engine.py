@@ -214,7 +214,7 @@ def test_dummy_engine_can_be_used_with_canonical_pipeline():
 
     assert len(recs) > 0, "expected at least one publication after warmup"
     for rec in recs:
-        assert rec.effective_engine_id == "dummy_test_engine"
+        assert rec.effective_spectrum_backend == "dummy_test_engine"
         assert len(rec.features.bars) == n_bars
         assert all(abs(b - _DummySpectrumEngine.FIXED_VALUE) < 1e-9 for b in rec.features.bars)
 

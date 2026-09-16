@@ -71,9 +71,9 @@ function StatusGrid({ status }: { status: SocketStatus | null }) {
         </StatusRow>
       )}
 
-      {status.color_mode && (
+      {status.effect_type && (
         <StatusRow label="Effect">
-          <code className="text-xs font-mono">{status.color_mode}</code>
+          <code className="text-xs font-mono">{status.effect_type}</code>
         </StatusRow>
       )}
 
@@ -453,7 +453,7 @@ export function NowPlaying({ colour, channel_colours, onset, onset_bass = false,
         <CardContent className="space-y-4">
           <SpectrumBars
             bars={bars}
-            colorMode={status?.color_mode ?? null}
+            colorMode={status?.effect_type ?? null}
             lowerCutoffHz={appliedLower}
             higherCutoffHz={appliedHigher}
             bassHz={appliedBass}

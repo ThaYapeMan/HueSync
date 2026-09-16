@@ -23,19 +23,18 @@
 #   sudo bash scripts/build-squeezelite.sh
 #   sudo INSTALL_DIR=/opt/huesync/bin bash scripts/build-squeezelite.sh
 #
-# Runtime requirements (Debian 13, matches the LXC deployment target):
+# Build requirements (Debian 13, provisioned by install-huesync.sh):
 #   build-essential   — gcc + make + libc headers
 #   libasound2-dev    — ALSA output backend
-#   libflac-dev libmad0-dev libmpg123-dev libvorbis-dev libfaad-dev libopus-dev
+#   libflac-dev libmad0-dev libmpg123-dev libvorbis-dev libfaad-dev
 #                     — codec decoders squeezelite links against
-#   libssl-dev        — TLS for https:// stream sources
 #   git               — clone the upstream repository
 #
 # The build script does not install these itself; it expects the caller to
-# install the dependencies above first (see docs/installation.md). A missing dependency
+# use the top-level installer (see docs/installation.md). A missing dependency
 # surfaces as a `make` failure with an actionable message.
 
-set -euo pipefail
+set -Eeuo pipefail
 
 # Pinned upstream revision.  Upstream (ralph-irving/squeezelite) does not
 # publish git tags, so we pin the exact commit hash.  Update deliberately,
@@ -81,7 +80,7 @@ git clone --quiet --depth 200 "$SQUEEZELITE_REPO" "$BUILD_DIR/squeezelite"
 (
     cd "$BUILD_DIR/squeezelite"
     if ! git checkout --quiet "$SQUEEZELITE_COMMIT" 2>/dev/null; then
-        git fetch --quiet --unshallow origin || true
+        git fetch --quiet --unshallow origin
         git checkout --quiet "$SQUEEZELITE_COMMIT"
     fi
     actual_hash="$(git rev-parse HEAD)"
@@ -90,6 +89,18 @@ git clone --quiet --depth 200 "$SQUEEZELITE_REPO" "$BUILD_DIR/squeezelite"
         exit 1
     fi
     echo "    pinned revision verified: $actual_hash"
+)
+
+# External CAVA's SHM input consumes the upstream ABI v0 ring at byte 80.
+# Build that intentional legacy feature separately before applying the v1 patch.
+# Canonical analysis must never select this executable.
+echo "Building dedicated external-FIFO producer (upstream SHM ABI)..."
+(
+    cd "$BUILD_DIR/squeezelite"
+    make -j"$(nproc)" OPTS=-DVISEXPORT
+    test -f output_vis.o
+    cp squeezelite "$BUILD_DIR/huesync-squeezelite-fifo"
+    make clean
 )
 
 # ---------------------------------------------------------------------------
@@ -141,19 +152,19 @@ esac
     cd "$BUILD_DIR/squeezelite"
     # Wipe any prior objects so this build's compile lines are what the
     # inspection step below actually sees.
-    make -s clean >/dev/null 2>&1 || true
+    make -s clean
     # ``make -n`` prints the commands make would run, without running
     # them.  We capture that trace and assert the two producer objects
     # are compiled and linked in — a build that silently omitted them
     # would still succeed today, and that is exactly the regression this
     # script now catches.
-    make -n -j1 OPTS="$EXTRA_OPTS" > /tmp/huesync-squeezelite-plan.txt
-    if ! grep -qE '(^| )output_vis\.o( |$)' /tmp/huesync-squeezelite-plan.txt; then
+    make -n -j1 OPTS="$EXTRA_OPTS" > "$BUILD_DIR/plan.txt"
+    if ! grep -qE '(^| )output_vis\.o( |$)' "$BUILD_DIR/plan.txt"; then
         echo "error: build plan does not include output_vis.o — visualiser producer missing" >&2
         echo "       (is -DVISEXPORT reaching the upstream Makefile?)" >&2
         exit 1
     fi
-    if ! grep -qE '(^| )output_vis_v1\.o( |$)' /tmp/huesync-squeezelite-plan.txt; then
+    if ! grep -qE '(^| )output_vis_v1\.o( |$)' "$BUILD_DIR/plan.txt"; then
         echo "error: build plan does not include output_vis_v1.o — HueSync v1 producer missing" >&2
         exit 1
     fi
@@ -177,6 +188,7 @@ esac
 echo "[5/5] Installing to $INSTALL_DIR/squeezelite..."
 install -d "$INSTALL_DIR"
 install -m 0755 "$BUILD_DIR/squeezelite/squeezelite" "$INSTALL_DIR/squeezelite"
+install -m 0755 "$BUILD_DIR/huesync-squeezelite-fifo" "$INSTALL_DIR/huesync-squeezelite-fifo"
 
 echo ""
 echo "Done.  Verify with:"

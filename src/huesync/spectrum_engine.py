@@ -123,7 +123,7 @@ class PublicationRecord:
     epoch: str
     sample_pos: int
     features: object            # AudioFeatures — typed as object to avoid circular import
-    effective_engine_id: str   # kept for backward compatibility
+    effective_spectrum_backend: str   # actual Spectrum engine identity
     sample_end: int = 0        # canonical position past the last sample in this publication
     effective_processor_ids: tuple[str, ...] = ()  # IDs of all processors that contributed
     # Historical Spectrum payload, not a fresh contributor to this record.
@@ -412,8 +412,8 @@ class CavaCoreSpectrumEngine:
     the value of ``_next_exec_start`` before the call.  After the call the
     engine advances the counter by 480.
 
-    The legacy ``feed(pcm, shared)`` entry point still exists for backward
-    compatibility with SpectrumProcessor's carry-buffered path, but new code
+    The SpectrumEngine ``feed(pcm, shared)`` contract supports synchronous
+    callers with arbitrary chunk sizes. The fixed-block production adapter
     should prefer ``feed_block`` so each executed block carries its own
     interval, independent of how many blocks were consumed in one call.
     """
@@ -490,7 +490,7 @@ class CavaCoreSpectrumEngine:
         return result, block_start, block_end
 
     def feed(self, pcm: np.ndarray, shared: SharedAnalysis) -> list[SpectrumUpdate]:
-        """Legacy carry-buffered entry point — kept for compatibility.
+        """SpectrumEngine feed contract with arbitrary transport-sized PCM.
 
         Prefer ``feed_block`` in new code; it returns per-block intervals so
         the SpectrumProcessor does not have to reconstruct positions from
@@ -602,7 +602,7 @@ class CavaCoreSpectrumEngine:
 class SpectrumProcessor:
     """Wraps a SpectrumEngine to satisfy the AnalysisProcessor protocol.
 
-    Converts SharedAnalysisFrame → SharedAnalysis for backward compatibility
+    Projects SharedAnalysisFrame into the SpectrumEngine input contract
     with SpectrumEngine.feed(), then converts SpectrumUpdates → ProcessorUpdates.
 
     This is the canonical spectrum composition point: adding a new SpectrumEngine
@@ -769,7 +769,7 @@ class SpectrumProcessor:
                 self._cava_carry = None
                 return result
             # No SpectrumProcessor-level carry — engine may still have its
-            # own partial carry (legacy code path).  Delegate to flush().
+            # own partial carry (SpectrumEngine feed contract).  Delegate to flush().
             updates = self._engine.flush()
             for u in updates:
                 start = u.sample_pos

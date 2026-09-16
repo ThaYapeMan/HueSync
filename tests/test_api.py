@@ -58,7 +58,6 @@ def _make_mock_manager() -> MagicMock:
     type(manager).active_zone_id = PropertyMock(return_value=None)
     type(manager).active_energy_profile_id = PropertyMock(return_value=None)
     type(manager).detected_sync_master_name = PropertyMock(return_value=None)
-    type(manager).active_color_mode = PropertyMock(return_value=None)
     type(manager).active_effect = PropertyMock(return_value=None)
     type(manager).follower_warning = PropertyMock(return_value=None)
     type(manager).active_bass_hz = PropertyMock(return_value=None)
@@ -407,7 +406,7 @@ def test_lms_players_endpoint_returns_list(client: TestClient, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Zones (was LightProviders)
+# Zones
 # ---------------------------------------------------------------------------
 
 
@@ -451,7 +450,7 @@ def test_create_and_get_analyser(client: TestClient):
 
 
 # ---------------------------------------------------------------------------
-# Effects  (canonical /effects; deprecated alias /scenes)
+# Effects
 # ---------------------------------------------------------------------------
 
 
@@ -468,21 +467,6 @@ def test_create_and_get_effect(client: TestClient):
     assert resp2.json()["name"] == "Vivid"
 
 
-def test_scenes_alias_still_works(client: TestClient):
-    """Deprecated /scenes routes must remain functional until Fase 5."""
-    payload = {"name": "Alias", "effect_type": "mono_pulse"}
-    resp = client.post("/api/scenes", json=payload)
-    assert resp.status_code == 201
-    scene_id = resp.json()["id"]
-
-    assert client.get(f"/api/scenes/{scene_id}").status_code == 200
-    assert client.get("/api/scenes").status_code == 200
-
-
-# ---------------------------------------------------------------------------
-# Couplings
-# ---------------------------------------------------------------------------
-
 
 def _make_full_coupling(storage: Storage) -> Coupling:
     """Create and persist all entities required for a Coupling, return the Coupling."""
@@ -490,18 +474,18 @@ def _make_full_coupling(storage: Storage) -> Coupling:
     zone = Zone(name="Z", controller_id="ctrl-1", entertainment_area_id="ea-1")
     ac = Analyser(name="AC")
     effect = Effect(name="SC")
-    crossfader = EnergyProfile(name="CF", high_energy_effect_id=effect.id)
+    energy_profile = EnergyProfile(name="CF", high_energy_effect_id=effect.id)
     storage.save_virtual_player(player)
     storage.save_zone(zone)
     storage.save_analyser(ac)
     storage.save_effect(effect)
-    storage.save_energy_profile(crossfader)
+    storage.save_energy_profile(energy_profile)
     coupling = Coupling(
         name="Test Coupling",
         player_id=player.id,
         zone_id=zone.id,
         analyser_id=ac.id,
-        energy_profile_id=crossfader.id,
+        energy_profile_id=energy_profile.id,
     )
     storage.save_coupling(coupling)
     return coupling
@@ -512,19 +496,19 @@ def test_create_coupling(client: TestClient):
     zone = Zone(name="Z", controller_id="c1", entertainment_area_id="ea-1")
     ac = Analyser(name="AC")
     effect = Effect(name="SC")
-    crossfader = EnergyProfile(name="CF", high_energy_effect_id=effect.id)
+    energy_profile = EnergyProfile(name="CF", high_energy_effect_id=effect.id)
     client._storage.save_virtual_player(player)
     client._storage.save_zone(zone)
     client._storage.save_analyser(ac)
     client._storage.save_effect(effect)
-    client._storage.save_energy_profile(crossfader)
+    client._storage.save_energy_profile(energy_profile)
 
     payload = {
         "name": "My Coupling",
         "player_id": player.id,
         "analyser_id": ac.id,
         "zone_id": zone.id,
-        "energy_profile_id": crossfader.id,
+        "energy_profile_id": energy_profile.id,
     }
     resp = client.post("/api/couplings", json=payload)
     assert resp.status_code == 201
@@ -627,7 +611,7 @@ def test_patch_coupling_analyser_id_restarts_cava_not_deactivate(client: TestCli
     assert saved is not None and saved.analyser_id == new_ac.id
 
 
-def test_patch_coupling_crossfader_id_update_render_only(client: TestClient):
+def test_patch_coupling_energy_profile_id_update_render_only(client: TestClient):
     """Swapping energy_profile_id must call update_render only — no cava restart,
     no deactivate."""
     coupling = _make_full_coupling(client._storage)
@@ -1067,15 +1051,15 @@ def _read_ws_status(client: TestClient, max_messages: int = 40) -> dict | None:
     return None
 
 
-def test_ws_preview_status_frame_has_color_mode_and_band_hz(client: TestClient):
-    """WebSocket /ws/preview status frame must include color_mode, bass_hz, mid_hz.
+def test_ws_preview_status_frame_has_effect_type_and_band_hz(client: TestClient):
+    """WebSocket /ws/preview status frame must include effect_type, bass_hz, mid_hz.
 
     Regression guard: these fields silently disappeared twice during large renames.
-    When an active coupling uses spectrum_rgb, the frontend needs color_mode ==
+    When an active coupling uses spectrum_rgb, the frontend needs effect_type ==
     'spectrum_rgb' to enable the R/G/B bar colouring in SpectrumBars.
     """
     manager = client._manager
-    type(manager).active_color_mode = PropertyMock(return_value="spectrum_rgb")
+    type(manager).active_effect = PropertyMock(return_value="spectrum_rgb")
     type(manager).active_bass_hz = PropertyMock(return_value=250)
     type(manager).active_mid_hz = PropertyMock(return_value=2000)
     type(manager).active_coupling_id = PropertyMock(return_value="coupling-1")
@@ -1083,8 +1067,8 @@ def test_ws_preview_status_frame_has_color_mode_and_band_hz(client: TestClient):
     status = _read_ws_status(client)
 
     assert status is not None, "No status message received from /ws/preview"
-    assert status.get("color_mode") == "spectrum_rgb", (
-        "color_mode missing or wrong in WebSocket status frame — "
+    assert status.get("effect_type") == "spectrum_rgb", (
+        "effect_type missing or wrong in WebSocket status frame — "
         "SpectrumBars will show all bars in accent colour instead of R/G/B"
     )
     assert status.get("bass_hz") == 250, "bass_hz missing from WebSocket status frame"
@@ -1092,11 +1076,11 @@ def test_ws_preview_status_frame_has_color_mode_and_band_hz(client: TestClient):
 
 
 def test_ws_preview_status_frame_null_when_no_session(client: TestClient):
-    """color_mode must be null when no coupling is active."""
+    """effect_type must be null when no coupling is active."""
     status = _read_ws_status(client)
 
     assert status is not None, "No status message received from /ws/preview"
-    assert status.get("color_mode") is None
+    assert status.get("effect_type") is None
     assert status.get("bass_hz") is None
     assert status.get("mid_hz") is None
 

@@ -17,7 +17,7 @@ from typing import NamedTuple
 
 import pytest
 
-from huesync.models import COLOUR_MODES, EFFECT_IDS, ONSET_METHODS, ColorMode
+from huesync.models import EFFECT_IDS, ONSET_METHODS
 
 _ROOT = Path(__file__).parent.parent
 _API_PY = _ROOT / "src" / "huesync" / "api.py"
@@ -64,19 +64,6 @@ def test_no_string_literal_outside_canonical(fc: FieldCheck) -> None:
         f"{fc.name}: {fc.source_file.name} uses values not in canonical set: "
         f"{unknown!r}.  Add them to models.py or remove them."
     )
-
-
-# ---------------------------------------------------------------------------
-# colour_mode-specific: enum consistency (legacy compat)
-# ---------------------------------------------------------------------------
-
-def test_colour_modes_matches_color_mode_enum() -> None:
-    """COLOUR_MODES must equal the set of ColorMode enum values — the two cannot diverge."""
-    assert COLOUR_MODES == frozenset(cm.value for cm in ColorMode)
-
-
-def test_colour_modes_contains_expected_values() -> None:
-    assert COLOUR_MODES == {"spectrum_rgb", "mono_pulse"}
 
 
 # ---------------------------------------------------------------------------

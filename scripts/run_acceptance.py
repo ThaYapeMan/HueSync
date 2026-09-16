@@ -432,10 +432,10 @@ def analyse_pcm(
             "t_s": round(t_s, 6),
             "backend": backend,
             "effective_backend": (
-                getattr(rec, "effective_engine_id", backend) if rec else backend
+                getattr(rec, "effective_spectrum_backend", backend) if rec else backend
             ),
             "effective_engine": (
-                getattr(rec, "effective_engine_id", backend) if rec else backend
+                getattr(rec, "effective_spectrum_backend", backend) if rec else backend
             ),
         }
         for i, v in enumerate(features.bars):  # type: ignore[union-attr]

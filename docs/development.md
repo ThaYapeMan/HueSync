@@ -38,3 +38,12 @@ Only rebuild/commit generated assets when frontend changes require it. Backend/d
 changes do not require unrelated frontend output updates.
 
 See [testing](testing.md) for full validation and native evidence boundaries.
+
+## Deployment versus development
+
+Use `scripts/install-huesync.sh` for standard Debian deployment; development commands
+above are not an alternative operator install procedure. Native/commit build artifacts
+are generated outside the checkout. Only a wheel-installed runtime is expected to
+report generated deployment commit metadata. A direct source import may report unknown.
+The current storage schema is versioned: use isolated current-schema fixtures for
+runtime tests and explicit migration functions for historical fixtures.

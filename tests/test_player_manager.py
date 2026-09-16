@@ -232,12 +232,12 @@ def _make_full_storage(tmp_path: Path) -> tuple[Storage, Coupling]:
     )
     storage.save_effect(effect)
 
-    crossfader = EnergyProfile(
+    energy_profile = EnergyProfile(
         id="cf-1", name="Default CF",
         high_energy_effect_id="scene-1",
         blend_start=0.3, blend_end=0.7, blend_response=0.1,
     )
-    storage.save_energy_profile(crossfader)
+    storage.save_energy_profile(energy_profile)
 
     coupling = Coupling(
         id="coupling-1", name="Living Room",
@@ -294,7 +294,7 @@ def test_build_profile_from_coupling_returns_none_on_missing_ac(tmp_path: Path) 
     assert _build_engine_profile(coupling, storage) is None
 
 
-def test_build_profile_from_coupling_returns_none_on_missing_crossfader(tmp_path: Path) -> None:
+def test_build_profile_from_coupling_returns_none_on_missing_energy_profile(tmp_path: Path) -> None:
     storage, coupling = _make_full_storage(tmp_path)
     storage.delete_energy_profile("cf-1")
     assert _build_engine_profile(coupling, storage) is None
@@ -338,7 +338,7 @@ def test_activate_coupling_raises_on_missing_analyser(tmp_path: Path) -> None:
         asyncio.run(manager.activate_coupling(coupling))
 
 
-def test_activate_coupling_raises_on_missing_crossfader(tmp_path: Path) -> None:
+def test_activate_coupling_raises_on_missing_energy_profile(tmp_path: Path) -> None:
     storage, coupling = _make_full_storage(tmp_path)
     storage.delete_energy_profile("cf-1")
     manager = PlayerManager(storage)
@@ -454,7 +454,7 @@ def test_deactivate_clears_active_coupling_id(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# active_color_mode / active_bass_hz / active_mid_hz property chain
+# active_effect / active_bass_hz / active_mid_hz property chain
 #
 # Regression guard: these properties read self._active.profile.{effect_type,bass_hz,
 # mid_hz}.  Any future rename that breaks the chain (e.g. "effect_type" field moved,
@@ -487,16 +487,16 @@ def _make_session_from_storage(tmp_path: Path) -> tuple[PlayerManager, ActiveSes
     return manager, session
 
 
-def test_active_color_mode_reads_scene_effect(tmp_path: Path) -> None:
-    """active_color_mode must reflect the Effect effect_type stored in the active profile.
+def test_active_effect_reads_scene_effect(tmp_path: Path) -> None:
+    """active_effect must reflect the Effect effect_type stored in the active profile.
 
     Regression: any rename that breaks self._active.profile.effect_type causes all
     spectrum bars to render in accent colour (purple) instead of R/G/B.
     """
     manager, _ = _make_session_from_storage(tmp_path)
-    assert manager.active_color_mode == "spectrum_rgb", (
-        f"active_color_mode must return the Effect effect_type ('spectrum_rgb'); "
-        f"got {manager.active_color_mode!r} — check profile.effect_type property chain"
+    assert manager.active_effect == "spectrum_rgb", (
+        f"active_effect must return the Effect effect_type ('spectrum_rgb'); "
+        f"got {manager.active_effect!r} — check profile.effect_type property chain"
     )
 
 
@@ -512,7 +512,7 @@ def test_active_band_hz_reads_scene_values(tmp_path: Path) -> None:
 
 
 def test_update_render_propagates_effect_to_active_profile(tmp_path: Path) -> None:
-    """update_render must set self._active.profile so active_color_mode reflects the change.
+    """update_render must set self._active.profile so active_effect reflects the change.
 
     Regression: ba643f3 fixed a missing 'self._active.profile = profile' in
     update_render.  This test ensures that assignment is never removed.
@@ -526,9 +526,9 @@ def test_update_render_propagates_effect_to_active_profile(tmp_path: Path) -> No
     )
     manager.update_render(new_profile)
 
-    assert manager.active_color_mode == "mono_pulse", (
+    assert manager.active_effect == "mono_pulse", (
         "update_render must assign self._active.profile; "
-        "active_color_mode still reads the old value — profile assignment missing"
+        "active_effect still reads the old value — profile assignment missing"
     )
     assert manager.active_bass_hz == 400
     assert manager.active_mid_hz == 4000
@@ -594,8 +594,8 @@ def _make_airplay_storage(tmp_path: Path) -> tuple[Storage, Coupling]:
     effect = Effect(id="scene-ap", name="Default", effect_type="spectrum_rgb")
     storage.save_effect(effect)
 
-    crossfader = EnergyProfile(id="cf-ap", name="Default CF", high_energy_effect_id="scene-ap")
-    storage.save_energy_profile(crossfader)
+    energy_profile = EnergyProfile(id="cf-ap", name="Default CF", high_energy_effect_id="scene-ap")
+    storage.save_energy_profile(energy_profile)
 
     coupling = Coupling(
         id="coupling-ap", name="AirPlay Room",
@@ -814,8 +814,10 @@ def _make_lms_storage(
     effect = Effect(id="scene-lms", name="Default", effect_type="spectrum_rgb")
     storage.save_effect(effect)
 
-    crossfader = EnergyProfile(id="cf-lms", name="Default CF", high_energy_effect_id="scene-lms")
-    storage.save_energy_profile(crossfader)
+    energy_profile = EnergyProfile(
+        id="cf-lms", name="Default Energy", high_energy_effect_id="scene-lms",
+    )
+    storage.save_energy_profile(energy_profile)
 
     coupling = Coupling(
         id="coupling-lms", name="LMS Room",
@@ -885,3 +887,24 @@ def test_lms_cava_path_when_bars_source_cava(tmp_path: Path) -> None:
 
     mock_cava.assert_called_once()
     mock_pcm.assert_not_called()
+
+
+def test_installed_producer_matches_ingress_abi(tmp_path):
+    """No implicit distro fallback: external CAVA and canonical PCM have distinct ABIs."""
+    from huesync.models import Profile
+    from huesync.player_manager import ActiveSession, PlayerManager
+    from huesync.storage import Storage
+
+    manager = PlayerManager(Storage(tmp_path / 'config.json'))
+    for mode, expected in [('cava', 'huesync-squeezelite-fifo'), ('pcm_pipeline', 'squeezelite')]:
+        profile = Profile(player_mac='aa:bb:cc:dd:ee:ff', bars_source=mode)
+        session = ActiveSession(profile)
+        with patch('shutil.which', return_value='/usr/local/bin/' + expected) as which, \
+                patch('subprocess.Popen') as popen:
+            manager._start_squeezelite(session, profile)
+        which.assert_called_once_with(expected)
+        assert popen.call_args.args[0][0] == '/usr/local/bin/' + expected
+        with patch('shutil.which', return_value=None):
+            import pytest
+            with pytest.raises(RuntimeError, match='install-huesync'):
+                manager._start_squeezelite(session, profile)

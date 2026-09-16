@@ -2,7 +2,8 @@
 
 The web UI and API persist configuration through Storage. `HUESYNC_CONFIG` defaults
 to `/etc/huesync/config.json`. Keep a backup before migration or target experiments.
-Startup migrates supported historical formats and clears stale active-coupling state;
+The installer explicitly migrates supported historical formats before startup.
+Current startup rejects non-current schema and clears stale active-coupling state;
 it does not restore a previous process merely because a stored ID was active.
 
 ## Entities
@@ -54,3 +55,13 @@ Retirement is incomplete teardown, not successful activation. `analysis_stopping
 reports retained ownership; retry deactivation once the worker exits. See [API](api.md).
 The implementation does not promise crash-atomic transactions across JSON storage,
 process creation and every possible operational failure.
+
+## Persisted schema boundary
+
+Current schema version: `schema_version: 1`. Collections: `controllers`,
+`virtual_players`, `zones`, `analysers`, `effects`, `energy_profiles`, `couplings`,
+`player_latencies`, plus `active_coupling_id`. Coupling has only the current
+`player_id`, `zone_id`, `analyser_id`, `energy_profile_id` references.
+Normal model/storage deserialization rejects unknown keys; it does not translate
+historical names. Only the explicit installer migration knows those names.
+See [migration and backups](installation.md#migration).

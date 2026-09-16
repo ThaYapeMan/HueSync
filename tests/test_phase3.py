@@ -1,4 +1,4 @@
-"""Phase 3 tests: StereoMagStft, PcmAudioPipelineV2, stereo acceptance, AirPlay path."""
+"""Phase 3 tests: StereoMagStft, CanonicalAnalysisPipeline, stereo acceptance, AirPlay path."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import numpy as np
+from pipeline_factory import make_pipeline
 
 from huesync.canonicalizer import (
     AudioCanonicalizer,
@@ -29,7 +30,6 @@ from huesync.sync_engine import (
     _CAP_SAMPLE_RATE,
     CanonicalAnalysisPipeline,
     MultibandStftPipeline,
-    PcmAudioPipelineV2,
     StereoMagStft,
     StftOnsetPipeline,
     SuperfluxStftPipeline,
@@ -82,7 +82,7 @@ def _make_canonical_frame(
 
 
 def _feed_pipeline(
-    pipeline: PcmAudioPipelineV2,
+    pipeline: CanonicalAnalysisPipeline,
     stereo: np.ndarray,
     epoch_id: str = "ep-1",
     chunk_size: int = 4096,
@@ -100,8 +100,8 @@ def _feed_pipeline(
         offset = end
 
 
-def _make_pipeline(**kwargs) -> PcmAudioPipelineV2:
-    """Return a PcmAudioPipelineV2 with a null source and default profile params."""
+def _make_pipeline(**kwargs) -> CanonicalAnalysisPipeline:
+    """Return a CanonicalAnalysisPipeline with a null source and default profile params."""
     src = MagicMock()
     src.running = True
     defaults = dict(
@@ -118,7 +118,7 @@ def _make_pipeline(**kwargs) -> PcmAudioPipelineV2:
         mid_hz=2000,
     )
     defaults.update(kwargs)
-    return PcmAudioPipelineV2(**defaults)
+    return make_pipeline(**defaults)
 
 
 # ---------------------------------------------------------------------------
@@ -305,7 +305,7 @@ def test_multiband_push_mag_type():
 
 
 # ---------------------------------------------------------------------------
-# PcmAudioPipelineV2 — opposite-phase stereo bar test (central Phase 3 test)
+# CanonicalAnalysisPipeline — opposite-phase stereo bar test (central Phase 3 test)
 # ---------------------------------------------------------------------------
 
 
@@ -361,7 +361,7 @@ def test_v2_legacy_mono_downmix_would_cancel():
     """Prove that (L+R)/2 with opposite-phase input gives near-zero output.
 
     This is the regression the new path is designed to avoid.  This test
-    directly verifies the failure mode; PcmAudioPipelineV2 never takes this path.
+    directly verifies the failure mode; CanonicalAnalysisPipeline never takes this path.
     """
     from huesync.pcm_source import PcmStft
 
@@ -380,11 +380,11 @@ def test_v2_legacy_mono_downmix_would_cancel():
 
 
 # ---------------------------------------------------------------------------
-# PcmAudioPipelineV2 — stereo acceptance: all six scenarios
+# CanonicalAnalysisPipeline — stereo acceptance: all six scenarios
 # ---------------------------------------------------------------------------
 
 
-def _warmup_and_measure(pipeline: PcmAudioPipelineV2, stereo: np.ndarray) -> list[float]:
+def _warmup_and_measure(pipeline: CanonicalAnalysisPipeline, stereo: np.ndarray) -> list[float]:
     """Warm up the BandNormaliser, then measure bars on the given signal."""
     _feed_pipeline(pipeline, stereo, epoch_id="ep-measure")
     _feed_pipeline(pipeline, stereo, epoch_id="ep-measure")
@@ -494,7 +494,7 @@ def test_v2_mono_source_canonicalized_to_lr_equal():
 
 
 # ---------------------------------------------------------------------------
-# PcmAudioPipelineV2 — timing is sample-derived
+# CanonicalAnalysisPipeline — timing is sample-derived
 # ---------------------------------------------------------------------------
 
 
@@ -513,7 +513,7 @@ def test_v2_sample_rate_is_48000():
 
 
 # ---------------------------------------------------------------------------
-# PcmAudioPipelineV2 — epoch/reset behaviour
+# CanonicalAnalysisPipeline — epoch/reset behaviour
 # ---------------------------------------------------------------------------
 
 
@@ -526,17 +526,17 @@ def test_v2_epoch_transition_resets_stft():
     _feed_pipeline(p, sig_a, epoch_id="epoch-A")
 
     # Remember state.
-    epoch_id_before = p._pipeline._current_epoch_id
-    onset_before = id(p._pipeline._onset_pipeline)
+    epoch_id_before = p._current_epoch_id
+    onset_before = id(p._beat_detector._state.onset_pipeline)
 
     # Epoch B: different signal, new epoch_id.
     sig_b = _silence_stereo(n=100)
     _feed_pipeline(p, sig_b, epoch_id="epoch-B")
 
     # DSP was reset: new epoch_id committed, new onset_pipeline instance.
-    assert p._pipeline._current_epoch_id == "epoch-B"
-    assert p._pipeline._current_epoch_id != epoch_id_before
-    assert id(p._pipeline._onset_pipeline) != onset_before
+    assert p._current_epoch_id == "epoch-B"
+    assert p._current_epoch_id != epoch_id_before
+    assert id(p._beat_detector._state.onset_pipeline) != onset_before
 
 
 def test_v2_epoch_transition_no_contamination():
@@ -564,29 +564,29 @@ def test_v2_stream_invalidated_resets_dsp():
     p = _make_pipeline()
     sig = _sine_stereo(440, 440, 0.5, 0.5, n=3 * _CANONICAL_RATE)
     _feed_pipeline(p, sig, epoch_id="ep-1")
-    onset_id_before = id(p._pipeline._onset_pipeline)
+    onset_id_before = id(p._beat_detector._state.onset_pipeline)
 
     # Simulate StreamInvalidated coming through _run().
     p._run_one_canonical(StreamInvalidated(cause=InvalidationCause.UNKNOWN))
 
     # onset_pipeline was replaced; epoch cleared.
-    assert id(p._pipeline._onset_pipeline) != onset_id_before
-    assert p._pipeline._current_epoch_id is None
+    assert id(p._beat_detector._state.onset_pipeline) != onset_id_before
+    assert p._current_epoch_id is None
 
 
 def test_v2_temporarily_no_data_no_reset():
     """TemporarilyNoData must not reset DSP or change epoch."""
     p = _make_pipeline()
-    p._pipeline._source.running = True
+    p._source.running = True
     sig = _sine_stereo(440, 440, 0.5, 0.5, n=3 * _CANONICAL_RATE)
     _feed_pipeline(p, sig, epoch_id="ep-1")
-    onset_id = id(p._pipeline._onset_pipeline)
-    epoch = p._pipeline._current_epoch_id
+    onset_id = id(p._beat_detector._state.onset_pipeline)
+    epoch = p._current_epoch_id
 
     p._run_one_canonical(TemporarilyNoData())
 
-    assert id(p._pipeline._onset_pipeline) == onset_id
-    assert p._pipeline._current_epoch_id == epoch
+    assert id(p._beat_detector._state.onset_pipeline) == onset_id
+    assert p._current_epoch_id == epoch
 
 
 def test_v2_end_of_stream_resets_dsp():
@@ -597,11 +597,11 @@ def test_v2_end_of_stream_resets_dsp():
 
     p._run_one_canonical(EndOfStream())
 
-    assert p._pipeline._current_epoch_id is None
+    assert p._current_epoch_id is None
 
 
 # ---------------------------------------------------------------------------
-# PcmAudioPipelineV2 — chunk independence
+# CanonicalAnalysisPipeline — chunk independence
 # ---------------------------------------------------------------------------
 
 
@@ -627,7 +627,7 @@ def test_v2_chunk_independence_max_bar():
 
 
 # ---------------------------------------------------------------------------
-# PcmAudioPipelineV2 — AudioFeatures compatibility
+# CanonicalAnalysisPipeline — AudioFeatures compatibility
 # ---------------------------------------------------------------------------
 
 
@@ -749,10 +749,10 @@ def _s16le_stereo(left: np.ndarray, right: np.ndarray) -> bytes:
 
 def test_full_airplay_path_opposite_phase_nonzero_bars():
     """Full path: 44100 S16LE → AirPlayPipeStereoSource → AudioCanonicalizer →
-    48000 stereo → PcmAudioPipelineV2 → non-zero bars for opposite-phase audio."""
+    48000 stereo → CanonicalAnalysisPipeline → non-zero bars for opposite-phase audio."""
     src, w_fd = _make_airplay_stereo_pipe()
     canon = AudioCanonicalizer()
-    pipeline = PcmAudioPipelineV2(
+    pipeline = make_pipeline(
         source=src,
         bars=30,
         lower_cutoff_freq=50,
@@ -895,14 +895,14 @@ def test_shared_factory_in_player_manager():
 
 
 def _run_one_canonical_patch(self, cresult):
-    """Drive PcmAudioPipelineV2 with a single pre-built CanonicalReadResult.
+    """Drive CanonicalAnalysisPipeline with a single pre-built CanonicalReadResult.
 
     Mirrors the CanonicalAnalysisPipeline._run() dispatch exactly so the tests
     exercise the real production paths via the inner CAP instance.
     """
     from huesync.canonicalizer import CanonicalData
 
-    cap = self._pipeline
+    cap = self
     if isinstance(cresult, CanonicalData):
         cap._process_canonical_frame(cresult.frame)
     elif isinstance(cresult, TemporarilyNoData):
@@ -920,7 +920,7 @@ def _run_one_canonical_patch(self, cresult):
 
 
 # Monkey-patch onto the class for the reset tests above.
-PcmAudioPipelineV2._run_one_canonical = _run_one_canonical_patch
+CanonicalAnalysisPipeline._run_one_canonical = _run_one_canonical_patch
 
 
 # ---------------------------------------------------------------------------
@@ -937,7 +937,7 @@ def test_v2_mag_to_bar_floats_above_squelch():
     stft = StereoMagStft(_CANONICAL_RATE)
     mag_frames = stft.push(stereo)
     assert mag_frames, "Must produce STFT magnitude frames"
-    floats = pipeline._pipeline._engine._mag_to_bar_floats(mag_frames[0])
+    floats = pipeline._spectrum_processor._engine._mag_to_bar_floats(mag_frames[0])
     assert max(floats) > 0.0, "σ=0.1 noise must produce non-zero bar floats"
 
 
@@ -945,7 +945,7 @@ def test_v2_mag_to_bar_floats_silence_zero():
     """Exact silence (all-zero mag) → all-zero bar floats (squelch gate)."""
     p = _make_pipeline()
     mag = np.zeros(1025, dtype=np.float32)
-    floats = p._pipeline._engine._mag_to_bar_floats(mag)
+    floats = p._spectrum_processor._engine._mag_to_bar_floats(mag)
     assert all(f == 0.0 for f in floats), f"Silence must squelch to 0; got {floats[:4]}"
 
 
@@ -953,7 +953,7 @@ def test_v2_mag_to_bar_floats_squelch_at_noise_floor():
     """Values at 90% of _V2_NOISE_FLOOR are squelched to zero."""
     p = _make_pipeline()
     mag = np.full(1025, _V2_NOISE_FLOOR * 0.9, dtype=np.float32)
-    floats = p._pipeline._engine._mag_to_bar_floats(mag)
+    floats = p._spectrum_processor._engine._mag_to_bar_floats(mag)
     assert all(f == 0.0 for f in floats), "Values below noise floor must be gated"
 
 
@@ -963,7 +963,7 @@ def test_v2_mag_to_bar_floats_spectral_shape_preserved():
     mag = np.zeros(1025, dtype=np.float32)
     mag[:43] = 0.5    # ≲1000 Hz — strong
     mag[43:] = 0.01   # ≳1000 Hz — weak but above noise floor
-    floats = p._pipeline._engine._mag_to_bar_floats(mag)
+    floats = p._spectrum_processor._engine._mag_to_bar_floats(mag)
     assert floats[0] > floats[-1], (
         f"Low-freq bar ({floats[0]:.4f}) must exceed high-freq bar ({floats[-1]:.4f})"
     )
@@ -998,7 +998,7 @@ def test_v2_broadband_signal_nonzero_bars():
     stft = StereoMagStft(_CANONICAL_RATE)
     mag_frames = stft.push(sig)
     assert mag_frames, "STFT must produce frames"
-    floats = p._pipeline._engine._mag_to_bar_floats(mag_frames[0])
+    floats = p._spectrum_processor._engine._mag_to_bar_floats(mag_frames[0])
     assert max(floats) > 0.0, "σ=0.1 noise per-bar floats must be non-zero above squelch"
 
     bars = _warmup_and_measure(p, sig)
@@ -1009,7 +1009,7 @@ def test_v2_broadband_signal_nonzero_bars():
 
 
 def test_full_airplay_path_quiet_signal_nonzero_bars():
-    """Full path: 44100 S16LE σ=0.1 noise → decode → soxr → PcmAudioPipelineV2
+    """Full path: 44100 S16LE σ=0.1 noise → decode → soxr → CanonicalAnalysisPipeline
     must now produce non-zero bars with gate=0.0.
 
     This is the inverse of the former defect-reproduction test: the same signal
@@ -1051,10 +1051,8 @@ def test_full_airplay_path_quiet_signal_nonzero_bars():
 
 def test_v2_epoch_reset_clears_peak_ema():
     """After _reset_dsp(), v2_peak_ema is reset to None (fresh reference on next epoch)."""
-    from huesync.sync_engine import BandNormaliser
 
     p = _make_pipeline()
-    assert p.normaliser.gate == 0.0, "BandNormaliser stub must keep gate=0.0"
     assert p.v2_peak_ema is None, "Initial v2_peak_ema must be None"
 
     # Prime the pipeline so v2_peak_ema is set.
@@ -1066,14 +1064,10 @@ def test_v2_epoch_reset_clears_peak_ema():
     _feed_pipeline(p, _silence_stereo(n=100), epoch_id="epoch-B")
     assert p.v2_peak_ema is None, "_reset_dsp must clear v2_peak_ema"
     assert p.v2_bar_smooth is None, "_reset_dsp must clear v2_bar_smooth"
-    assert p.normaliser.gate == 0.0, (
-        f"BandNormaliser gate must remain 0.0 after reset; "
-        f"got {p.normaliser.gate} (DEFAULT_GATE={BandNormaliser.DEFAULT_GATE})"
-    )
 
 
 # ---------------------------------------------------------------------------
-# Static audit: gate=0.0 is isolated to PcmAudioPipelineV2
+# Static audit: gate=0.0 is isolated to CanonicalAnalysisPipeline
 # ---------------------------------------------------------------------------
 
 
@@ -1099,18 +1093,6 @@ def test_static_audit_cava_pipeline_uses_default_gate():
         "and the gate is correctly calibrated for that scale"
     )
 
-
-def test_static_audit_legacy_pcm_pipeline_uses_default_gate():
-    """Legacy PcmAudioPipeline must continue to use DEFAULT_GATE (not gate=0.0)."""
-    import inspect
-
-    from huesync.sync_engine import PcmAudioPipeline
-
-    src = inspect.getsource(PcmAudioPipeline.__init__)
-    assert "gate=0.0" not in src, (
-        "PcmAudioPipeline must not use gate=0.0 — its scale calibration is "
-        "separate from PcmAudioPipelineV2 and was not analysed"
-    )
 
 
 def test_static_audit_v2_uses_float_path_not_bytes():
@@ -1271,7 +1253,7 @@ def test_v2_freq_response_equal_tones_similar_bars():
     ])
     stft_low = StereoMagStft(sr)
     mag_low = stft_low.push(low_stereo)[-1]
-    bars_low = p._pipeline._engine._mag_to_bar_floats(mag_low)
+    bars_low = p._spectrum_processor._engine._mag_to_bar_floats(mag_low)
 
     high_stereo = np.column_stack([
         (np.sin(2 * np.pi * 8000 * t) * amplitude).astype(np.float32),
@@ -1279,7 +1261,7 @@ def test_v2_freq_response_equal_tones_similar_bars():
     ])
     stft_high = StereoMagStft(sr)
     mag_high = stft_high.push(high_stereo)[-1]
-    bars_high = p._pipeline._engine._mag_to_bar_floats(mag_high)
+    bars_high = p._spectrum_processor._engine._mag_to_bar_floats(mag_high)
 
     max_low = max(bars_low)
     max_high = max(bars_high)

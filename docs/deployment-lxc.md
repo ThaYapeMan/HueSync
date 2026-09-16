@@ -5,12 +5,21 @@ cannot establish live deployment behavior.
 
 ## Before activation
 
-1. Follow [installation](installation.md); record the HueSync commit and configuration.
-2. Provision host snd-dummy/audio-device passthrough and permissions for LMS pacing.
-3. Build the pinned Squeezelite producer with VISEXPORT. Record actual binary path and
-   revision; restart the process so it maps a v1 segment.
-4. Confirm the selected mode: canonical PCM + V2/CAVA Core, or external CAVA/FIFO.
-5. Run `bash scripts/validate.sh`; inspect `journalctl -u huesync -n 100`.
+```sh
+git clone https://github.com/ThaYapeMan/HueSync.git
+cd HueSync
+sudo ./scripts/install-huesync.sh
+sudo ./scripts/install-huesync.sh --check
+```
+
+The repository installer is the authoritative standard deployment path. It owns
+packages, full native builds, frontend/wheel installation, schema migration and
+services. Do not reproduce separate manual dependency or producer-patching steps.
+Record its commit/binary hashes and run it twice to verify target idempotency.
+
+The host must expose paced snd-dummy/audio devices and appropriate permissions for
+LMS; the guest installer does not alter the host. Select canonical PCM + V2/CAVA Core
+or the intentional external FIFO route in HueSync. Inspect `journalctl -u huesync`.
 
 Do not read a production audio FIFO from a diagnostic second consumer. For SHM,
 inspect metadata or use isolated test fixtures. Unsupported canonical ABI is a

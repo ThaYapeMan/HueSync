@@ -1,0 +1,9 @@
+// HueSync may restart only its managed receiver when the advertised name changes.
+polkit.addRule(function(action, subject) {
+    if (subject.user === "huesync" &&
+        action.id === "org.freedesktop.systemd1.manage-units" &&
+        action.lookup("unit") === "shairport-sync.service" &&
+        action.lookup("verb") === "restart") {
+        return polkit.Result.YES;
+    }
+});

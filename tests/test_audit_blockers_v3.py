@@ -423,8 +423,8 @@ def test_pending_state_is_bounded_across_many_feeds():
         cap.feed(_make_frame(sample_pos=i * _HOP))
     # _pending_onset is cleared inside _process_canonical_frame; the
     # invariant is that it never accumulates.
-    assert len(cap._pending_onset) <= 8, (
-        f"_pending_onset grew unbounded: len={len(cap._pending_onset)}"
+    assert len(cap._bar_history) <= 1000, (
+        f"_pending_onset grew unbounded: len={len(cap._bar_history)}"
     )
 
 

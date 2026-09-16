@@ -8,7 +8,7 @@
  * 3. Add it to models.py and test_enum_fields.py on the backend.
  */
 import { describe, it, expect } from 'vitest'
-import { ONSET_METHODS, COLOUR_MODES } from '../lib/api'
+import { ONSET_METHODS } from '../lib/api'
 
 interface FieldSpec {
   name: string
@@ -21,11 +21,6 @@ const FIELD_SPECS: FieldSpec[] = [
     name: 'ONSET_METHODS',
     constant: ONSET_METHODS,
     expectedValues: new Set(['combined', 'multiband', 'superflux']),
-  },
-  {
-    name: 'COLOUR_MODES',
-    constant: COLOUR_MODES,
-    expectedValues: new Set(['spectrum_rgb', 'mono_pulse']),
   },
 ]
 

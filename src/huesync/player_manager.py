@@ -422,11 +422,6 @@ class PlayerManager:
         return None
 
     @property
-    def active_color_mode(self) -> str | None:
-        """Deprecated alias for active_effect; kept for backward compatibility."""
-        return self.active_effect
-
-    @property
     def active_onset_method(self) -> str | None:
         return self._active.profile.onset_method if self._active else None
 
@@ -572,7 +567,7 @@ class PlayerManager:
         output_config: HueOutputConfig,
         channels: list[ChannelInfo],
     ) -> None:
-        """LMS path: squeezelite + (cava or PcmAudioPipeline) + Hue."""
+        """LMS path: squeezelite + (external CAVA or canonical analysis) + Hue."""
         self._start_squeezelite(session, profile)
 
         if profile.bars_source == "pcm_pipeline":
@@ -701,11 +696,11 @@ class PlayerManager:
         output_config: HueOutputConfig,
         channels: list[ChannelInfo],
     ) -> None:
-        """AirPlay path: stereo pipe source + AudioCanonicalizer + PcmAudioPipelineV2 + Hue.
+        """AirPlay path: stereo pipe source + AudioCanonicalizer + CanonicalAnalysisPipeline + Hue.
 
         Phase 3 native AirPlay path.  Uses the stereo decoded-source adapter
         (AirPlayPipeStereoSource) and the canonical analysis pipeline
-        (PcmAudioPipelineV2) which performs phase-safe stereo STFT analysis.
+        (CanonicalAnalysisPipeline) which performs phase-safe stereo STFT analysis.
 
         No squeezelite, no cava, no FIFO, no LMS follower.  Exactly one ingress
         reader owns the production AirPlay FIFO — AirPlayPipeStereoSource.
@@ -1240,9 +1235,12 @@ class PlayerManager:
             log.warning("Could not restart shairport-sync: %s", exc)
 
     def _start_squeezelite(self, session: ActiveSession, profile: Profile) -> None:
-        binary = shutil.which("squeezelite")
+        # External CAVA consumes upstream SHM ABI v0; canonical analysis requires
+        # our v1 producer. Both binaries are built by the repository installer.
+        name = "huesync-squeezelite-fifo" if profile.bars_source == "cava" else "squeezelite"
+        binary = shutil.which(name)
         if not binary:
-            raise RuntimeError("squeezelite binary not found on PATH")
+            raise RuntimeError(f"{name} binary not found; run scripts/install-huesync.sh")
 
         if not profile.player_mac:
             profile.player_mac = generate_locally_administered_mac()

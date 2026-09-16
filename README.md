@@ -57,8 +57,9 @@ HueSync domain model
 The six core entities plus Coupling are persisted configuration objects. Activation
 resolves their references and builds an internal runtime Profile; that Profile is
 not an additional user-facing domain entity. Historical names above are migration
-terminology, not current entity names. EnergyProfiles still use the JSON collection
-key `crossfaders` for storage compatibility. See [configuration](docs/configuration.md).
+terminology, not current entity names. Current persisted collections use
+`energy_profiles` and `effects`; historical data is converted once during installation,
+with a backup and conflict checks. See [configuration](docs/configuration.md).
 
 ## Player-independent audio architecture
 
@@ -185,15 +186,25 @@ selects V2 or FIFO. See [analyzers](docs/analyzers.md) and the
 
 ## Quick start
 
-A fresh Linux installation needs Python 3.11+, compiler tools and FFTW development
-headers because the package build compiles the embedded library even when V2 is
-selected. LMS canonical PCM also needs the patched producer; installing a stock
-Squeezelite package is insufficient for that route.
+The repository installer is the authoritative standard deployment path.
+Supported installer target: **Debian 13 / trixie, x86_64, with systemd**.
 
-Follow [installation](docs/installation.md), then [LXC deployment](docs/deployment-lxc.md)
-for the target host. The UI listens on port **8420**. Configure a controller and
-Entertainment zone, an audio source, an Analyser and an Effect/EnergyProfile,
-then activate their Coupling. See [configuration](docs/configuration.md).
+```sh
+git clone https://github.com/ThaYapeMan/HueSync.git
+cd HueSync
+sudo ./scripts/install-huesync.sh
+```
+
+The installer provisions dependencies, builds the patched Squeezelite producer and
+AirPlay 2 receiver, builds the frontend/native wheel, migrates saved configuration,
+verifies the installed artifacts, and starts the repository service. No manual
+package installation, producer patching or JSON migration is part of that workflow.
+
+Open `http://<host>:8420` and configure the controller, Zone, player, Analyser,
+Effects/EnergyProfile and Coupling. Host audio-device passthrough remains an LXC
+prerequisite for paced LMS playback; a guest script cannot provision host devices.
+See [installation](docs/installation.md) and [LXC deployment](docs/deployment-lxc.md).
+For read-only diagnosis, run `sudo ./scripts/install-huesync.sh --check`.
 
 ## Validation status
 

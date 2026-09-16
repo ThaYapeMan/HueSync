@@ -51,7 +51,8 @@ are averaged; no second V2 Spectrum conditioning follows CAVA.
 are the production engine source of truth. Validation checks IDs without requiring
 native loading; activation checks availability. A new Spectrum implementation
 requires its implementation, registry entry and tests, not new ingress/Effects
-branches. The compatibility wrappers delegate to the shared pipeline.
+branches. The old whole-pipeline compatibility wrappers have been removed;
+production and tests construct the shared canonical pipeline with its engine.
 
 This is a static internal registry. There is no generic graph, node scheduler,
 dynamic discovery or plugin framework. The architecture is frozen.

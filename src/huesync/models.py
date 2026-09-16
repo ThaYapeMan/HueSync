@@ -6,16 +6,12 @@ whole config can live in one human-readable, git-diffable file.
 
 from __future__ import annotations
 
-import logging
 import uuid
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field
 from enum import StrEnum
 
 from .spectrum_engine import VALID_BARS_SOURCES as _VALID_BARS_SOURCES
 from .spectrum_engine import VALID_ENGINE_IDS as _VALID_ENGINE_IDS
-
-log = logging.getLogger(__name__)
-
 
 # Canonical set of onset detection method identifiers.  SyncEngine switches on
 # these exact strings; any other value silently falls through to cava-based
@@ -23,33 +19,13 @@ log = logging.getLogger(__name__)
 ONSET_METHODS: frozenset[str] = frozenset({"combined", "multiband", "superflux"})
 
 # Virtual-player source type.  Keep in sync with PLAYER_TYPES in web/src/lib/api.ts.
-# Adding a new type: add the enum value here, implement PcmSource in pcm_source.py,
+# Adding a new type: add the enum value here, implement the canonical ingress contract,
 # and add an activation branch in player_manager.activate_coupling().
 class VirtualPlayerType(StrEnum):
     LMS = "LMS"
     AIRPLAY = "AirPlay"
 
 VIRTUAL_PLAYER_TYPES: frozenset[str] = frozenset(t.value for t in VirtualPlayerType)
-
-class ColorMode(StrEnum):
-    """Legacy colour mode enum — kept for migration code only.
-
-    bass_brightness was removed: it was a poorly behaved legacy mode that
-    mapped bass energy to a fixed warm hue.  Profiles that stored it are
-    migrated to spectrum_rgb on load.
-
-    New code should use EFFECT_IDS and the ``effect_type`` field on Effect.
-    """
-
-    # Whole spectrum split in three bands (bass/mid/treble) mapped to R/G/B.
-    SPECTRUM_RGB = "spectrum_rgb"
-    # Single colour; brightness follows overall loudness.
-    MONO_PULSE = "mono_pulse"
-
-
-# Derived from ColorMode so it can never go out of sync with the enum.
-# Keep in sync with COLOUR_MODES in web/src/lib/api.ts.
-COLOUR_MODES: frozenset[str] = frozenset(cm.value for cm in ColorMode)
 
 # Canonical set of effect IDs.  SyncEngine's _make_renderer() switches on
 # these exact strings.  Keep in sync with EFFECTS in web/src/lib/api.ts.
@@ -118,18 +94,10 @@ class PlayerLatency:
 
     @classmethod
     def from_dict(cls, d: dict) -> PlayerLatency:
-        return cls(
-            player_mac=d["player_mac"],
-            name=d.get("name"),
-            strategy=d.get("strategy", "fixed"),
-            fixed_delay_ms=d.get("fixed_delay_ms", 2000),
-            speaker_ip=d.get("speaker_ip"),
-        )
+        return cls(**d)
 
 
-#: Profile field names as a set — used to strip unknown keys when loading old
-#: or future config files so cls(**d) never receives unexpected kwargs.
-_PROFILE_FIELDS: frozenset[str] = frozenset()  # filled after class definition
+#: Current runtime Profile fields.
 
 
 @dataclass
@@ -208,7 +176,7 @@ class Profile:
     use_hpss_separation: bool = False
     bars_source: str = "cava"
     # Spectrum backend for the PCM pipeline path (AirPlay / native PCM).
-    # "v2"      — HueSync PcmAudioPipelineV2 (Hamming STFT, np.max aggregation)
+    # "v2"      — HueSync V2SpectrumEngine (Hamming STFT, np.max aggregation)
     # "cavacore" — upstream cavacore via ctypes (Hann, dual FFT, bandwidth-normalised mean)
     spectrum_backend: str = "v2"
 
@@ -254,43 +222,9 @@ class Profile:
 
     @classmethod
     def from_dict(cls, d: dict) -> Profile:
-        d = dict(d)
-
-        # Migrate legacy color_mode field to effect_type.
-        if "color_mode" in d and "effect_type" not in d:
-            cm_val = d.pop("color_mode")
-            # Map legacy ColorMode values; unknown values fall back to spectrum_rgb.
-            if cm_val in ("spectrum_rgb", "mono_pulse"):
-                d["effect_type"] = cm_val
-            else:
-                log.warning(
-                    "Unsupported color_mode %r in saved profile; falling back to spectrum_rgb",
-                    cm_val,
-                )
-                d["effect_type"] = "spectrum_rgb"
-        elif "color_mode" in d:
-            d.pop("color_mode")
-
-        # Migrate legacy blend-threshold field names (renamed in Fase 2).
-        for old, new in (
-            ("mix_low_threshold", "blend_start"),
-            ("mix_high_threshold", "blend_end"),
-            ("mix_ema_alpha", "blend_response"),
-        ):
-            if old in d and new not in d:
-                d[new] = d.pop(old)
-            elif old in d:
-                d.pop(old)
-
-        # Strip keys that are not current Profile fields so that loading a
-        # config written by a newer version of HueSync never causes a
-        # TypeError, and loading a config with removed fields is harmless.
-        d = {k: v for k, v in d.items() if k in _PROFILE_FIELDS}
-
         return cls(**d)
 
 
-_PROFILE_FIELDS = frozenset(f.name for f in fields(Profile))
 
 
 # ---------------------------------------------------------------------------
@@ -304,7 +238,6 @@ class ControllerType(StrEnum):
     WLED = "wled"
 
 
-_CONTROLLER_FIELDS: frozenset[str] = frozenset()  # filled after class
 
 
 @dataclass
@@ -347,13 +280,11 @@ class Controller:
     def from_dict(cls, d: dict) -> Controller:
         d = dict(d)
         d["type"] = ControllerType(d.get("type", "hue"))
-        return cls(**{k: v for k, v in d.items() if k in _CONTROLLER_FIELDS})
+        return cls(**d)
 
 
-_CONTROLLER_FIELDS = frozenset(f.name for f in fields(Controller))
 
 
-_VIRTUAL_PLAYER_FIELDS: frozenset[str] = frozenset()  # filled after class
 
 
 @dataclass
@@ -393,15 +324,12 @@ class VirtualPlayer:
     @classmethod
     def from_dict(cls, d: dict) -> VirtualPlayer:
         d = dict(d)
-        d.pop("name", None)  # silently drop legacy name field
         d["type"] = VirtualPlayerType(d.get("type", VirtualPlayerType.LMS))
-        return cls(**{k: v for k, v in d.items() if k in _VIRTUAL_PLAYER_FIELDS})
+        return cls(**d)
 
 
-_VIRTUAL_PLAYER_FIELDS = frozenset(f.name for f in fields(VirtualPlayer))
 
 
-_ZONE_FIELDS: frozenset[str] = frozenset()  # filled after class
 
 
 @dataclass
@@ -431,13 +359,11 @@ class Zone:
 
     @classmethod
     def from_dict(cls, d: dict) -> Zone:
-        return cls(**{k: v for k, v in d.items() if k in _ZONE_FIELDS})
+        return cls(**d)
 
 
-_ZONE_FIELDS = frozenset(f.name for f in fields(Zone))
 
 
-_ANALYSER_FIELDS: frozenset[str] = frozenset()  # filled after class
 
 
 @dataclass
@@ -462,7 +388,7 @@ class Analyser:
     #   Same analysis pipeline as AirPlay; no external CAVA FIFO.
     bars_source: str = "cava"
     # Spectrum engine for every canonical PCM ingress (AirPlay and LMS PCM).
-    # "v2"      — PcmAudioPipelineV2: HueSync Hamming STFT, np.max, peak EMA AGC
+    # "v2"      — V2SpectrumEngine: HueSync Hamming STFT, np.max, peak EMA AGC
     # "cavacore" — upstream cavacore: Hann dual-FFT, bandwidth-normalised mean, autosens
     spectrum_backend: str = "v2"
 
@@ -503,10 +429,9 @@ class Analyser:
 
     @classmethod
     def from_dict(cls, d: dict) -> Analyser:
-        return cls(**{k: v for k, v in d.items() if k in _ANALYSER_FIELDS})
+        return cls(**d)
 
 
-_ANALYSER_FIELDS = frozenset(f.name for f in fields(Analyser))
 
 
 @dataclass
@@ -546,34 +471,11 @@ class Effect:
 
     @classmethod
     def from_dict(cls, d: dict) -> Effect:
-        d = dict(d)
-        # Migrate legacy color_mode field to effect_type.
-        if "color_mode" in d and "effect_type" not in d:
-            cm_val = d.pop("color_mode")
-            if cm_val in ("spectrum_rgb", "mono_pulse"):
-                d["effect_type"] = cm_val
-            else:
-                log.warning(
-                    "Unsupported color_mode %r in saved Effect; falling back to spectrum_rgb",
-                    cm_val,
-                )
-                d["effect_type"] = "spectrum_rgb"
-        elif "color_mode" in d:
-            d.pop("color_mode")
-        # Migrate old "effect" key written before the effect_type rename.
-        if "effect" in d and "effect_type" not in d:
-            d["effect_type"] = d.pop("effect")
-        elif "effect" in d:
-            d.pop("effect")
-        # Old keys (mellow_colour_mode, mix_low_threshold, mix_high_threshold,
-        # mix_ema_alpha) are silently dropped by the field filter below.
-        return cls(**{k: v for k, v in d.items() if k in _EFFECT_FIELDS})
+        return cls(**d)
 
 
-_EFFECT_FIELDS = frozenset(f.name for f in fields(Effect))
 
 
-_ENERGY_PROFILE_FIELDS: frozenset[str] = frozenset()  # filled after class
 
 
 @dataclass
@@ -606,26 +508,11 @@ class EnergyProfile:
 
     @classmethod
     def from_dict(cls, d: dict) -> EnergyProfile:
-        d = dict(d)
-        # Migrate legacy field names (written before Fase-2 rename).
-        for old, new in (
-            ("active_scene_id", "high_energy_effect_id"),
-            ("mellow_scene_id", "low_energy_effect_id"),
-            ("low_threshold", "blend_start"),
-            ("high_threshold", "blend_end"),
-            ("fade_speed", "blend_response"),
-        ):
-            if old in d and new not in d:
-                d[new] = d.pop(old)
-            elif old in d:
-                d.pop(old)
-        return cls(**{k: v for k, v in d.items() if k in _ENERGY_PROFILE_FIELDS})
+        return cls(**d)
 
 
-_ENERGY_PROFILE_FIELDS = frozenset(f.name for f in fields(EnergyProfile))
 
 
-_COUPLING_FIELDS: frozenset[str] = frozenset()  # filled after class
 
 
 @dataclass
@@ -633,7 +520,7 @@ class Coupling:
     """Links a Player + Analyser + Zone + EnergyProfile.
 
     Activation happens on a Coupling. The linked entities can be shared
-    across multiple Couplings, but each Coupling runs its own cava process.
+    across multiple Couplings. Activation selects canonical PCM or external FIFO.
 
     The EnergyProfile owns the active Effect, optional low-energy Effect, and all
     LayerMixer blend parameters. Coupling is focused on routing:
@@ -661,25 +548,4 @@ class Coupling:
 
     @classmethod
     def from_dict(cls, d: dict) -> Coupling:
-        d = dict(d)
-        # Backward compat: light_provider_id → zone_id
-        if "light_provider_id" in d and "zone_id" not in d:
-            d["zone_id"] = d.pop("light_provider_id")
-        elif "light_provider_id" in d:
-            d.pop("light_provider_id")
-        # Backward compat: analysis_config_id → analyser_id
-        if "analysis_config_id" in d and "analyser_id" not in d:
-            d["analyser_id"] = d.pop("analysis_config_id")
-        elif "analysis_config_id" in d:
-            d.pop("analysis_config_id")
-        # Backward compat: crossfader_id → energy_profile_id
-        if "crossfader_id" in d and "energy_profile_id" not in d:
-            d["energy_profile_id"] = d.pop("crossfader_id")
-        elif "crossfader_id" in d:
-            d.pop("crossfader_id")
-        # Old render_config_id and mix fields are dropped here; Storage.migrate()
-        # creates an EnergyProfile from them before Coupling.from_dict() is called.
-        return cls(**{k: v for k, v in d.items() if k in _COUPLING_FIELDS})
-
-
-_COUPLING_FIELDS = frozenset(f.name for f in fields(Coupling))
+        return cls(**d)

@@ -38,8 +38,6 @@ app.include_router(api_router)
 
 @app.on_event("startup")
 async def on_startup() -> None:
-    # Migrate data from the old single-RC format to the two-RC format if needed.
-    storage.migrate()
     # A previously "active" coupling from before a restart has no real
     # squeezelite/cava process behind it anymore — clear the stale state
     # rather than pretending it's still running.
@@ -110,7 +108,7 @@ async def ws_preview(websocket: WebSocket):
                 "latency_warning": player_manager.latency_warning,
                 "processes": player_manager.process_status,
                 "bridge_connected": player_manager.bridge_connected,
-                "color_mode": player_manager.active_color_mode,
+                "effect_type": player_manager.active_effect,
                 "follower_warning": player_manager.follower_warning,
                 "onset_method": player_manager.active_onset_method,
                 "lower_cutoff_freq": player_manager.active_lower_cutoff_freq,
