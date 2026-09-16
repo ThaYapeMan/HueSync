@@ -1012,34 +1012,6 @@ _CAP_POLL_S: float = 0.005
 _CAP_SAMPLE_RATE: int = AudioCanonicalizer.TARGET_RATE  # 48000
 
 
-class _DeactivatedPipeline:
-    """Sentinel ``AudioPipeline`` installed by ``replace_analyser`` when the
-    runtime cannot be restored to a working analyser (old-stop timeout with
-    no ``rebuild_old`` callback, or the rebuild itself failed).
-
-    Every ``latest()`` returns ``None``; the pipeline never produces frames.
-    This is the explicit deactivated state required by the BLOCKER 3 audit
-    (option B): callers of ``self._analyser`` observe a consistent
-    no-output pipeline rather than a dead reference to the timed-out old
-    analyser whose worker is still shutting down.
-    """
-
-    def start(self) -> None:  # noqa: D401 — protocol conformance
-        return None
-
-    def stop(self) -> bool:
-        # There is nothing to stop; report a clean stop so downstream
-        # teardown paths that check the return value continue smoothly.
-        return True
-
-    def latest(self) -> AudioFeatures | None:
-        return None
-
-    @property
-    def effective_spectrum_backend(self) -> str:
-        return "deactivated"
-
-
 class CanonicalAnalysisPipeline:
     """Engine-agnostic canonical 48 kHz stereo PCM analysis pipeline.
 
@@ -1119,6 +1091,25 @@ class CanonicalAnalysisPipeline:
         # valid AudioFeatures.bars payload.  Cleared on epoch transition and on
         # StreamInvalidated via _reset_dsp().
         self._last_bars: list[float] | None = None
+        # Canonical sample position past the last spectrum update whose bars
+        # were assigned to ``_last_bars``.  BLOCKER 2 audit (round 3):
+        # non-Spectrum publications may only carry ``_last_bars`` when
+        # ``_last_bars_end <= their sample_start`` — historical bars are
+        # allowed, but future bars must NEVER be attached to an earlier
+        # feature event.  Reset on epoch transition / stream invalidation.
+        self._last_bars_end: int = 0
+        # Sample_start of the most recently emitted PublicationRecord.
+        # Enforces monotonic cross-call publication order: any interval
+        # whose sample_start is < ``_last_pub_start`` would move
+        # publications backwards and is dropped.  Overlapping intervals
+        # within a single call are still permitted as long as the
+        # sort-by-(start, end) keeps starts non-decreasing.  Reset on
+        # epoch transition / stream invalidation.
+        self._last_pub_start: int = 0
+        # Late-arriving publications dropped since the last drain.
+        # Bounded observability for the "publications must not go
+        # backwards" invariant — mirrors ``_pub_dropped`` in intent.
+        self._pub_late_dropped: int = 0
         # Guards double-close on the processor list: stop() closes only if the
         # worker thread has terminated within the join timeout; if it hasn't,
         # the worker's finally block picks up the responsibility once it
@@ -1153,6 +1144,18 @@ class CanonicalAnalysisPipeline:
         """
         with self._pub_lock:
             return self._pub_dropped
+
+    @property
+    def pub_late_dropped_count(self) -> int:
+        """Number of late-arriving publications dropped since the last drain.
+
+        A ProcessorUpdate whose interval sits before an already-published
+        record would move the transport stream backwards.  We discard such
+        updates and increment this counter so consumers can observe how
+        often a delayed processor is running past the transport frontier.
+        """
+        with self._pub_lock:
+            return self._pub_late_dropped
 
     @property
     def effective_spectrum_backend(self) -> str:
@@ -1219,6 +1222,8 @@ class CanonicalAnalysisPipeline:
         # NOTE: _last_bars is deliberately reset here so a fresh epoch never
         # inherits carry-over bars from a previous stream.
         self._last_bars = None
+        self._last_bars_end = 0
+        self._last_pub_start = 0
 
     def _publish(
         self,
@@ -1369,11 +1374,11 @@ class CanonicalAnalysisPipeline:
                 else:
                     other_updates.append(pu)
 
-        # Update _last_bars whenever the SpectrumProcessor produced output;
-        # the latest emitted bars become the carry-forward source for
-        # subsequent intervals that lack a fresh spectrum contribution.
-        if spectrum_updates:
-            self._last_bars = list(spectrum_updates[-1].bars or [])
+        # BLOCKER 2 audit (round 3): do NOT eagerly write ``_last_bars`` at
+        # the top of this call.  ``_publish_by_interval`` updates it
+        # per-interval AFTER emitting each publication so that a beat
+        # ProcessorUpdate at an EARLIER interval never inherits bars from
+        # a LATER spectrum ProcessorUpdate in the same frame.
 
         # Merge previously-pending "other" updates (whose intervals have not
         # yet been published because no processor emitted an aligning
@@ -1458,22 +1463,41 @@ class CanonicalAnalysisPipeline:
             start, end = key
             if clamp_end is not None:
                 if clamp_end > 0 and start >= clamp_end:
-                    # Interval sits entirely in zero-padding; drop it — but
-                    # do not silently reassign its "other" updates to a
-                    # neighbouring interval.  If those updates need to
-                    # survive (they were the sole contributor here), a
-                    # future policy could re-attach them; today they are
-                    # discarded, matching the pre-refactor flush behavior.
+                    # Interval sits entirely in zero-padding; drop it.
                     continue
                 pub_end = min(end, clamp_end) if clamp_end > 0 else end
             else:
                 pub_end = end
 
+            # BLOCKER 2 audit (round 3): drop late-arriving publications.
+            # A ProcessorUpdate whose sample_start is strictly less than
+            # the sample_start of a previously emitted record would move
+            # the publication stream backwards — consumers that treat
+            # records as a chronological transport would then observe
+            # old start-timestamps after newer ones.  Discard rather
+            # than reorder (no scheduler redesign), incrementing a
+            # bounded counter so overflow is observable via
+            # ``pub_late_dropped_count``.  Overlapping intervals with
+            # equal or later starts (e.g. within a single feed() where
+            # two processors emit at the same sample_start with
+            # different sample_ends) are still permitted — the
+            # sort-by-(start, end) keeps them adjacent and monotonic.
+            if start < self._last_pub_start:
+                self._pub_late_dropped += 1
+                continue
+
             su = spectrum_by_key.get(key)
             these_others = others_by_key.get(key, [])
             if su is not None:
                 bars = list(su.bars or [])
-            elif self._last_bars:
+            elif self._last_bars is not None and self._last_bars_end <= start:
+                # Historical carry-forward is safe: the recorded
+                # ``_last_bars`` come from an interval whose sample_end
+                # is <= this interval's sample_start.  Future bars (a
+                # spectrum update at a LATER interval within the same
+                # feed() call) never leak into an earlier record because
+                # ``_last_bars_end`` is only updated inside the emit loop
+                # AFTER the spectrum interval has itself been published.
                 bars = list(self._last_bars)
             else:
                 bars = []
@@ -1488,6 +1512,15 @@ class CanonicalAnalysisPipeline:
                 effective_processor_ids=tuple(contributors_by_key[key]),
             )
             records.append(record)
+            # Update trackers AFTER emission so a spectrum ProcessorUpdate
+            # at [S,E) becomes the carry source only for records with
+            # start >= E, and the cross-call start monotonicity floor
+            # advances to this record's start.
+            if start > self._last_pub_start:
+                self._last_pub_start = start
+            if su is not None:
+                self._last_bars = list(su.bars or [])
+                self._last_bars_end = pub_end
         return records
 
     def _flush_engine(self) -> list[PublicationRecord]:
@@ -1559,6 +1592,7 @@ class CanonicalAnalysisPipeline:
             result = list(self._pub_queue)
             self._pub_queue.clear()
             self._pub_dropped = 0
+            self._pub_late_dropped = 0
             return result
 
     # ------------------------------------------------------------------
@@ -2775,6 +2809,16 @@ class SyncEngine:
         self._se_tracker: SustainedEnergyTracker = SustainedEnergyTracker()
         self._last_sustained_energy: float | None = None
         self._last_tick_t: float | None = None
+        # BLOCKER 1 audit (round 3): the production PCM source has NO
+        # concurrent-reader contract.  When ``replace_analyser`` times
+        # out stopping the old analyser its worker thread is still
+        # running (calling ``source.read()``); starting a rebuilt
+        # analyser at that point would create a 2nd concurrent reader.
+        # ``self._retiring`` explicitly tracks such workers so
+        # ``stop()`` can join them, ``retirement_pending`` lets manager
+        # code detect the situation, and no new reader is spawned until
+        # every retiring worker has exited.
+        self._retiring: list[AudioPipeline] = []
 
     def attach_shm_source(self, source: PcmSource) -> None:
         """Connect a PCM source for the PCM-tap onset pipeline.
@@ -2924,73 +2968,81 @@ class SyncEngine:
            - Do NOT close the old analyser's processors ourselves — the old
              worker is still running (in the timeout case) or has already
              closed them (in the clean-stop-then-start-failed case).
-           - If ``rebuild_old`` is supplied, construct a fresh equivalent
-             and start it; commit that as ``self._analyser``.
-           - Otherwise, install a ``_DeactivatedPipeline`` sentinel so
-             ``self._analyser`` never points at a dead reference (BLOCKER 3
-             audit requirement: "no runtime pointing at dead analyser").
+           - Timeout branch: mark old as RETIRING (never start a
+             rebuild — that would spawn a second reader on the same
+             source).  The caller must deactivate the session so
+             retirement can complete cleanly.
+           - Clean-stop-but-candidate-failed branch: if ``rebuild_old``
+             is supplied, construct a fresh equivalent and start it;
+             commit that as ``self._analyser``.  Otherwise leave
+             ``self._analyser`` pointing at the (already-stopped) old
+             pipeline — the caller must deactivate to fully recover.
            - Re-raise a descriptive ``RuntimeError``.
 
         Note: ``self._analyser`` is NEVER assigned to the candidate before
         ``candidate.start()`` returns successfully.  This is the invariant
         the transactional contract relies on.
         """
+        # Before starting the replacement dance, reap any worker that
+        # was left retiring by a previous timed-out replace_analyser().
+        # If one is still alive, refuse to start a new reader on the
+        # same source — the production PCM source has no
+        # concurrent-reader contract, and letting two workers call
+        # source.read() at once is exactly the round-3 audit finding.
+        self._reap_retiring()
+        if self._retiring:
+            try:
+                new_analyser.stop()  # close the unused candidate
+            except Exception:  # noqa: BLE001
+                log.exception(
+                    "replace_analyser: candidate.stop() raised while retirement pending"
+                )
+            raise RuntimeError(
+                "Cannot replace analyser: previous worker is still retiring; "
+                "wait for retirement to complete before attempting again"
+            )
+
         old = self._analyser
         clean_stop = old.stop()
         if not clean_stop:
-            # BLOCKER 3, timeout branch: the old worker did not exit within
-            # its 2 s stop timeout.  It is still running and OWNS its
-            # processors — the old worker's finally block will close them
-            # exactly once when it eventually exits, so we MUST NOT touch
-            # them from here (audit requirement: "OLD PROCESSOR NOT CLOSED
-            # EARLY").  What we must do here:
+            # BLOCKER 1 audit (round 3): the old worker did not exit
+            # within its 2 s stop timeout — it is still running and
+            # OWNS the sole reader position on the source.  We MUST:
             #
-            #   a) Close the (unused) candidate exactly once so it does
-            #      not leak native resources (audit requirement: "TIMEOUT
-            #      CANDIDATE CLOSED EXACTLY ONCE").  Its stop() is
-            #      idempotent thanks to the ``_processors_closed`` guard.
+            #   a) Close the (unused) candidate exactly once so it
+            #      does not leak native resources.
+            #   b) NOT start a rebuilt analyser here — that would spawn
+            #      a second worker reading the same source, giving 2
+            #      simultaneous readers.  Recovery is deferred until
+            #      the old worker actually exits (see
+            #      _reap_retiring()); the caller must deactivate the
+            #      session so all three views (manager/session/runtime)
+            #      agree that the pipeline is degrading.
+            #   c) NOT close the old processors ourselves — the old
+            #      worker's finally block does that exactly once when
+            #      it eventually exits (H1 protocol).
             try:
                 new_analyser.stop()
             except Exception:  # noqa: BLE001 — best-effort cleanup
                 log.exception(
                     "replace_analyser: candidate.stop() raised during timeout rollback"
                 )
-            #   b) Transition ``self._analyser`` to a usable or explicit
-            #      deactivated state — the audit forbids leaving the
-            #      runtime pointing at the timed-out old pipeline.
-            restored = False
-            if rebuild_old is not None:
-                rebuilt: AudioPipeline | None = None
-                try:
-                    rebuilt = rebuild_old()
-                    rebuilt.start()
-                    self._analyser = rebuilt
-                    restored = True
-                except Exception:  # noqa: BLE001 — best-effort restore
-                    log.exception(
-                        "replace_analyser: rebuild_old() failed after old-stop timeout"
-                    )
-                    if rebuilt is not None:
-                        try:
-                            rebuilt.stop()
-                        except Exception:  # noqa: BLE001
-                            log.exception(
-                                "replace_analyser: failed rebuilt.stop() during timeout rollback"
-                            )
-            if not restored:
-                # Explicit deactivated state — a sentinel pipeline that
-                # never produces frames, so ``self._analyser`` is
-                # consistent and callers observe the failure via
-                # latest()==None rather than by dereferencing a dying
-                # object.
-                self._analyser = _DeactivatedPipeline()
-                log.error(
-                    "replace_analyser: old analyser stop timed out and rebuild "
-                    "unavailable; runtime installed a deactivated sentinel"
-                )
+            # Record the old analyser as retiring so ``stop()`` joins
+            # it on session teardown, and so a subsequent
+            # replace_analyser() rejects new-reader attempts until
+            # retirement completes.  self._analyser is left pointing
+            # at the old — its worker is still producing frames on
+            # its way out, and swapping to a sentinel here would let
+            # manager/session drift out of sync with the runtime.
+            if old not in self._retiring:
+                self._retiring.append(old)
+            log.error(
+                "replace_analyser: old analyser did not stop within 2s; "
+                "marked retiring — caller must deactivate to fully recover"
+            )
             raise RuntimeError(
                 "Old analyser worker did not stop within the 2s timeout; "
-                f"{'old analyser rebuilt' if restored else 'runtime deactivated'}"
+                "candidate closed, old marked RETIRING, caller must deactivate"
             )
 
         # Old has stopped cleanly and has closed its processors (H1 protocol).
@@ -3030,20 +3082,20 @@ class SyncEngine:
                                 "replace_analyser: failed rebuild candidate stop() raised"
                             )
             if not restored:
-                # Install the deactivated sentinel so ``self._analyser``
-                # is not left pointing at the already-stopped old
-                # pipeline (whose processors were closed by its own
-                # clean stop() above).  The audit prohibits leaving a
-                # dead reference in place — callers see the failure via
-                # latest()==None on the sentinel.
-                self._analyser = _DeactivatedPipeline()
+                # Leave ``self._analyser`` pointing at the cleanly-
+                # stopped old pipeline.  The manager sees the raised
+                # exception and MUST deactivate the session so
+                # storage/session/runtime agree; the audit forbids
+                # unilaterally swapping to a deactivated sentinel here
+                # because that leaves the manager view still reporting
+                # active while the runtime silently produces nothing.
                 log.error(
-                    "replace_analyser: candidate failed to start and old cannot "
-                    "be resumed; runtime installed a deactivated sentinel"
+                    "replace_analyser: candidate failed to start and rebuild "
+                    "unavailable; caller must deactivate to recover"
                 )
             raise RuntimeError(
                 f"Candidate analyser failed to start: {start_exc}; "
-                f"{'old analyser restored' if restored else 'runtime deactivated'}"
+                f"{'old analyser restored' if restored else 'caller must deactivate'}"
             ) from start_exc
 
         # SUCCESS: only now commit the reference.
@@ -3091,7 +3143,56 @@ class SyncEngine:
         self._analyser.start()
 
     def stop(self) -> None:
-        self._analyser.stop()
+        # Stop the current analyser first, then join any retiring
+        # workers so the session teardown owns the full lifecycle
+        # (BLOCKER 1 audit round 3: "SHUTDOWN RETAINS RETIRING WORKER
+        # OWNERSHIP").  Both loops swallow exceptions per-worker so
+        # one broken stop() does not leave others alive.
+        try:
+            self._analyser.stop()
+        except Exception:  # noqa: BLE001 — teardown best-effort
+            log.exception("SyncEngine.stop: current analyser stop() raised")
+        for retiring in list(self._retiring):
+            try:
+                retiring.stop()
+            except Exception:  # noqa: BLE001
+                log.exception("SyncEngine.stop: retiring analyser stop() raised")
+        self._retiring.clear()
+
+    def _reap_retiring(self) -> None:
+        """Drop retiring workers whose thread has already exited.
+
+        Called at the top of ``replace_analyser`` so a caller that
+        polls the API and retries after some time (or after the
+        session has been redeactivated and reactivated) sees an
+        empty retiring list once the old worker has cleaned up.
+        """
+        still_retiring: list[AudioPipeline] = []
+        for r in self._retiring:
+            thread = getattr(r, "_thread", None)
+            if thread is not None and thread.is_alive():
+                still_retiring.append(r)
+                continue
+            # Worker has already exited (its finally block closed the
+            # processors under _processors_closed guard); call stop()
+            # once more so any deferred resources associated with the
+            # pipeline itself are released.  stop() is idempotent.
+            try:
+                r.stop()
+            except Exception:  # noqa: BLE001
+                log.exception("_reap_retiring: retiring.stop() raised")
+        self._retiring = still_retiring
+
+    @property
+    def retirement_pending(self) -> bool:
+        """True when a previously-timed-out worker has not yet exited.
+
+        The manager consults this after a failed ``replace_analyser`` to
+        decide whether to deactivate the session so retirement can
+        complete without a second concurrent reader ever being spawned.
+        """
+        self._reap_retiring()
+        return bool(self._retiring)
 
     async def run(self, output: Output) -> None:
         """Send the latest available frame at a fixed rate until cancelled.

@@ -75,6 +75,27 @@ _Static_assert(offsetof(vis_shm_v1_ext_t, gap_seq)       == 28, "gap_seq offset"
  * detection on the consumer side.
  */
 int  vis_shm_v1_init(vis_shm_v1_ext_t *ext);
+/*
+ * Two-phase init helpers.  The caller uses these when legacy header fields
+ * (buf_size, running, rate, buf_index) must be published inside the same
+ * seqlock-odd window as the extension block, so a racing consumer never
+ * observes a partially-populated snapshot with a stable (even) write_seq.
+ *
+ * vis_shm_v1_begin_init(ext):
+ *   Force write_seq to an ODD value regardless of previous contents.
+ *   Handles SHM segments reused with prior write_seq values 0/1/2/3/…
+ *   (shm_open O_CREAT | O_RDWR may reuse an existing segment, so the
+ *   producer cannot assume mmap zeroes it).  The caller then publishes
+ *   whatever legacy metadata it needs before calling finish_init.
+ *
+ * vis_shm_v1_finish_init(ext):
+ *   Populate the extension block (magic, abi_version, generation, etc.)
+ *   and flip write_seq to an EVEN value.  Returns 0 on success and -1
+ *   on RNG failure — on -1 write_seq is LEFT ODD so readers reject
+ *   the segment and the caller must abort SHM setup.
+ */
+void vis_shm_v1_begin_init(vis_shm_v1_ext_t *ext);
+int  vis_shm_v1_finish_init(vis_shm_v1_ext_t *ext);
 void vis_shm_v1_begin_write(vis_shm_v1_ext_t *ext);
 void vis_shm_v1_end_write(vis_shm_v1_ext_t *ext, uint64_t n_stereo_frames_written);
 void vis_shm_v1_record_gap(vis_shm_v1_ext_t *ext);

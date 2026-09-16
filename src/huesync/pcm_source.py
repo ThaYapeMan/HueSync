@@ -1139,6 +1139,12 @@ class SqueezeliteShmStereoSource:
 
         # Reset per-mapping continuity state so the fresh producer's
         # generation/abs_write_pos/gap_seq are adopted from the new SHM.
+        # Clear ``_unsupported_abi`` too — that flag belongs to the
+        # rejected inode/mapping we are about to release, not to the
+        # SqueezeliteShmStereoSource instance for its whole lifetime.
+        # If the replacement segment ALSO carries an unsupported ABI we
+        # re-set the flag below; if it is a valid v1 we adopt it and the
+        # source recovers automatically (BLOCKER 3 audit round 3).
         self._prev_generation = 0
         self._abs_write_pos_frames = 0
         self._prev_gap_seq = 0
@@ -1147,6 +1153,7 @@ class SqueezeliteShmStereoSource:
         self._prev_rate = 0
         self._prev_updated = 0
         self._abi_version = 0
+        self._unsupported_abi = False
         # _shm_dev_ino stays None until the new inode is fully validated —
         # a half-mapped segment is not a legitimate "current" inode.
         self._shm_dev_ino = None
@@ -1512,23 +1519,20 @@ class SqueezeliteShmStereoSource:
         is present (the production default) the read is coherent under a
         seqlock and stream continuity is authoritative rather than heuristic.
         """
-        # If open() or a previous remap detected an unsupported v1 ABI
-        # version, every subsequent read surfaces as an invalidation —
-        # there is no safe fallback.
-        if self._unsupported_abi:
-            return StreamInvalidated(
-                cause=InvalidationCause.UNKNOWN, known_lost_samples=None
-            )
-        # SHM replacement handling.  Two entry points:
+        # SHM replacement handling comes FIRST — before any short-circuit
+        # tied to the current mapping — so a rejected v2/v0 inode does NOT
+        # permanently poison the SqueezeliteShmStereoSource instance.  If
+        # the backing object was replaced with a valid v1 while we were
+        # in ``_unsupported_abi`` state, ``_remap_after_replacement``
+        # clears that flag and adopts the new mapping automatically
+        # (BLOCKER 3 audit round 3, "UNSUPPORTED STATE MAPPING-SCOPED").
+        #
+        # Two entry points:
         #   1. ``_pending_remap`` — a previous read cycle detected the
-        #      replacement but could not fully validate the new inode (file
-        #      absent, write_seq odd, etc.).  Retry on every read until
-        #      validation succeeds.
+        #      replacement but could not fully validate the new inode
+        #      (file absent, write_seq odd, etc.).  Retry every read.
         #   2. ``_detect_shm_replacement`` — first-time observation of a
         #      new inode at the same path.
-        # In either case, do NOT fall through to ``_read_v0()`` under
-        # ``require_v1=True``.  A half-validated segment interpreted as v0
-        # would surface v1 header bytes at offset 80 as PCM.
         if self._pending_remap or self._detect_shm_replacement():
             self._remap_after_replacement()
             if (
@@ -1541,6 +1545,12 @@ class SqueezeliteShmStereoSource:
                 )
             # Successful remap: surface one StreamInvalidated so callers
             # enter a fresh epoch, then serve PCM on the next cycle.
+            return StreamInvalidated(
+                cause=InvalidationCause.UNKNOWN, known_lost_samples=None
+            )
+        # Only NOW consult mapping-scoped invalidation flags — the current
+        # inode really is unsupported and no replacement has appeared.
+        if self._unsupported_abi:
             return StreamInvalidated(
                 cause=InvalidationCause.UNKNOWN, known_lost_samples=None
             )

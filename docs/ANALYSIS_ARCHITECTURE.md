@@ -212,20 +212,39 @@ event is `TORN_READ` and the epoch invalidates.
 `SyncEngine.replace_analyser(new_analyser)` is transactional in the ordinary case:
 
 1. The old analyser is asked to stop.  `stop()` returns `False` if the worker did
-   not terminate within its 2-second timeout.  In that case the replacement is
-   aborted with a `RuntimeError` — the old analyser is left in place and the
-   caller must retry or deactivate.
-2. Old processors are closed only after the worker thread has genuinely
+   not terminate within its 2-second timeout.
+2. **On timeout the old analyser is marked RETIRING**: it stays as
+   `self._analyser`, is added to `self._retiring`, and the (unused) candidate is
+   closed exactly once.  No rebuilt analyser is started — spawning one would
+   create a second concurrent reader on the same PCM source, which has no
+   concurrent-reader contract.  `retirement_pending` becomes `True` and the
+   caller must deactivate so `SyncEngine.stop()` can join the retiring worker
+   as part of session teardown (the retiring worker's `finally` block closes
+   its processors exactly once, guarded by `_processors_closed`).
+3. Old processors are closed only after the worker thread has genuinely
    terminated (H1 protocol).  Closing while a `feed()` is still in flight would
-   invalidate native resources such as the cavacore FFT plan.  If `stop()`
-   timed out, the worker thread's `finally` block picks up the responsibility
-   and closes processors when it eventually exits — exactly once, guarded by
-   `_processors_closed`.
-3. If `new_analyser.start()` raises, `replace_analyser` attempts to restart
-   the old analyser to keep the session alive.  If that restart ALSO fails,
-   the session is invalid and the caller must deactivate the coupling —
-   there is no in-place recovery for a double failure.  The pipeline does NOT
-   silently pretend the old analyser is still working.
+   invalidate native resources such as the cavacore FFT plan.
+4. If `new_analyser.start()` raises during a clean-stop path,
+   `replace_analyser` attempts to rebuild+restart the old analyser via the
+   caller-supplied `rebuild_old` callback.  If that also fails,
+   `self._analyser` is left pointing at the cleanly-stopped old pipeline
+   and the caller must deactivate.  The pipeline does NOT silently install
+   a deactivated sentinel — that would let manager/session drift out of sync
+   with the runtime.
+
+### Cross-call publication ordering
+
+Within one `feed()` call, ProcessorUpdates are grouped by exact
+`(sample_start, sample_end)` and emitted in ascending `(start, end)` order.
+Across `feed()` calls the publication stream is strictly monotonic on
+`sample_start`: any ProcessorUpdate whose `sample_start` is less than the
+`sample_start` of the most recently emitted record is dropped and counted in
+`pub_late_dropped_count`.  This applies uniformly at EOS.
+
+A publication may only carry `_last_bars` if the recorded `_last_bars_end`
+is `<=` the publication's own `sample_start`.  Historical/carry-forward bars
+are permitted; **future bars from a later spectrum interval never leak into
+an earlier feature record.**
 
 ### Atomic publication state
 

@@ -79,28 +79,35 @@ static int vis_shm_v1_read_generation(uint64_t *out) {
 }
 
 /*
- * Call once during squeezelite startup, after the SHM segment is mapped.
+ * Force write_seq to an ODD value regardless of previous contents.
  *
- * Returns 0 on success, -1 on failure.  On failure the SHM segment is left
- * with write_seq odd (the initialization-in-progress marker), so any consumer
- * that races the failed setup will observe a torn read and reject the block
- * rather than adopt an uninitialised generation.  The caller MUST treat -1
- * as fatal and abort SHM setup — falling back to a PID/time value would
- * defeat the point of generation.
+ * shm_open(O_CREAT | O_RDWR) may reuse an existing SHM segment left over
+ * from a previous producer, so the current write_seq is unknown: it may be
+ * 0, 1, 2, 3, or any prior value including near-UINT32_MAX.  A naive
+ * ``fetch_add(1)`` would happily flip an already-odd value to an even one,
+ * publishing an "initialisation in progress" state as "stable snapshot".
+ *
+ * This helper reads the current value, computes the smallest ODD value
+ * strictly greater than it (odd → +2, even → +1), and stores it back with
+ * a seq-cst store + fence so all subsequent writes are ordered after.
  */
-int vis_shm_v1_init(vis_shm_v1_ext_t *ext) {
-    /*
-     * Atomic initialisation protocol: mark write_seq as odd BEFORE touching
-     * any other field, so any reader that races startup observes a torn
-     * snapshot and rejects it.  Only after all fields are populated and a
-     * full seq-cst fence has been issued do we flip write_seq back to even
-     * ('ready').  Skipping this step lets a reader see valid magic and an
-     * even (stable) seqlock counter while abs_write_pos / generation are
-     * still zero from mmap.
-     */
-    ext->write_seq = 1;  /* odd = initialisation in progress */
+void vis_shm_v1_begin_init(vis_shm_v1_ext_t *ext) {
+    uint32_t cur = __atomic_load_n(&ext->write_seq, __ATOMIC_SEQ_CST);
+    uint32_t next = (cur & 1u) ? (uint32_t)(cur + 2u) : (uint32_t)(cur + 1u);
+    __atomic_store_n(&ext->write_seq, next, __ATOMIC_SEQ_CST);
     atomic_thread_fence(memory_order_seq_cst);
+    vis_shm_v1_pending_gaps = 0;
+}
 
+/*
+ * Populate the extension block and flip write_seq to an EVEN value.
+ *
+ * Called after vis_shm_v1_begin_init() and (optionally) after the caller
+ * has published legacy header fields (buf_size, running, rate, buf_index).
+ * Returns 0 on success and -1 on RNG failure; on -1 write_seq is LEFT ODD
+ * so no reader accepts the segment and the caller must abort SHM setup.
+ */
+int vis_shm_v1_finish_init(vis_shm_v1_ext_t *ext) {
     uint64_t gen = 0;
     if (vis_shm_v1_read_generation(&gen) != 0) {
         /* Leave write_seq odd so no reader accepts this segment. */
@@ -109,7 +116,8 @@ int vis_shm_v1_init(vis_shm_v1_ext_t *ext) {
 
     /*
      * Populate the remaining fields.  Cannot use memset(ext, 0, sizeof(*ext))
-     * here because that would clobber the odd write_seq marker set above.
+     * because that would clobber the odd write_seq marker set by
+     * vis_shm_v1_begin_init().
      */
     ext->magic         = VIS_SHM_V1_MAGIC;
     ext->abi_version   = VIS_SHM_V1_VERSION;
@@ -118,13 +126,27 @@ int vis_shm_v1_init(vis_shm_v1_ext_t *ext) {
     ext->abs_write_pos = 0;
     ext->gap_seq       = 0;
     memset(ext->_pad, 0, sizeof(ext->_pad));
-    vis_shm_v1_pending_gaps = 0;
 
-    /* Ensure all writes are visible before we flip write_seq back to even. */
+    /* Ensure all field writes are visible before flipping write_seq even. */
     atomic_thread_fence(memory_order_seq_cst);
-    ext->write_seq = 2;  /* even = ready; distinct from any legacy zero */
+    uint32_t cur = __atomic_load_n(&ext->write_seq, __ATOMIC_SEQ_CST);
+    /* cur is odd (begin_init established that); bump to next even. */
+    __atomic_store_n(&ext->write_seq, (uint32_t)(cur + 1u), __ATOMIC_SEQ_CST);
     atomic_thread_fence(memory_order_seq_cst);
     return 0;
+}
+
+/*
+ * Call once during squeezelite startup, after the SHM segment is mapped.
+ *
+ * Convenience wrapper for the two-phase init helpers above — used when the
+ * caller has no legacy header writes to sequence between begin_init and
+ * finish_init.  Returns 0 on success, -1 on RNG failure (caller must abort
+ * SHM setup).
+ */
+int vis_shm_v1_init(vis_shm_v1_ext_t *ext) {
+    vis_shm_v1_begin_init(ext);
+    return vis_shm_v1_finish_init(ext);
 }
 
 /*

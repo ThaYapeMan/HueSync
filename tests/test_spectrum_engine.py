@@ -307,11 +307,10 @@ def test_replace_analyser_does_not_commit_before_start_succeeds():
 
 def test_replace_analyser_timeout_aborts_and_does_not_touch_candidate():
     """If old.stop() returns False (timeout), replacement aborts.  The
-    candidate must NOT be started but MUST be closed exactly once so it
-    does not leak, and the runtime must not be left pointing at the
-    dying old analyser (BLOCKER 3 audit)."""
-    from huesync.sync_engine import _DeactivatedPipeline
-
+    candidate must be closed exactly once, the OLD is marked RETIRING
+    (so shutdown owns it), and NO new reader is started on the same
+    source — round-3 audit reversal of the previous sentinel-install
+    policy."""
     old = MagicMock()
     old.stop.return_value = False  # simulate zombie worker
     old.latest.return_value = None
@@ -319,19 +318,19 @@ def test_replace_analyser_timeout_aborts_and_does_not_touch_candidate():
 
     candidate = MagicMock()
 
-    with pytest.raises(RuntimeError, match="did not stop"):
+    with pytest.raises(RuntimeError, match="RETIRING|did not stop"):
         engine.replace_analyser(candidate)
 
     # Candidate must not have been started (start is skipped on timeout)…
     candidate.start.assert_not_called()
-    # …but must have been closed exactly once so it does not leak
-    # (BLOCKER 3, timeout-branch requirement).
+    # …but must have been closed exactly once so it does not leak.
     assert candidate.stop.call_count == 1
-    # Without rebuild_old, the runtime installs an explicit deactivated
-    # sentinel rather than leaving self._analyser pointing at the timed-
-    # out old pipeline (BLOCKER 3, "no dead-runtime state").
-    assert isinstance(engine._analyser, _DeactivatedPipeline)
-    assert engine._analyser is not old
+    # No rebuilt analyser gets started — that would create a second
+    # concurrent reader on the same source.  self._analyser stays
+    # pointing at the retiring old pipeline so SyncEngine.stop() can
+    # still join it.
+    assert engine._analyser is old
+    assert old in engine._retiring
 
 
 def test_replace_analyser_failed_start_closes_candidate_and_restores_old():
@@ -365,13 +364,14 @@ def test_replace_analyser_failed_start_closes_candidate_and_restores_old():
     assert engine._analyser is rebuilt
 
 
-def test_replace_analyser_failed_start_without_rebuild_installs_sentinel():
+def test_replace_analyser_failed_start_without_rebuild_leaves_old_reference():
     """If no rebuild_old is supplied and the candidate fails to start,
-    the runtime installs an explicit deactivated sentinel — never leaves
-    self._analyser pointing at the already-stopped old pipeline (BLOCKER
-    3 audit)."""
-    from huesync.sync_engine import _DeactivatedPipeline
-
+    self._analyser is LEFT pointing at the cleanly-stopped old pipeline
+    and the caller is responsible for deactivating the session.  The
+    round-3 audit forbids swapping to a deactivated sentinel here —
+    manager/session would still report active while the runtime
+    silently produced nothing.
+    """
     old = MagicMock()
     old.stop.return_value = True
     old.latest.return_value = None
@@ -385,9 +385,10 @@ def test_replace_analyser_failed_start_without_rebuild_installs_sentinel():
 
     # Candidate.stop() called exactly once.
     candidate.stop.assert_called_once()
-    # Runtime transitioned to explicit deactivated state.
-    assert isinstance(engine._analyser, _DeactivatedPipeline)
-    assert engine._analyser is not old
+    # self._analyser points at the (already-stopped) old — its worker
+    # is dead but the reference is preserved so teardown remains
+    # consistent.  Caller must deactivate.
+    assert engine._analyser is old
     assert engine._analyser is not candidate
 
 

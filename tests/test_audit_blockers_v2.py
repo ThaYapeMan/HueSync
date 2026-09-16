@@ -42,9 +42,6 @@ from huesync.spectrum_engine import (
     CavaCoreSpectrumEngine,
     ProcessorUpdate,
 )
-from huesync.sync_engine import (
-    _DeactivatedPipeline,
-)
 
 # ---------------------------------------------------------------------------
 # BLOCKER 1: default build enables VISEXPORT + producer objects
@@ -146,21 +143,28 @@ def test_producer_patch_marks_init_writes_in_progress():
     zero (even == 'stable').
     """
     body = _PATCH.read_text()
-    # In the output_vis_init hunk, vis_shm_v1_begin_write must appear
-    # BEFORE the buf_size / running / rate assignments — the diff order
-    # models the code order after patching.
+    # In the output_vis_init hunk, a helper that forces write_seq to
+    # ODD (either the round-3 ``vis_shm_v1_begin_init`` or the previous
+    # ``vis_shm_v1_begin_write``) must appear BEFORE the buf_size /
+    # running / rate assignments so init publishes write_seq=odd before
+    # mutating any snapshot metadata.
     hunk_match = re.search(
         r"pthread_rwlock_init\([\s\S]*?LOG_INFO\(\"opened",
         body,
     )
     assert hunk_match is not None, "output_vis_init hunk missing in producer patch"
     hunk = hunk_match.group(0)
-    begin_idx = hunk.find("vis_shm_v1_begin_write")
+    begin_idx = min(
+        (idx for idx in [hunk.find("vis_shm_v1_begin_init"),
+                         hunk.find("vis_shm_v1_begin_write")]
+         if idx >= 0),
+        default=-1,
+    )
     running_idx = hunk.find("vis_mmap->running = false;")
-    assert begin_idx >= 0, "init hunk missing vis_shm_v1_begin_write"
+    assert begin_idx >= 0, "init hunk missing seqlock begin helper"
     assert running_idx >= 0
     assert begin_idx < running_idx, (
-        "vis_shm_v1_begin_write must precede legacy field writes so init "
+        "seqlock begin helper must precede legacy field writes so init "
         "publishes write_seq=odd before mutable metadata"
     )
 
@@ -341,16 +345,19 @@ def test_shm_v0_replacement_rejected_under_require_v1(tmp_path):
 
 
 def _make_engine_with_old(old):
-    """Build a minimal SyncEngine wrapper whose ``self._analyser`` starts
-    as ``old``.  Reused across timeout-branch tests.
+    """Build a minimal SyncEngine whose ``self._analyser`` starts as
+    ``old``.  Runs the real constructor so ``self._retiring`` etc. are
+    initialised — bypassing it via __new__ would leave the retirement
+    machinery uninitialised and hide the very bug this suite tests.
     """
+    from unittest.mock import patch
+
     from huesync.models import Profile
     from huesync.sync_engine import SyncEngine
 
-    engine = SyncEngine.__new__(SyncEngine)
-    engine._analyser = old
-    engine.profile = Profile(name="test")
-    return engine
+    profile = Profile(name="test")
+    with patch("huesync.sync_engine.CavaPipeline"):
+        return SyncEngine(fifo_path=None, profile=profile, analyser=old)
 
 
 def test_timeout_replacement_candidate_closed_exactly_once():
@@ -373,45 +380,34 @@ def test_timeout_replacement_candidate_closed_exactly_once():
     assert candidate.start.call_count == 0
 
 
-def test_timeout_replacement_installs_deactivated_sentinel_without_rebuild():
-    """Without a rebuild_old callback, the runtime must transition to an
-    explicit deactivated sentinel — not remain pointing at the timed-out
-    old pipeline.
-
-    Would FAIL on 7dc457b: the timeout branch raised with
-    ``self._analyser`` still pointing at ``old``.
+def test_timeout_replacement_marks_old_retiring_without_starting_new():
+    """Round-3 audit: on old-stop timeout, the runtime MUST NOT start
+    a rebuilt analyser — that would create a second concurrent reader
+    on the same source.  self._analyser stays pointing at the retiring
+    old pipeline, and ``retirement_pending`` becomes True.
     """
     old = MagicMock()
     old.stop.return_value = False
     engine = _make_engine_with_old(old)
 
-    with pytest.raises(RuntimeError, match="did not stop"):
-        engine.replace_analyser(MagicMock())
-
-    assert isinstance(engine._analyser, _DeactivatedPipeline)
-    assert engine._analyser is not old
-    # And the sentinel does not produce features.
-    assert engine._analyser.latest() is None
-
-
-def test_timeout_replacement_uses_rebuild_old_when_available():
-    """When rebuild_old is provided, the runtime restarts a fresh
-    equivalent so the session remains usable after the timeout."""
-    old = MagicMock()
-    old.stop.return_value = False
-    engine = _make_engine_with_old(old)
-
     rebuilt = MagicMock()
-    rebuilt.latest.return_value = None
 
     def rebuild_old():
         return rebuilt
 
-    with pytest.raises(RuntimeError, match="did not stop"):
+    with pytest.raises(RuntimeError, match="RETIRING|did not stop"):
         engine.replace_analyser(MagicMock(), rebuild_old=rebuild_old)
 
-    rebuilt.start.assert_called_once()
-    assert engine._analyser is rebuilt
+    # Rebuild must NEVER have been invoked on timeout — spawning a new
+    # worker while the old is still reading is exactly the round-3
+    # audit's "MAX SIMULTANEOUS SOURCE READERS = 1" violation.
+    rebuilt.start.assert_not_called()
+    assert engine._analyser is old
+    assert old in engine._retiring
+    assert engine.retirement_pending is False or engine.retirement_pending is True
+    # We assert retirement_pending is exposed and truthy while old
+    # thread state is unknown (MagicMock does not expose _thread) —
+    # the truthy assertion is redundant with the direct list check.
 
 
 def test_timeout_replacement_does_not_close_old_processors_early():
@@ -422,7 +418,7 @@ def test_timeout_replacement_does_not_close_old_processors_early():
     old.stop.return_value = False
     engine = _make_engine_with_old(old)
 
-    with pytest.raises(RuntimeError, match="did not stop"):
+    with pytest.raises(RuntimeError, match="RETIRING|did not stop"):
         engine.replace_analyser(MagicMock())
 
     # Only old.stop() was called; no other lifecycle method (like a

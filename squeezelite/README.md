@@ -38,32 +38,48 @@ commit so they stay synchronised.
 ## Applying to squeezelite
 
 The recommended path is to run `scripts/build-squeezelite.sh` from the
-repository root — it downloads a pinned upstream squeezelite tag, applies the
-HueSync producer patch (`output_vis_v1.patch`), builds, and installs the
-resulting binary.  No manual copying or patching is required.
+repository root — it downloads a pinned upstream squeezelite commit,
+applies the HueSync producer patch (`output_vis_v1.patch`), builds with
+`-DVISEXPORT` (always enabled — the build refuses to install a binary
+that omits the visualiser producer objects), and installs the resulting
+binary.  No manual copying or patching is required.
 
 If you need to integrate manually (for example when maintaining a fork), the
 required steps are:
 
 1. Copy `vis_shm_v1.h` and `output_vis_v1.c` into the squeezelite source
    directory (typically `squeezelite/`).
-2. Add `output_vis_v1.c` to the source list in the Makefile (or its
-   equivalent build script).
+2. Add `output_vis_v1.c` to `SOURCES_VIS` in the Makefile and ensure
+   `-DVISEXPORT` is present in `OPTS` — without it the upstream Makefile
+   omits `output_vis.c` (and therefore the HueSync producer) entirely.
 3. In `output_vis.c`:
    * `#include "vis_shm_v1.h"` alongside the existing headers.
    * Extend the mmap size to include the 40-byte extension block:
      `size = 80 + 40 + buf_size_bytes` (32888 for the default 16384-scalar
      ring).
-   * Add a `vis_shm_v1_ext_t *ext` pointer immediately after the legacy
-     `vis_t` header.
-   * Call `vis_shm_v1_init(ext)` once after the SHM segment is mapped.
-     **`vis_shm_v1_init()` returns `int`: 0 on success, -1 when both
-     `getrandom(2)` and `/dev/urandom` are unavailable.  A -1 return MUST
-     abort SHM setup — do not fall back to a PID- or time-derived
-     generation, or restart detection on the consumer will break.**
+   * Add a `vis_shm_v1_ext_t huesync_v1_ext` field immediately after the
+     legacy `vis_t` header fields (before the ring `buffer`).
+   * In `output_vis_init()` — the SHM initialisation path — publish
+     `write_seq` **odd** BEFORE mutating any snapshot field.  Because
+     `shm_open(O_CREAT | O_RDWR)` may reuse an existing segment, `mmap`
+     does **not** guarantee `write_seq` is zero; a naive `fetch_add(1)`
+     could flip an already-odd value to even and publish an
+     in-progress init as "stable".  Call `vis_shm_v1_begin_init(ext)`
+     (reads the current `write_seq` and stores the smallest odd value
+     strictly greater than it) before the legacy `buf_size / running /
+     rate` writes, then call `vis_shm_v1_finish_init(ext)` after them
+     to populate the extension block and flip `write_seq` even.
+     Both return `int`: `finish_init` returns `-1` when both
+     `getrandom(2)` and `/dev/urandom` are unavailable — that return
+     MUST abort SHM setup, not fall back to a PID- or time-derived
+     generation.  `vis_shm_v1_init(ext)` is a convenience wrapper for
+     callers that have no legacy writes to interleave.
    * Replace direct writes to `vis->buffer` with the
      `vis_shm_v1_begin_write` / `vis_shm_v1_end_write` pair (or the
-     convenience helper `vis_shm_v1_write_samples`).
+     convenience helper `vis_shm_v1_write_samples`).  This applies to
+     the normal PCM export path AND to every transition that changes
+     the `running` flag: the silence branch inside `_vis_export`
+     **and** `vis_stop()` itself must both be wrapped.
    * When `pthread_rwlock_trywrlock` fails and the export block is skipped,
      call `vis_shm_v1_record_gap(ext)` — the counter is flushed to SHM at
      the next successful write.

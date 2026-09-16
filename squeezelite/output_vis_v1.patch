@@ -106,28 +106,29 @@ diff --git a/output_vis.c b/output_vis.c
  		pthread_rwlock_unlock(&vis_mmap->rwlock);
  	}
  }
-@@ -155,11 +193,33 @@
+@@ -155,11 +193,34 @@
  		pthread_rwlockattr_init(&attr);
  		pthread_rwlockattr_setpshared(&attr, PTHREAD_PROCESS_SHARED);
  		pthread_rwlock_init(&vis_mmap->rwlock, &attr);
-+		/* HueSync v1: mark write_seq odd BEFORE mutating any field the
-+		 * consumer treats as part of a coherent snapshot.  mmap zeroed
-+		 * write_seq, which is even, and a racing reader could otherwise
-+		 * see the legacy fields partially populated with a stable
-+		 * seqlock counter.  begin_write flips it to odd; end_write inside
-+		 * vis_shm_v1_init flips it to even once every field is set. */
-+		vis_shm_v1_begin_write(&vis_mmap->huesync_v1_ext);
++		/* HueSync v1: force write_seq to an ODD value BEFORE mutating any
++		 * snapshot field.  shm_open(O_CREAT | O_RDWR) may reuse an existing
++		 * SHM segment, so mmap does NOT necessarily zero write_seq — a
++		 * naive fetch_add(1) would happily flip an already-odd value to
++		 * even, publishing an in-progress init as 'stable'.  begin_init
++		 * reads the current value and stores the smallest odd value
++		 * strictly greater than it. */
++		vis_shm_v1_begin_init(&vis_mmap->huesync_v1_ext);
  		vis_mmap->buf_size = VIS_BUF_SIZE;
  		vis_mmap->running = false;
  		vis_mmap->rate = 44100;
  		pthread_rwlockattr_destroy(&attr);
 -		LOG_INFO("opened visulizer shared memory as %s", vis_shm_path);
-+		/* HueSync v1: initialise the extension block.  A -1 return means
-+		 * both getrandom(2) and /dev/urandom were unavailable — abort SHM
-+		 * setup rather than fall back to a PID/time generation, which
-+		 * would collide across restarts and defeat consumer restart
-+		 * detection. */
-+		if (vis_shm_v1_init(&vis_mmap->huesync_v1_ext) != 0) {
++		/* HueSync v1: finish init — populate the extension block and flip
++		 * write_seq to an even value.  A -1 return means both getrandom(2)
++		 * and /dev/urandom were unavailable — abort SHM setup rather than
++		 * fall back to a PID/time generation, which would collide across
++		 * restarts and defeat consumer restart detection. */
++		if (vis_shm_v1_finish_init(&vis_mmap->huesync_v1_ext) != 0) {
 +			LOG_WARN("HueSync v1 SHM init failed (no RNG); disabling visualiser SHM");
 +			munmap(vis_mmap, sizeof(struct vis_t));
 +			vis_mmap = NULL;
