@@ -1,3 +1,9 @@
+> **Historical document — not the current implementation contract.**
+> This preserves an earlier proposal, review or measurement. Do not execute its
+> migration/build instructions as current guidance. See [the frozen architecture](ANALYSIS_ARCHITECTURE.md),
+> [configuration](configuration.md) and [testing](testing.md). Measurements apply
+> only to their original commit/environment; current LXC validation is pending.
+
 # HueSync — kritische product- en UI-review
 
 **Repository:** https://github.com/ThaYapeMan/HueSync  

@@ -388,89 +388,24 @@ def test_beat_at_earlier_interval_does_not_receive_future_spectrum_bars():
     assert spec_rec.features.bars == [0.9]
 
 
-def test_late_arriving_publication_is_dropped_not_reordered():
-    """Reproduces the audit's CAVA + Beat cadence: after four feeds
-    where cavacore emits [0,480)…[1440,1920), a fifth feed emits Beat
-    at [0,480) and cavacore at [1920,2400).  The Beat record must be
-    DROPPED (start=0 is far behind the transport frontier) rather
-    than published as a backwards timestamp.
-    """
-    cavacore = _ManualProcessor("cavacore_probe")
+def test_late_arriving_publication_retains_event_time():
+    spectrum = _ManualProcessor("cavacore_probe")
     beat = _ManualProcessor("beat_probe")
-    cap = _make_cap_with_processors(cavacore, beat)
-
-    # Feeds 0..3: cavacore emits [i*480, (i+1)*480) each frame.
-    for i in range(4):
-        cavacore.push([
-            ProcessorUpdate(
-                processor_id="cavacore_probe",
-                sample_start=i * 480, sample_end=(i + 1) * 480,
-                bars=[float(i) * 0.1],
-            )
-        ])
-        beat.push([])   # no beat this feed
-        cap.feed(_make_frame(sample_pos=i * 480))
-
-    # Feed 4: beat late-arrives at [0,480), cavacore moves to [1920,2400).
-    cavacore.push([
-        ProcessorUpdate(
-            processor_id="cavacore_probe",
-            sample_start=1920, sample_end=2400, bars=[0.4],
-        )
-    ])
-    beat.push([
-        ProcessorUpdate(
-            processor_id="beat_probe",
-            sample_start=0, sample_end=480, onset=True, onset_strength=0.5,
-        )
-    ])
-    late_late_before = cap.pub_late_dropped_count
-    recs = cap.feed(_make_frame(sample_pos=1920))
-
-    starts = sorted(r.sample_pos for r in recs)
-    # No published record may have sample_pos < 1920 (the frontier).
-    assert all(s >= 1920 for s in starts), (
-        f"backwards publication observed; starts={starts}"
-    )
-    assert cap.pub_late_dropped_count > late_late_before, (
-        "the dropped late beat must be recorded in pub_late_dropped_count"
-    )
-
-
-def test_cross_call_publication_start_never_moves_backwards():
-    """Randomised cadence: N feeds each emitting one Cavacore record
-    and possibly a late Beat.  Published sample_pos must be
-    monotonically non-decreasing across all feeds."""
-    cavacore = _ManualProcessor("cavacore_probe")
-    beat = _ManualProcessor("beat_probe")
-    cap = _make_cap_with_processors(cavacore, beat)
-
-    published: list[tuple[int, int]] = []
+    cap = _make_cap_with_processors(spectrum, beat)
+    cap._processors = (spectrum, beat)
     for i in range(6):
-        cavacore.push([
-            ProcessorUpdate(
-                processor_id="cavacore_probe",
-                sample_start=i * 480, sample_end=(i + 1) * 480,
-                bars=[0.1 * i],
-            )
-        ])
+        spectrum.push([ProcessorUpdate("cavacore_probe", i * 480, (i + 1) * 480, bars=[0.1])])
+        beat.push([ProcessorUpdate("beat_probe", (i - 4) * 480, (i - 3) * 480,
+                                   onset=True)] if i >= 4 else [])
+        records = cap.feed(_make_frame(sample_pos=i * 480))
+        assert [r.sequence for r in records] == sorted(r.sequence for r in records)
         if i >= 4:
-            beat.push([
-                ProcessorUpdate(
-                    processor_id="beat_probe",
-                    sample_start=(i - 4) * 480, sample_end=(i - 3) * 480,
-                    onset=True, onset_strength=0.5,
-                )
-            ])
-        else:
-            beat.push([])
-        for rec in cap.feed(_make_frame(sample_pos=i * 480)):
-            published.append((rec.sample_pos, rec.sample_end))
-
-    starts = [s for s, _ in published]
-    assert starts == sorted(starts), (
-        f"sample_pos must be monotonically non-decreasing; got {starts}"
-    )
+            delayed = records[-1]
+            assert delayed.sample_pos == (i - 4) * 480
+            assert delayed.features.onset
+            assert delayed.effective_processor_ids == ("beat_probe",)
+            assert delayed.carried_spectrum_interval == ((i - 4) * 480, (i - 3) * 480)
+    assert cap.pub_late_dropped_count == 0
 
 
 def test_pending_state_is_bounded_across_many_feeds():
@@ -494,45 +429,16 @@ def test_pending_state_is_bounded_across_many_feeds():
     )
 
 
-def test_eos_with_delayed_processor_preserves_ordering():
-    """A delayed Beat that only emits during flush must not produce
-    records with sample_pos < the transport frontier."""
-    beat = _ManualProcessor("beat_probe")
-    cap = _make_cap_with_processors(beat)
-
-    # Advance the transport frontier.
-    for i in range(3):
-        beat.push([
-            ProcessorUpdate(
-                processor_id="beat_probe",
-                sample_start=i * _HOP, sample_end=(i + 1) * _HOP,
-                onset=False, onset_strength=0.0,
-            )
-        ])
-        cap.feed(_make_frame(sample_pos=i * _HOP))
-
-    frontier = cap._last_pub_start
-    # Simulate an EOS whose flush emits an OLD interval — must be
-    # dropped rather than published backwards.
-    late_before = cap.pub_late_dropped_count
-    # Force a manual flush call with an out-of-order update.
-    # We do this by injecting through _publish_by_interval directly,
-    # matching the composition helper used by _flush_engine.
-    late_update = ProcessorUpdate(
-        processor_id="beat_probe",
-        sample_start=0, sample_end=_HOP,
-        onset=True, onset_strength=0.5,
-    )
-    records = cap._publish_by_interval(
-        epoch_id="ep-cross-call",
-        spectrum_updates=[],
-        other_updates=[late_update],
-        clamp_end=None,
-    )
-    assert records == [], "late EOS update must be dropped, not emitted"
-    assert cap.pub_late_dropped_count > late_before
-    # Frontier must not have regressed.
-    assert cap._last_pub_start == frontier
+def test_eos_with_delayed_processor_preserves_interval():
+    cap = _make_cap_with_processors(_ManualProcessor("beat_probe"))
+    cap._publish_by_interval(epoch_id="e", spectrum_updates=[], other_updates=[
+        ProcessorUpdate("beat_probe", 480, 960, onset=False)], clamp_end=None)
+    records = cap._publish_by_interval(epoch_id="e", spectrum_updates=[], other_updates=[
+        ProcessorUpdate("beat_probe", 0, 480, onset=True)], clamp_end=960)
+    assert len(records) == 1
+    assert (records[0].sample_pos, records[0].sample_end) == (0, 480)
+    assert records[0].features.onset
+    assert cap.pub_late_dropped_count == 0
 
 
 # ---------------------------------------------------------------------------
@@ -727,9 +633,8 @@ def test_replace_after_retirement_completes_succeeds():
         engine.stop()
 
 
-def test_retirement_pending_property_reflects_worker_state():
-    """``SyncEngine.retirement_pending`` must return True while a
-    retiring worker is alive and False once it has exited."""
+def test_retirement_status_preserves_ownership_until_join():
+    """Status observation cannot discard an unacknowledged stop timeout."""
     source = _BlockingSource()
     engine, cap = _make_engine_and_start(source)
     try:
@@ -741,7 +646,8 @@ def test_retirement_pending_property_reflects_worker_state():
         deadline = time.monotonic() + 3.0
         while cap._thread is not None and cap._thread.is_alive() and time.monotonic() < deadline:
             time.sleep(0.01)
-        # Once the thread has exited, the property must clear.
+        assert engine.retirement_pending is True
+        assert engine.stop() is True
         assert engine.retirement_pending is False
     finally:
         source.release()

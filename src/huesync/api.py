@@ -525,6 +525,7 @@ async def get_status(request: Request):
         "active_coupling_id": manager.active_coupling_id,
         "active_coupling_name": manager.active_coupling_name,
         "active_player_type": manager.active_player_type,
+        "analysis_stopping": manager.analysis_stopping,
         "sync_master": manager.detected_sync_master,
         "sync_master_name": manager.detected_sync_master_name,
         "applied_delay_ms": manager.applied_delay_ms,
@@ -1190,7 +1191,10 @@ async def create_coupling(request: Request, body: CouplingCreateBody):
 async def deactivate_coupling(request: Request):
     manager = _manager(request)
     storage = _storage(request)
-    await manager.deactivate()
+    try:
+        await manager.deactivate()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     storage.set_active_coupling_id(None)
     return {"active_id": None}
 
@@ -1199,8 +1203,8 @@ class RestartCouplingCavaBody(BaseModel):
     """Optionally update frequency cutoffs and/or band boundaries while restarting cava.
 
     Saving these avoids going through PATCH /couplings/{id}, which could trigger
-    heavier session actions.  These changes need only a cava restart; squeezelite
-    and the Hue DTLS session stay up.
+    heavier session actions. The endpoint dispatches to the active owner:
+    canonical analyser replacement or external CAVA process restart.
     """
 
     lower_cutoff_freq: int | None = None

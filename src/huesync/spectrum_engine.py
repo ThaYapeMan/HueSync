@@ -126,6 +126,8 @@ class PublicationRecord:
     effective_engine_id: str   # kept for backward compatibility
     sample_end: int = 0        # canonical position past the last sample in this publication
     effective_processor_ids: tuple[str, ...] = ()  # IDs of all processors that contributed
+    # Historical Spectrum payload, not a fresh contributor to this record.
+    carried_spectrum_interval: tuple[int, int] | None = None
 
 
 # ---------------------------------------------------------------------------

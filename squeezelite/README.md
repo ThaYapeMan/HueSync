@@ -1,121 +1,112 @@
-# HueSync v1 squeezelite producer
+# Squeezelite producer build and SHM v1
 
-This directory contains the producer side of the HueSync v1 visualiser SHM
-ABI.  It is the counterpart to `src/huesync/pcm_source.py` which implements
-the consumer.  Together they replace the ambiguous legacy v0 layout with a
-coherent, monotonic, seqlock-protected view of squeezelite's ring buffer.
+Current producer/source contract. Canonical LMS PCM requires exact SHM v1;
+legacy external CAVA/FIFO is separate. Native live deployment **REQUIRES LXC VALIDATION**.
 
-## Files
+## Automatic build
 
-| File | Role |
-|---|---|
-| `vis_shm_v1.h` | ABI header — layout, constants, and static-asserted offsets. |
-| `output_vis_v1.c` | Reference C implementation of the producer half. |
-| `output_vis_v1.patch` | Documented diff hooking the producer into upstream `output_vis.c` and the Makefile. |
+Pinned upstream: `ralph-irving/squeezelite` at
+`c7c4248ddd70e47dbfeba0bf4a8a7ec08d8a995c`.
 
-The producer sources target upstream squeezelite's `output_vis.c`.  Run
-`scripts/build-squeezelite.sh` from the repository root — no manual patching
-required — to clone the pinned upstream commit, apply the patch, build, and
-install to `/usr/local/bin/squeezelite`.  The manual procedure below is
-retained only for developers maintaining a fork.
+From the HueSync repository on the intended target, after installing dependencies:
 
-## Pinned upstream revision
-
-Upstream (ralph-irving/squeezelite) does not publish git tags.  The current
-patch is generated against, and verified to apply cleanly to, the following
-exact commit:
-
-```
-c7c4248ddd70e47dbfeba0bf4a8a7ec08d8a995c   ralph-irving/squeezelite master
+```sh
+sudo bash scripts/build-squeezelite.sh
 ```
 
-`scripts/build-squeezelite.sh` records this hash in the `SQUEEZELITE_COMMIT`
-variable and refuses to proceed if the checked-out revision does not match.
-When bumping upstream, regenerate `output_vis_v1.patch` (see the notes in
-that file) and update the hash here and in the build script in a single
-commit so they stay synchronised.
+The script clones and verifies the pinned commit, copies `vis_shm_v1.h` and
+`output_vis_v1.c`, dry-runs/applies `output_vis_v1.patch`, forces `-DVISEXPORT`,
+checks that `output_vis.o` and `output_vis_v1.o` occur in the build plan, builds,
+checks the produced objects and installs `/usr/local/bin/squeezelite` by default.
+No manual producer patching is required. `OPTS` can add flags; VISEXPORT remains enabled.
+Changing upstream requires deliberately regenerating/testing the patch and updating
+its pin. The script's temporary build directory is recreated on each run.
 
-## Applying to squeezelite
+Dependencies include git, build-essential, libasound2-dev, libflac-dev, libmad0-dev,
+libmpg123-dev, libvorbis-dev, libfaad-dev, libopus-dev and libssl-dev. They are not
+installed by this script. HueSync's Python package additionally needs libfftw3-dev;
+that is a CAVA Core build requirement, not a Squeezelite FFT dependency.
+See [installation](../docs/installation.md).
 
-The recommended path is to run `scripts/build-squeezelite.sh` from the
-repository root — it downloads a pinned upstream squeezelite commit,
-applies the HueSync producer patch (`output_vis_v1.patch`), builds with
-`-DVISEXPORT` (always enabled — the build refuses to install a binary
-that omits the visualiser producer objects), and installs the resulting
-binary.  No manual copying or patching is required.
+Restart the actual running Squeezelite after installation and verify its executable
+path. A successful build plan is not an object compile; compiled producer objects
+are not a full link, deployment or live continuity test.
 
-If you need to integrate manually (for example when maintaining a fork), the
-required steps are:
+## ABI layout
 
-1. Copy `vis_shm_v1.h` and `output_vis_v1.c` into the squeezelite source
-   directory (typically `squeezelite/`).
-2. Add `output_vis_v1.c` to `SOURCES_VIS` in the Makefile and ensure
-   `-DVISEXPORT` is present in `OPTS` — without it the upstream Makefile
-   omits `output_vis.c` (and therefore the HueSync producer) entirely.
-3. In `output_vis.c`:
-   * `#include "vis_shm_v1.h"` alongside the existing headers.
-   * Extend the mmap size to include the 40-byte extension block:
-     `size = 80 + 40 + buf_size_bytes` (32888 for the default 16384-scalar
-     ring).
-   * Add a `vis_shm_v1_ext_t huesync_v1_ext` field immediately after the
-     legacy `vis_t` header fields (before the ring `buffer`).
-   * In `output_vis_init()` — the SHM initialisation path — publish
-     `write_seq` **odd** BEFORE mutating any snapshot field.  Because
-     `shm_open(O_CREAT | O_RDWR)` may reuse an existing segment, `mmap`
-     does **not** guarantee `write_seq` is zero; a naive `fetch_add(1)`
-     could flip an already-odd value to even and publish an
-     in-progress init as "stable".  Call `vis_shm_v1_begin_init(ext)`
-     (reads the current `write_seq` and stores the smallest odd value
-     strictly greater than it) before the legacy `buf_size / running /
-     rate` writes, then call `vis_shm_v1_finish_init(ext)` after them
-     to populate the extension block and flip `write_seq` even.
-     Both return `int`: `finish_init` returns `-1` when both
-     `getrandom(2)` and `/dev/urandom` are unavailable — that return
-     MUST abort SHM setup, not fall back to a PID- or time-derived
-     generation.  `vis_shm_v1_init(ext)` is a convenience wrapper for
-     callers that have no legacy writes to interleave.
-   * Replace direct writes to `vis->buffer` with the
-     `vis_shm_v1_begin_write` / `vis_shm_v1_end_write` pair (or the
-     convenience helper `vis_shm_v1_write_samples`).  This applies to
-     the normal PCM export path AND to every transition that changes
-     the `running` flag: the silence branch inside `_vis_export`
-     **and** `vis_stop()` itself must both be wrapped.
-   * When `pthread_rwlock_trywrlock` fails and the export block is skipped,
-     call `vis_shm_v1_record_gap(ext)` — the counter is flushed to SHM at
-     the next successful write.
+The supported target layout is little-endian, with the legacy pthread-lock/header
+region preserved and a packed 40-byte extension before the PCM ring. C static
+assertions and Python struct formats define the same offsets.
 
-## Compatibility with HueSync
+| Absolute byte offset | Field | Type / units |
+|---:|---|---|
+| 0–55 | Legacy lock region | Target ABI layout |
+| 56 | buf_size | uint32, scalar int16 sample capacity |
+| 60 | buf_index | uint32, scalar int16 write index |
+| 64 | running | uint8; padding through 67 |
+| 68 | rate | uint32, Hz |
+| 72 | updated | int64 legacy timestamp; not continuity evidence |
+| 80 | magic | uint32 `0x48555345` |
+| 84 | abi_version | uint16, exactly 1 |
+| 86 | flags | uint16 reserved |
+| 88 | write_seq | uint32, odd while writing; even stable |
+| 92 | generation | uint64 producer lifetime ID |
+| 100 | abs_write_pos | uint64 exclusive **stereo-frame** position |
+| 108 | gap_seq | uint64 export-gap counter |
+| 116–119 | padding | 4 bytes |
+| 120 | PCM ring | Interleaved signed int16 L/R |
 
-`SqueezeliteShmStereoSource.open()` in the consumer defaults to
-`require_v1=True`.  The production canonical LMS PCM path
-(`bars_source='pcm_pipeline'`) refuses to activate against a stock
-squeezelite that only exposes the v0 layout:
+Default ring capacity is 16384 scalar samples = 8192 stereo frames = 32768 bytes;
+total mapping size is 32888 bytes. One stereo frame advances abs_write_pos by 1 and
+buf_index by 2 modulo scalar capacity. Do not double-add absolute positions or treat
+extension bytes at offset 80 as PCM.
 
-```
-RuntimeError: Squeezelite SHM at /dev/shm/squeezelite-<mac> does not provide
-the v1 ABI (magic 0x48555345 not found at offset 80).  Rebuild squeezelite
-with the HueSync v1 producer patch from squeezelite/output_vis_v1.c and
-redeploy.
-```
+## Snapshot, initialization and gaps
 
-Legacy code paths and tests that still exercise the v0 fall-through pass
-`require_v1=False` explicitly.
+The reader does not take the producer pthread lock. The producer's sequence protects
+legacy metadata, extension metadata and PCM changes, including stop/silence transitions.
+The reader verifies sequence and generation after copying PCM, rejecting torn snapshots.
 
-## Verifying the ABI on a running player
+Initialization may reuse an old segment. `vis_shm_v1_begin_init()` returns void and
+forces an odd uint32 successor: even +1, odd +2, modulo 2^32. It runs before legacy
+metadata writes. `vis_shm_v1_finish_init()` fills extension state and publishes even;
+it returns -1 if secure generation creation fails. `getrandom` or `/dev/urandom`
+supplies generation; there is no PID/time fallback. A failed initialization remains
+unavailable. Sequence wrap is intentional: 0xffffffff → 1 during init → 2 at completion.
 
-```
+Skipped exports retain producer-local pending gap state when the SHM lock is unavailable.
+The next successful write publishes a changed gap_seq. The reader invalidates once for
+that observed change, establishes a new baseline, then accepts subsequent clean data.
+Absolute position exposes full/multiple laps and overrun; regression, generation change,
+rate/restart and gap changes invalidate before new PCM enters the old DSP epoch.
+
+## Production consumer and remap
+
+`SqueezeliteShmStereoSource(require_v1=True)` is the production canonical reader.
+Wrong magic, v0 and unsupported versions cannot fall back to legacy PCM. An initial
+unsupported producer causes an actionable activation error: rebuild/upgrade it.
+
+Backing-object device/inode change closes the old mmap and establishes pending remap.
+Absent or incompletely initialized replacements remain unavailable and are retried.
+A rejected ABI belongs to that mapping only: a later inode replacement by valid v1
+is detected, revalidated and remapped. The new generation/counters establish a fresh
+baseline; StreamInvalidated precedes delivery of its PCM. An unsupported unchanged
+mapping remains rejected. No v0/header-as-PCM fallback is permitted under require_v1.
+
+The manager retains this source while any reader is retiring. Do not close/remap it
+from a second management path while that worker is active.
+
+## Diagnostics
+
+```sh
 xxd /dev/shm/squeezelite-<mac> | head -8
 ```
 
-The 32-bit magic `0x48555345` is stored little-endian, so the actual byte
-sequence in memory at offset 80 (decimal) is `45 53 55 48` — ASCII `E S U H`
-(the 'HUSE' characters appear reversed because the least significant byte
-sits first).  A `hexdump -C` reader will therefore see:
+At offset 0x50, little-endian magic bytes are `45 53 55 48`; version bytes are
+`01 00`. Wrong bytes commonly mean the stock/old executable is still running.
+Check process executable, permissions, rate, generation, sequence and gap changes.
+Do not use the legacy updated timestamp to prove continuity.
 
-```
-00000050  45 53 55 48 01 00 00 00  ...
-          ^^^^^^^^^^^ magic (LE)  ^^^ abi_version=1
-```
-
-If those bytes are zero, the patched producer is not active — check that the
-rebuilt squeezelite binary is running rather than the packaged one.
+Local tests establish source logic and compiler outputs. Live producer-to-consumer
+behavior, target ABI/toolchain compatibility and realtime pacing still require the
+LXC validation procedure in [deployment-lxc.md](../docs/deployment-lxc.md).

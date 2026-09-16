@@ -4,7 +4,7 @@
 # This script automates the previously manual "copy files and patch
 # output_vis.c" ritual described in squeezelite/README.md.
 #
-#   1. Clone ralph-irving/squeezelite at a pinned tag.
+#   1. Clone ralph-irving/squeezelite at a pinned commit.
 #   2. Copy squeezelite/vis_shm_v1.h and squeezelite/output_vis_v1.c into the
 #      source tree.
 #   3. Apply squeezelite/output_vis_v1.patch to hook the v1 producer into
@@ -32,7 +32,7 @@
 #   git               — clone the upstream repository
 #
 # The build script does not install these itself; it expects the caller to
-# have run the standard HueSync installer first.  A missing dependency
+# install the dependencies above first (see docs/installation.md). A missing dependency
 # surfaces as a `make` failure with an actionable message.
 
 set -euo pipefail

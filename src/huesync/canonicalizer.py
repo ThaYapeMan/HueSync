@@ -1,16 +1,9 @@
-"""Audio source and canonicaliser contract types — Phase 1 of the PCM-first architecture.
+"""Decoded-source and canonical PCM contracts and canonicalization.
 
-Defines the type-level contracts for the decoded-source and canonical-PCM layers.
-No existing production code imports from this module; all types are additive.
-
-Layer contracts:
-
-    Source adapter → DecodedSourceFrame  (via SourceReadResult)
-    AudioCanonicalizer → AnalysisPcmFrame  (via CanonicalReadResult)
-    Analyser → OnsetEvent
-    Configuration → SpectrumLayout
-
-See docs/audio-architecture-v1.md §§5–9, §11–14 for the authoritative spec.
+Source adapters emit complete DecodedSourceFrame objects and lifecycle events.
+AudioCanonicalizer produces 48 kHz stereo AnalysisPcmFrame objects with canonical
+sample positions and epochs. Production and acceptance share this implementation.
+See docs/audio-pipeline.md for ownership, resampling, EOS and invalidation.
 """
 
 from __future__ import annotations

@@ -1085,31 +1085,15 @@ class CanonicalAnalysisPipeline:
         # STFT sample-position tracking so hop_sample_starts is chunk-independent.
         self._stft_frame_count: int = 0
         self._epoch_start_sample_pos: int = 0
-        # Last known spectrum bars, carried forward when SpectrumProcessor
-        # produces no output in a frame but another processor (e.g. BeatDetector)
-        # does.  This lets Beat-only or Loudness-only publications still ship a
-        # valid AudioFeatures.bars payload.  Cleared on epoch transition and on
-        # StreamInvalidated via _reset_dsp().
+        # Compatibility diagnostics for the last delivered Spectrum payload.
+        # Actual historical carry selection uses the bounded interval history.
         self._last_bars: list[float] | None = None
-        # Canonical sample position past the last spectrum update whose bars
-        # were assigned to ``_last_bars``.  BLOCKER 2 audit (round 3):
-        # non-Spectrum publications may only carry ``_last_bars`` when
-        # ``_last_bars_end <= their sample_start`` — historical bars are
-        # allowed, but future bars must NEVER be attached to an earlier
-        # feature event.  Reset on epoch transition / stream invalidation.
         self._last_bars_end: int = 0
-        # Sample_start of the most recently emitted PublicationRecord.
-        # Enforces monotonic cross-call publication order: any interval
-        # whose sample_start is < ``_last_pub_start`` would move
-        # publications backwards and is dropped.  Overlapping intervals
-        # within a single call are still permitted as long as the
-        # sort-by-(start, end) keeps starts non-decreasing.  Reset on
-        # epoch transition / stream invalidation.
-        self._last_pub_start: int = 0
-        # Late-arriving publications dropped since the last drain.
-        # Bounded observability for the "publications must not go
-        # backwards" invariant — mirrors ``_pub_dropped`` in intent.
-        self._pub_late_dropped: int = 0
+        # Bounded event-time history for delayed processors. Publication sequence
+        # orders delivery; sample intervals may go backwards when results arrive
+        # later. Missing/evicted history means empty bars, never future bars.
+        self._bar_history: deque[tuple[int, int, list[float]]] = deque(maxlen=1000)
+        self._pub_late_dropped: int = 0  # compatibility: valid late updates are never dropped
         # Guards double-close on the processor list: stop() closes only if the
         # worker thread has terminated within the join timeout; if it hasn't,
         # the worker's finally block picks up the responsibility once it
@@ -1147,13 +1131,7 @@ class CanonicalAnalysisPipeline:
 
     @property
     def pub_late_dropped_count(self) -> int:
-        """Number of late-arriving publications dropped since the last drain.
-
-        A ProcessorUpdate whose interval sits before an already-published
-        record would move the transport stream backwards.  We discard such
-        updates and increment this counter so consumers can observe how
-        often a delayed processor is running past the transport frontier.
-        """
+        """Compatibility counter: always zero; delayed updates are published."""
         with self._pub_lock:
             return self._pub_late_dropped
 
@@ -1186,8 +1164,8 @@ class CanonicalAnalysisPipeline:
     def rebuild_beat_detector(self, profile: Profile) -> None:
         """Rebuild the BeatDetector onset pipeline from new profile parameters.
 
-        Safe to call while the analysis thread runs — GIL ensures the assignment
-        to _onset_pipeline is atomic from the reader's perspective.
+        Safe while analysis runs: BeatDetector synchronizes feed/reset/rebuild
+        with its lock so no old/new method state is mixed.
         Onset warmup state resets; allow ~30 frames (~300 ms) before comparing
         onset timings.
         """
@@ -1223,7 +1201,7 @@ class CanonicalAnalysisPipeline:
         # inherits carry-over bars from a previous stream.
         self._last_bars = None
         self._last_bars_end = 0
-        self._last_pub_start = 0
+        self._bar_history.clear()
 
     def _publish(
         self,
@@ -1234,6 +1212,7 @@ class CanonicalAnalysisPipeline:
         features: AudioFeatures,
         effective_engine_id: str,
         effective_processor_ids: tuple[str, ...],
+        carried_spectrum_interval: tuple[int, int] | None = None,
     ) -> PublicationRecord:
         """Build a PublicationRecord and atomically commit it to publication state."""
         with self._pub_lock:
@@ -1247,6 +1226,7 @@ class CanonicalAnalysisPipeline:
                 features=features,
                 effective_engine_id=effective_engine_id,
                 effective_processor_ids=effective_processor_ids,
+                carried_spectrum_interval=carried_spectrum_interval,
             )
             self._latest_pub = record
             # Bounded queue: count drops rather than blocking DSP.
@@ -1261,9 +1241,9 @@ class CanonicalAnalysisPipeline:
     ) -> AudioFeatures:
         """Assemble AudioFeatures from spectrum bars and accumulated onset updates.
 
-        onset_batch contains ProcessorUpdates from BeatDetector — one per STFT
-        hop covered by this spectrum publication.  Fields already parsed by
-        BeatDetector; no onset_method branching needed here.
+        onset_batch contains contributions for this exact publication interval.
+        Flags combine with OR and strengths with max; processors have already
+        parsed their algorithms, so no onset-method branching belongs here.
         """
         onset = False
         onset_strength = 0.0
@@ -1380,9 +1360,8 @@ class CanonicalAnalysisPipeline:
         # ProcessorUpdate at an EARLIER interval never inherits bars from
         # a LATER spectrum ProcessorUpdate in the same frame.
 
-        # Merge previously-pending "other" updates (whose intervals have not
-        # yet been published because no processor emitted an aligning
-        # interval in prior frames) with this frame's other updates.
+        # Drain compatibility pending contributions without waiting for another
+        # processor. Their own intervals and identities remain authoritative.
         merged_others = list(self._pending_onset) + other_updates
         self._pending_onset = []
 
@@ -1418,8 +1397,12 @@ class CanonicalAnalysisPipeline:
           value published, so two updates that agree on their own interval
           before clamping still merge into the same record.
 
-        Publications are emitted in ascending ``(sample_start, sample_end)``
-        order — the "publications must not go backwards" invariant survives.
+        Delivery order is deterministic: Spectrum updates first, then other
+        updates, preserving first-seen interval order in each batch. Sequence
+        numbers order delivery, NOT event time. Different processor latencies
+        can produce older intervals after newer records; none are discarded.
+        Equal intervals available in this batch merge. Already-delivered records
+        are never rewritten. Historical bars carry explicit interval provenance.
         """
         # Group by exact interval key.  We keep separate dicts for spectrum
         # and others so the merge policy stays explicit rather than
@@ -1453,11 +1436,6 @@ class CanonicalAnalysisPipeline:
             if ou.processor_id not in contributors_by_key[key]:
                 contributors_by_key[key].append(ou.processor_id)
 
-        # Chronological order: sort by (sample_start, sample_end) so the
-        # publication stream stays monotonic across processors with
-        # different cadences.
-        insertion_order.sort(key=lambda k: (k[0], k[1]))
-
         records: list[PublicationRecord] = []
         for key in insertion_order:
             start, end = key
@@ -1469,38 +1447,22 @@ class CanonicalAnalysisPipeline:
             else:
                 pub_end = end
 
-            # BLOCKER 2 audit (round 3): drop late-arriving publications.
-            # A ProcessorUpdate whose sample_start is strictly less than
-            # the sample_start of a previously emitted record would move
-            # the publication stream backwards — consumers that treat
-            # records as a chronological transport would then observe
-            # old start-timestamps after newer ones.  Discard rather
-            # than reorder (no scheduler redesign), incrementing a
-            # bounded counter so overflow is observable via
-            # ``pub_late_dropped_count``.  Overlapping intervals with
-            # equal or later starts (e.g. within a single feed() where
-            # two processors emit at the same sample_start with
-            # different sample_ends) are still permitted — the
-            # sort-by-(start, end) keeps them adjacent and monotonic.
-            if start < self._last_pub_start:
-                self._pub_late_dropped += 1
+            if pub_end <= start:
                 continue
-
             su = spectrum_by_key.get(key)
             these_others = others_by_key.get(key, [])
+            carry_interval = None
             if su is not None:
                 bars = list(su.bars or [])
-            elif self._last_bars is not None and self._last_bars_end <= start:
-                # Historical carry-forward is safe: the recorded
-                # ``_last_bars`` come from an interval whose sample_end
-                # is <= this interval's sample_start.  Future bars (a
-                # spectrum update at a LATER interval within the same
-                # feed() call) never leak into an earlier record because
-                # ``_last_bars_end`` is only updated inside the emit loop
-                # AFTER the spectrum interval has itself been published.
-                bars = list(self._last_bars)
             else:
-                bars = []
+                # Prefer the same source interval, otherwise the nearest
+                # completely historical interval. Never borrow future audio.
+                eligible = [h for h in self._bar_history
+                            if (h[0], h[1]) == (start, pub_end) or h[1] <= start]
+                previous = max(eligible, key=lambda h: (h[1], h[0]), default=None)
+                bars = list(previous[2]) if previous is not None else []
+                if previous is not None:
+                    carry_interval = (previous[0], previous[1])
 
             features = self._build_features(bars, these_others)
             record = self._publish(
@@ -1510,17 +1472,13 @@ class CanonicalAnalysisPipeline:
                 features=features,
                 effective_engine_id=self._spectrum_processor.processor_id,
                 effective_processor_ids=tuple(contributors_by_key[key]),
+                carried_spectrum_interval=carry_interval,
             )
             records.append(record)
-            # Update trackers AFTER emission so a spectrum ProcessorUpdate
-            # at [S,E) becomes the carry source only for records with
-            # start >= E, and the cross-call start monotonicity floor
-            # advances to this record's start.
-            if start > self._last_pub_start:
-                self._last_pub_start = start
             if su is not None:
                 self._last_bars = list(su.bars or [])
                 self._last_bars_end = pub_end
+                self._bar_history.append((start, pub_end, list(su.bars or [])))
         return records
 
     def _flush_engine(self) -> list[PublicationRecord]:
@@ -1649,6 +1607,10 @@ class CanonicalAnalysisPipeline:
                 self._processors_closed = True
 
     def start(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            raise RuntimeError("Canonical analysis worker already running or retiring")
+        if self._processors_closed:
+            raise RuntimeError("Closed canonical analysis requires a fresh pipeline")
         self._stop.clear()
         self._thread = threading.Thread(target=self._run, daemon=True)
         # Only mark the thread as started once .start() returns successfully.
@@ -3140,24 +3102,31 @@ class SyncEngine:
         return self._last_sustained_energy
 
     def start(self) -> None:
+        if self.retirement_pending:
+            raise RuntimeError("Cannot start analysis while a source reader is retiring")
         self._analyser.start()
 
-    def stop(self) -> None:
-        # Stop the current analyser first, then join any retiring
-        # workers so the session teardown owns the full lifecycle
-        # (BLOCKER 1 audit round 3: "SHUTDOWN RETAINS RETIRING WORKER
-        # OWNERSHIP").  Both loops swallow exceptions per-worker so
-        # one broken stop() does not leave others alive.
-        try:
-            self._analyser.stop()
-        except Exception:  # noqa: BLE001 — teardown best-effort
-            log.exception("SyncEngine.stop: current analyser stop() raised")
-        for retiring in list(self._retiring):
+    def stop(self) -> bool:
+        """Stop all owned analysers; False means source ownership is retained.
+
+        A bounded stop is not a completed join. Keep every unsuccessful owner
+        for retry, and never let a manager close/reuse its source prematurely.
+        Legacy analysers return None on successful stop; canonical ones return
+        an explicit bool.
+        """
+        owners = [self._analyser]
+        owners.extend(r for r in self._retiring if r is not self._analyser)
+        pending = []
+        for analyser in owners:
             try:
-                retiring.stop()
-            except Exception:  # noqa: BLE001
-                log.exception("SyncEngine.stop: retiring analyser stop() raised")
-        self._retiring.clear()
+                stopped = analyser.stop()
+                if stopped is False:
+                    pending.append(analyser)
+            except Exception:  # noqa: BLE001 — ownership survives a failed stop
+                log.exception("SyncEngine.stop: analyser stop failed")
+                pending.append(analyser)
+        self._retiring = pending
+        return not pending
 
     def _reap_retiring(self) -> None:
         """Drop retiring workers whose thread has already exited.
@@ -3185,13 +3154,12 @@ class SyncEngine:
 
     @property
     def retirement_pending(self) -> bool:
-        """True when a previously-timed-out worker has not yet exited.
+        """True while retirement ownership awaits a successful stop/reap.
 
-        The manager consults this after a failed ``replace_analyser`` to
-        decide whether to deactivate the session so retirement can
-        complete without a second concurrent reader ever being spawned.
+        Reading status must not erase a timeout between engine failure and the
+        manager recording its stopping state. Even an exited worker remains
+        owned here until stop() or the next replacement joins/reaps it.
         """
-        self._reap_retiring()
         return bool(self._retiring)
 
     async def run(self, output: Output) -> None:

@@ -212,6 +212,7 @@ class ActiveSession:
         player_type: VirtualPlayerType = VirtualPlayerType.LMS,
     ):
         self.profile = profile
+        self.stopping = False  # source still owned until teardown completes
         self.coupling = coupling
         self.player_type = player_type
         self.squeezelite: subprocess.Popen | None = None
@@ -253,6 +254,11 @@ class PlayerManager:
         if self._active and self._active.follower:
             return self._active.follower.warning
         return None
+
+    @property
+    def analysis_stopping(self) -> bool:
+        """An owned session is stopping; activation must complete its teardown."""
+        return bool(self._active and self._active.stopping)
 
     @property
     def active_coupling_id(self) -> str | None:
@@ -546,7 +552,11 @@ class PlayerManager:
                     session, profile, player, mellow_profile, output_config, channels
                 )
         except Exception:
+            # Keep ownership even if cleanup itself times out. A subsequent
+            # deactivate/activate retries teardown before opening a new source.
+            self._active = session
             await self._teardown_session(session)
+            self._active = None
             raise
 
         self._active = session
@@ -731,11 +741,11 @@ class PlayerManager:
         if not self._active:
             return
         session = self._active
-        self._active = None
         self.latency_warning = None
         self._detected_sync_master = None
         self._detected_sync_master_name = None
         await self._teardown_session(session)
+        self._active = None
         self.storage.set_active_coupling_id(None)
         if session.coupling:
             log.info("Deactivated coupling %s", session.coupling.name)
@@ -743,6 +753,7 @@ class PlayerManager:
             log.info("Deactivated profile %s", session.profile.name)
 
     async def _teardown_session(self, session: ActiveSession) -> None:
+        session.stopping = True
         if session.unsync_task:
             session.unsync_task.cancel()
         if session.follower:
@@ -754,7 +765,12 @@ class PlayerManager:
         if session.task:
             session.task.cancel()
         if session.sync_engine:
-            session.sync_engine.stop()
+            stopped = session.sync_engine.stop()
+            if stopped is False or session.sync_engine.retirement_pending is True:
+                raise RuntimeError(
+                    "Analysis worker still retiring; source retained. Retry deactivation "
+                    "after the worker exits. No replacement session has been started."
+                )
         if session.shm_source is not None:
             session.shm_source.close()
             session.shm_source = None
@@ -925,6 +941,10 @@ class PlayerManager:
         """
         if self._active is None or self._active.sync_engine is None:
             return
+        if self._active.stopping:
+            raise RuntimeError(
+                "Session is stopping; complete deactivation before replacing analysis"
+            )
         source = self._active.shm_source
         if source is None:
             log.warning(
@@ -955,10 +975,13 @@ class PlayerManager:
             # will roll storage back to.  The exception propagates so api.py
             # can restore persisted Analyser configuration.
             self._active.profile = old_profile
+            if self._active.sync_engine.retirement_pending:
+                self._active.stopping = True
             raise
 
         # SUCCESS: commit new profile only after start succeeded.
         self._active.profile = profile
+        self._active.stopping = False
         log.info(
             "replace_pcm_analyser: new spectrum_backend=%r active",
             profile.spectrum_backend,

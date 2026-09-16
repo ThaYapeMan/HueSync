@@ -6,21 +6,11 @@
  * src/huesync/pcm_source.py: SqueezeliteShmSource / SqueezeliteShmStereoSource)
  * can observe an atomic, monotonic view of the ring buffer.
  *
- * How to integrate:
- *   1. Copy vis_shm_v1.h next to output_vis.c in the squeezelite source tree.
- *   2. Include it from output_vis.c:  #include "vis_shm_v1.h"
- *   3. When the SHM segment is mapped, place vis_shm_v1_ext_t immediately
- *      after the existing vis_t header (offset 80).  If the calling code
- *      resizes the SHM segment, ensure the new size is
- *      80 + sizeof(vis_shm_v1_ext_t) + buf_size_bytes  (= 32888 bytes for
- *      the default 16384-scalar-sample ring).
- *   4. Wrap every write to vis->buffer with vis_shm_v1_begin_write /
- *      vis_shm_v1_end_write (below).  n_stereo_frames_written is the number
- *      of stereo frames just placed into the ring buffer.
- *   5. Call vis_shm_v1_init() once, after the mapping is created.
- *   6. If the export lock fails (trywrlock) and the current block is skipped,
- *      call vis_shm_v1_record_gap() to increment the pending-gap counter.
- *      The counter is flushed to SHM at the next successful end_write.
+ * Integration is automatic through scripts/build-squeezelite.sh and the
+ * committed output_vis_v1.patch. Initialization uses begin_init BEFORE legacy
+ * metadata writes and finish_init AFTER them; normal PCM, silence and stop
+ * transitions all use begin_write/end_write. Export-lock failures record gaps.
+ * See squeezelite/README.md for layout, units, build and validation boundaries.
  */
 
 #include "vis_shm_v1.h"
@@ -87,8 +77,8 @@ static int vis_shm_v1_read_generation(uint64_t *out) {
  * ``fetch_add(1)`` would happily flip an already-odd value to an even one,
  * publishing an "initialisation in progress" state as "stable snapshot".
  *
- * This helper reads the current value, computes the smallest ODD value
- * strictly greater than it (odd → +2, even → +1), and stores it back with
+ * This helper reads the current value, computes an ODD successor
+ * modulo uint32 (odd → +2, even → +1), and stores it back with
  * a seq-cst store + fence so all subsequent writes are ordered after.
  */
 void vis_shm_v1_begin_init(vis_shm_v1_ext_t *ext) {

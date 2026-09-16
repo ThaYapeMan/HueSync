@@ -1,26 +1,12 @@
 #!/usr/bin/env python3
 """scripts/run_acceptance.py — Offline native analyser acceptance harness.
 
-Drives HueSync's production AudioCanonicalizer + PcmAudioPipelineV2 (or
-CavaCoreAudioPipeline) against a local audio file decoded by ffmpeg, and records
-every analyser snapshot to a CSV for offline acceptance analysis.
-
-No DSP logic is duplicated here.  The production analysis code is called
-directly: AudioCanonicalizer.push() + pipeline._process_canonical_frame().
-The pipeline worker thread is bypassed; the DSP path is unchanged.
-
-Chunk size: 441 source samples (10 ms at 44100 Hz).  After soxr resampling to
-48 kHz, each chunk produces ~480 canonical samples.  The harness then re-chunks
-canonical output into exact HOP-sample (480-sample) blocks via _CanonicalRechunker
-before each _process_canonical_frame() call.  This guarantees at most one STFT
-frame per call after warmup, so every snapshot is captured without loss.
-
-After the STFT warmup period (~50 ms), the CSV contains approximately one row
-per STFT frame (≈100 Hz rate, ~296 rows per 3 seconds of audio).
-
-Timestamps are derived from the 480-sample block's canonical sample_pos
-(canonical sample counter at 48 kHz), never from wall clock.  Given the same
-input file and the same git commit the output is deterministic.
+Drives the production canonicalizer and registry-selected CanonicalAnalysisPipeline
+through public feed()/end_of_stream(). Captures returned PublicationRecords in
+sequence (delivery) order; timestamps are sample_start/48000 and may go backwards
+for delayed processors. Source duration comes from valid canonical input extent,
+not row count, publication extent or zero padding. Historical Spectrum intervals
+and fresh contributor IDs are exported explicitly. See docs/testing.md.
 
 Usage:
     python scripts/run_acceptance.py \\
@@ -141,6 +127,9 @@ CSV_COLUMNS: list[str] = (
         "epoch",
         "sample_start",
         "sample_end",
+        "effective_processor_ids",
+        "carried_spectrum_start",
+        "carried_spectrum_end",
     ]
 )
 
@@ -478,7 +467,10 @@ def analyse_pcm(
 
         # Hard correctness invariants — reported but do not abort analysis.
         for i in range(_DEFAULT_BARS):
-            v = row[f"bar_{i:02d}"]
+            key = f"bar_{i:02d}"
+            if key not in row:  # delayed contribution without retained Spectrum history
+                continue
+            v = row[key]
             if not math.isfinite(v):
                 violations.append(f"t={t_s:.3f} bar_{i:02d} non-finite: {v}")
             elif v < -1e-6 or v > 1.0 + 1e-6:
@@ -496,6 +488,10 @@ def analyse_pcm(
             int(getattr(rec, "sample_pos", sample_pos)) if rec is not None else int(sample_pos)
         )
         row["sample_end"] = int(getattr(rec, "sample_end", 0)) if rec is not None else 0
+        row["effective_processor_ids"] = ";".join(getattr(rec, "effective_processor_ids", ()))
+        carry = getattr(rec, "carried_spectrum_interval", None)
+        row["carried_spectrum_start"] = carry[0] if carry is not None else ""
+        row["carried_spectrum_end"] = carry[1] if carry is not None else ""
 
         rows.append(row)
         if rec is not None:

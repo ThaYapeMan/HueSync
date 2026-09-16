@@ -442,7 +442,7 @@ _ANALYSER_FIELDS: frozenset[str] = frozenset()  # filled after class
 
 @dataclass
 class Analyser:
-    """cava spectrum + onset detection parameters, shared across Couplings."""
+    """Spectrum/onset configuration shared across Couplings; see docs/configuration.md."""
 
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     name: str = "Default Analysis"
@@ -458,10 +458,10 @@ class Analyser:
     # CPU cost ~1 ms/frame at 100 Hz on a 2-vCPU LXC — disabled by default.
     use_hpss_separation: bool = False
     # "cava": existing cava/FIFO path (default for LMS players).
-    # "pcm_pipeline": bypass cava; use PcmAudioPipeline on the squeezelite SHM
-    #   segment directly — same pipeline as AirPlay, lower latency, no FIFO.
+    # "pcm_pipeline": canonical stereo SHM v1 → shared analysis/selected engine.
+    #   Same analysis pipeline as AirPlay; no external CAVA FIFO.
     bars_source: str = "cava"
-    # Spectrum backend for native PCM analysis (AirPlay path).
+    # Spectrum engine for every canonical PCM ingress (AirPlay and LMS PCM).
     # "v2"      — PcmAudioPipelineV2: HueSync Hamming STFT, np.max, peak EMA AGC
     # "cavacore" — upstream cavacore: Hann dual-FFT, bandwidth-normalised mean, autosens
     spectrum_backend: str = "v2"

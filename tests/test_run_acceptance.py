@@ -126,8 +126,10 @@ def test_csv_columns_exact(rows_from_sine: list[dict]) -> None:
 def test_csv_columns_count() -> None:
     # t_s(1) + backend(1) + effective_backend(1) + effective_engine(1)
     # + bars(30) + scalars(13) + conditioning(3)
-    # + audit(sequence, epoch, sample_start, sample_end = 4) = 54
-    assert len(CSV_COLUMNS) == 54
+    # + audit(sequence, epoch, interval, contributors, carried interval = 7) = 57
+    assert len(CSV_COLUMNS) == 57
+    assert {'effective_processor_ids', 'carried_spectrum_start',
+            'carried_spectrum_end'} <= set(CSV_COLUMNS)
 
 
 def test_csv_bar_columns_named_correctly() -> None:
