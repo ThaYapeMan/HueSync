@@ -832,6 +832,110 @@ def test_restart_cava_endpoint_on_cava_session_routes_to_cava_restart(
     client._manager.replace_pcm_analyser.assert_not_called()
 
 
+def test_restart_cava_rollback_on_pcm_runtime_failure(client: TestClient):
+    """BLOCKER 4: when replace_pcm_analyser raises, staged storage writes
+    must roll back so stored cutoff still matches the pre-request value.
+    """
+    coupling = _make_full_coupling(client._storage)
+    ac = client._storage.get_analyser(coupling.analyser_id)
+    ac.bars_source = "pcm_pipeline"
+    ac.spectrum_backend = "v2"
+    ac.lower_cutoff_freq = 50
+    ac.higher_cutoff_freq = 10000
+    client._storage.save_analyser(ac)
+    original_lower = ac.lower_cutoff_freq
+    original_higher = ac.higher_cutoff_freq
+
+    client._storage.set_active_coupling_id(coupling.id)
+    type(client._manager).active_bars_source = PropertyMock(
+        return_value="pcm_pipeline"
+    )
+    client._manager.replace_pcm_analyser = MagicMock(
+        side_effect=RuntimeError("engine unavailable")
+    )
+
+    resp = client.post(
+        f"/api/couplings/{coupling.id}/restart-cava",
+        json={"lower_cutoff_freq": 100, "higher_cutoff_freq": 12000},
+    )
+    # Runtime failed → 409 (transactional rejection).
+    assert resp.status_code == 409, resp.text
+
+    # Storage was rolled back to the original values.
+    ac_after = client._storage.get_analyser(coupling.analyser_id)
+    assert ac_after.lower_cutoff_freq == original_lower, (
+        f"expected rollback to {original_lower}, got {ac_after.lower_cutoff_freq}"
+    )
+    assert ac_after.higher_cutoff_freq == original_higher, (
+        f"expected rollback to {original_higher}, got {ac_after.higher_cutoff_freq}"
+    )
+
+
+def test_restart_cava_rollback_on_fifo_runtime_failure(client: TestClient):
+    """BLOCKER 4: same rollback contract on the legacy FIFO / cava path."""
+    coupling = _make_full_coupling(client._storage)
+    ac = client._storage.get_analyser(coupling.analyser_id)
+    ac.bars_source = "cava"
+    ac.lower_cutoff_freq = 50
+    ac.higher_cutoff_freq = 10000
+    client._storage.save_analyser(ac)
+    original_lower = ac.lower_cutoff_freq
+    original_higher = ac.higher_cutoff_freq
+
+    client._storage.set_active_coupling_id(coupling.id)
+    type(client._manager).active_bars_source = PropertyMock(return_value="cava")
+    client._manager.restart_cava = AsyncMock(
+        side_effect=RuntimeError("cava spawn failed")
+    )
+
+    resp = client.post(
+        f"/api/couplings/{coupling.id}/restart-cava",
+        json={"lower_cutoff_freq": 200, "higher_cutoff_freq": 15000},
+    )
+    assert resp.status_code == 409, resp.text
+
+    ac_after = client._storage.get_analyser(coupling.analyser_id)
+    assert ac_after.lower_cutoff_freq == original_lower
+    assert ac_after.higher_cutoff_freq == original_higher
+
+
+def test_restart_cava_effect_rollback_on_pcm_runtime_failure(client: TestClient):
+    """BLOCKER 4: effect (bass_hz/mid_hz) changes must also roll back."""
+    coupling = _make_full_coupling(client._storage)
+    ac = client._storage.get_analyser(coupling.analyser_id)
+    ac.bars_source = "pcm_pipeline"
+    ac.spectrum_backend = "v2"
+    client._storage.save_analyser(ac)
+
+    energy_profile = client._storage.get_energy_profile(coupling.energy_profile_id)
+    effect = client._storage.get_effect(energy_profile.high_energy_effect_id)
+    effect.bass_hz = 250
+    effect.mid_hz = 2000
+    client._storage.save_effect(effect)
+    original_bass = effect.bass_hz
+    original_mid = effect.mid_hz
+
+    client._storage.set_active_coupling_id(coupling.id)
+    type(client._manager).active_bars_source = PropertyMock(
+        return_value="pcm_pipeline"
+    )
+    client._manager.replace_pcm_analyser = MagicMock(
+        side_effect=RuntimeError("engine restart failed")
+    )
+
+    resp = client.post(
+        f"/api/couplings/{coupling.id}/restart-cava",
+        json={"bass_hz": 300, "mid_hz": 3000},
+    )
+    assert resp.status_code == 409
+
+    effect_after = client._storage.get_effect(energy_profile.high_energy_effect_id)
+    assert effect_after.bass_hz == original_bass, (
+        f"expected rollback to bass_hz={original_bass}, got {effect_after.bass_hz}"
+    )
+    assert effect_after.mid_hz == original_mid
+
+
 def test_bars_source_change_deactivates_session(client: TestClient):
     """Changing bars_source on an Analyser used by the active Coupling must
     trigger a full deactivate (SyncEngine initialisation differs between the

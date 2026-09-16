@@ -1570,13 +1570,11 @@ def test_dummy_loudness_only_publication():
 
 
 class _StubCavaEngine:
-    """SpectrumEngine that emulates CAVA's carry-based 480-block scheduler.
+    """SpectrumEngine that emulates CAVA's per-block 480-frame scheduler.
 
-    Mirrors CavaCoreSpectrumEngine's feed() semantics without requiring the
-    native library: samples accumulate in a carry buffer, and every full
-    480-frame block yields one SpectrumUpdate.  Position tracking inside the
-    engine is deliberately naive so that SpectrumProcessor's carry-tracking
-    logic is exercised for real.
+    Exercises the ``feed_block`` contract added for BLOCKER 5: SpectrumProcessor
+    calls feed_block exactly once per 480-frame slice and the engine returns
+    ``(bars, block_start, block_end)`` using an internally-tracked position.
     """
 
     engine_id: str = "cavacore"
@@ -1585,31 +1583,34 @@ class _StubCavaEngine:
 
     def __init__(self, n_bars: int = 8) -> None:
         self._n_bars = n_bars
-        self._carry: int = 0
-        self._epoch_samples: int = 0
+        self._next_exec_start: int = 0
+        self.feed_block_calls: int = 0
 
-    def feed(self, pcm, shared):
-        n = len(pcm)
-        combined = self._carry + n
-        n_blocks = combined // self._BLOCK
-        self._carry = combined - n_blocks * self._BLOCK
-        self._epoch_samples += n
-        # Emit one identical bar array per completed block.
-        return [
-            SpectrumUpdate(
-                engine_id=self.engine_id,
-                bars=[0.1] * self._n_bars,
-                sample_pos=max(0, self._epoch_samples - self._BLOCK),
-            )
-            for _ in range(n_blocks)
-        ]
+    @property
+    def block_size(self) -> int:
+        return self._BLOCK
+
+    @property
+    def next_exec_start(self) -> int:
+        return self._next_exec_start
+
+    def feed_block(self, pcm):
+        assert len(pcm) == self._BLOCK, f"expected {self._BLOCK} frames, got {len(pcm)}"
+        self.feed_block_calls += 1
+        bars = np.full(self._n_bars, 0.1, dtype=np.float64)
+        block_start = self._next_exec_start
+        block_end = block_start + self._BLOCK
+        self._next_exec_start = block_end
+        return bars, block_start, block_end
+
+    def feed(self, pcm, shared):  # legacy compat; unused by SpectrumProcessor now
+        return []
 
     def flush(self):
         return []
 
     def reset(self) -> None:
-        self._carry = 0
-        self._epoch_samples = 0
+        self._next_exec_start = 0
 
     def close(self) -> None:
         pass
@@ -1627,6 +1628,12 @@ def _feed_pcm(processor: SpectrumProcessor, sample_start: int, n: int) -> list[P
     ))
 
 
+def _carry_len(processor: SpectrumProcessor) -> int:
+    """Number of canonical frames currently in the SpectrumProcessor's PCM carry."""
+    c = processor._cava_carry
+    return int(len(c)) if c is not None else 0
+
+
 def test_cava_positions_single_full_block():
     """Feed 480 → one update at [0, 480), no carry."""
     p = SpectrumProcessor(_StubCavaEngine())
@@ -1634,7 +1641,7 @@ def test_cava_positions_single_full_block():
     assert len(updates) == 1
     assert updates[0].sample_start == 0
     assert updates[0].sample_end == 480
-    assert p._cava_carry_len == 0
+    assert _carry_len(p) == 0
 
 
 def test_cava_positions_1_frame_only():
@@ -1642,7 +1649,7 @@ def test_cava_positions_1_frame_only():
     p = SpectrumProcessor(_StubCavaEngine())
     updates = _feed_pcm(p, 0, 1)
     assert updates == []
-    assert p._cava_carry_len == 1
+    assert _carry_len(p) == 1
     assert p._cava_carry_sample_start == 0
 
 
@@ -1656,7 +1663,7 @@ def test_cava_positions_480_then_1():
     assert u1[0].sample_end == 480
     assert u2 == []
     assert p._cava_carry_sample_start == 480
-    assert p._cava_carry_len == 1
+    assert _carry_len(p) == 1
 
 
 def test_cava_positions_240_then_241():
@@ -1669,7 +1676,7 @@ def test_cava_positions_240_then_241():
     assert u2[0].sample_start == 0
     assert u2[0].sample_end == 480
     assert p._cava_carry_sample_start == 480
-    assert p._cava_carry_len == 1
+    assert _carry_len(p) == 1
 
 
 def test_cava_positions_719_then_241():
@@ -1683,7 +1690,7 @@ def test_cava_positions_719_then_241():
     assert len(u2) == 1
     assert u2[0].sample_start == 480
     assert u2[0].sample_end == 960
-    assert p._cava_carry_len == 0
+    assert _carry_len(p) == 0
     assert p._cava_carry_sample_start == 960
 
 
@@ -1714,34 +1721,37 @@ def test_cava_positions_reset_clears_carry():
     p = SpectrumProcessor(_StubCavaEngine())
     _feed_pcm(p, 0, 240)  # leave 240 in carry
     p.reset()
-    assert p._cava_carry_len == 0
+    assert _carry_len(p) == 0
     assert p._cava_carry_sample_start == 0
-    # After reset, sample_start of the next block must respect the new chunk start.
+    # After reset, sample_start of the next block must respect the engine's
+    # own reset _next_exec_start (which is 0 after a full engine reset).
     updates = _feed_pcm(p, 1000, 480)
     assert len(updates) == 1
-    assert updates[0].sample_start == 1000
+    assert updates[0].sample_start == 0
+    assert updates[0].sample_end == 480
 
 
 def test_cava_positions_independent_of_shared_stft_reset():
-    """SpectrumProcessor's CAVA carry survives a shared-STFT epoch-frame reset.
+    """CAVA block timestamps are engine-owned and independent of the shared STFT.
 
-    Even if CanonicalAnalysisPipeline's _epoch_start_sample_pos changed
-    (e.g. a fresh feed chunk starts at a wildly different sample_start),
-    SpectrumProcessor's own carry counter drives the CAVA block timestamps
-    — not the shared STFT hop_sample_starts.
+    The engine tracks ``_next_exec_start`` internally, so the frame's
+    ``sample_start`` (which reflects the shared STFT/canonical epoch) does not
+    influence the CAVA block interval.  Two consecutive feeds produce three
+    blocks at [0,480), [480,960), [960,1440) — the second feed's declared
+    sample_start (9999) is irrelevant to the engine.
     """
     p = SpectrumProcessor(_StubCavaEngine())
     updates1 = _feed_pcm(p, 0, 960)          # two blocks: [0,480), [480,960)
-    # Now feed another chunk but claim a nonsense sample_start.  The CAVA
-    # carry counter is empty here (960 samples in, 960 blocks out), so the
-    # next carry_start snaps to this new chunk start.
-    updates2 = _feed_pcm(p, 9999, 480)       # one block starting at 9999
+    # A wildly-different frame.sample_start must not perturb the engine's
+    # execution position; the third block lands at 960 (immediately after
+    # the previous two).
+    updates2 = _feed_pcm(p, 9999, 480)
     assert len(updates1) == 2
     assert updates1[0].sample_start == 0
     assert updates1[1].sample_start == 480
     assert len(updates2) == 1
-    assert updates2[0].sample_start == 9999
-    assert updates2[0].sample_end == 9999 + 480
+    assert updates2[0].sample_start == 960
+    assert updates2[0].sample_end == 1440
 
 
 # ---------------------------------------------------------------------------

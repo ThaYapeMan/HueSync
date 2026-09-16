@@ -34,9 +34,10 @@
 
 set -euo pipefail
 
-# Pinned upstream tag.  Update deliberately, in a dedicated commit, alongside
-# any patch adjustments required for the new upstream revision.
-SQUEEZELITE_VERSION="${SQUEEZELITE_VERSION:-v2.0.0.1517}"
+# Pinned upstream revision.  Upstream (ralph-irving/squeezelite) does not
+# publish git tags, so we pin the exact commit hash.  Update deliberately,
+# in a dedicated commit, alongside any patch adjustments required.
+SQUEEZELITE_COMMIT="${SQUEEZELITE_COMMIT:-c7c4248ddd70e47dbfeba0bf4a8a7ec08d8a995c}"
 SQUEEZELITE_REPO="${SQUEEZELITE_REPO:-https://github.com/ralph-irving/squeezelite.git}"
 
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
@@ -50,9 +51,9 @@ PATCH_DIR="$REPO_DIR/squeezelite"
 BUILD_DIR="${BUILD_DIR:-/tmp/huesync-squeezelite-build}"
 
 echo "==> HueSync squeezelite producer build"
-echo "    upstream tag: $SQUEEZELITE_VERSION"
-echo "    build dir:    $BUILD_DIR"
-echo "    install to:   $INSTALL_DIR/squeezelite"
+echo "    upstream commit: $SQUEEZELITE_COMMIT"
+echo "    build dir:       $BUILD_DIR"
+echo "    install to:      $INSTALL_DIR/squeezelite"
 echo ""
 
 for _tool in git make gcc patch; do
@@ -64,13 +65,29 @@ for _tool in git make gcc patch; do
 done
 
 # ---------------------------------------------------------------------------
-# [1] Fresh checkout
+# [1] Fresh checkout at the pinned commit
 # ---------------------------------------------------------------------------
-echo "[1/5] Cloning $SQUEEZELITE_REPO at $SQUEEZELITE_VERSION..."
+echo "[1/5] Cloning $SQUEEZELITE_REPO and checking out $SQUEEZELITE_COMMIT..."
 rm -rf "$BUILD_DIR"
 mkdir -p "$BUILD_DIR"
-git clone --quiet --depth 1 --branch "$SQUEEZELITE_VERSION" \
-    "$SQUEEZELITE_REPO" "$BUILD_DIR/squeezelite"
+# Upstream publishes no tags, so we clone the default branch and pin the
+# exact commit hash.  Depth 200 is enough history for the checkout to
+# succeed on the current master; if the commit falls out of that window
+# a subsequent `git fetch --unshallow` will make it reachable.
+git clone --quiet --depth 200 "$SQUEEZELITE_REPO" "$BUILD_DIR/squeezelite"
+(
+    cd "$BUILD_DIR/squeezelite"
+    if ! git checkout --quiet "$SQUEEZELITE_COMMIT" 2>/dev/null; then
+        git fetch --quiet --unshallow origin || true
+        git checkout --quiet "$SQUEEZELITE_COMMIT"
+    fi
+    actual_hash="$(git rev-parse HEAD)"
+    if [[ "$actual_hash" != "$SQUEEZELITE_COMMIT" ]]; then
+        echo "error: checked-out revision $actual_hash does not match pinned commit $SQUEEZELITE_COMMIT" >&2
+        exit 1
+    fi
+    echo "    pinned revision verified: $actual_hash"
+)
 
 # ---------------------------------------------------------------------------
 # [2] Drop the producer sources into the tree
@@ -87,8 +104,14 @@ if [[ ! -f "$PATCH_DIR/output_vis_v1.patch" ]]; then
     echo "error: patch not found: $PATCH_DIR/output_vis_v1.patch" >&2
     exit 1
 fi
+# Dry-run first so any rejection surfaces before we begin mutating files.
 (
     cd "$BUILD_DIR/squeezelite"
+    if ! patch --dry-run -p1 --forward < "$PATCH_DIR/output_vis_v1.patch"; then
+        echo "error: HueSync producer patch does not apply cleanly to $SQUEEZELITE_COMMIT" >&2
+        echo "       regenerate output_vis_v1.patch against this upstream revision" >&2
+        exit 1
+    fi
     patch -p1 --forward < "$PATCH_DIR/output_vis_v1.patch"
 )
 

@@ -1077,6 +1077,10 @@ class CanonicalAnalysisPipeline:
         self._pub_dropped: int = 0
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        # Set to True only after Thread.start() returns successfully.  stop()
+        # must not call join() on an unstarted thread — that raises
+        # RuntimeError.  BLOCKER 3 fix.
+        self._thread_started: bool = False
         self._source_sample_end: int = 0  # last real (non-padded) source sample position
         # STFT sample-position tracking so hop_sample_starts is chunk-independent.
         self._stft_frame_count: int = 0
@@ -1372,10 +1376,18 @@ class CanonicalAnalysisPipeline:
             # SpectrumProcessor's ID is NOT in contributing_ids in this branch.
             bars_for_publication = list(self._last_bars) if self._last_bars else []
             features = self._build_features(bars_for_publication, onset_batch)
+            # BLOCKER 6: use the union of the contributing ProcessorUpdates'
+            # own intervals, NOT the transport (canonical) frame interval.
+            # This preserves the semantics that each ProcessorUpdate's
+            # sample_start/sample_end is the authoritative time range for
+            # its features (e.g. an onset detected mid-frame).
+            pub_start, pub_end = _union_interval(
+                onset_batch, canonical_start, canonical_end
+            )
             record = self._publish(
                 epoch_id=epoch_id,
-                sample_start=canonical_start,
-                sample_end=canonical_end,
+                sample_start=pub_start,
+                sample_end=pub_end,
                 features=features,
                 effective_engine_id=self._spectrum_processor.processor_id,
                 effective_processor_ids=effective_ids,
@@ -1460,8 +1472,12 @@ class CanonicalAnalysisPipeline:
             onset_batch = list(self._pending_onset)
             self._pending_onset.clear()
             bars_for_publication = list(self._last_bars) if self._last_bars else []
-            pub_start = self._source_sample_end  # end-of-known-source anchor
-            pub_end = self._source_sample_end
+            # BLOCKER 6: prefer the ProcessorUpdate intervals themselves; only
+            # fall back to the source-end anchor when the flush updates carry
+            # no interval information.
+            pub_start, pub_end = _union_interval(
+                onset_batch, self._source_sample_end, self._source_sample_end
+            )
             features = self._build_features(bars_for_publication, onset_batch)
             record = self._publish(
                 epoch_id=epoch_id,
@@ -1594,7 +1610,12 @@ class CanonicalAnalysisPipeline:
     def start(self) -> None:
         self._stop.clear()
         self._thread = threading.Thread(target=self._run, daemon=True)
+        # Only mark the thread as started once .start() returns successfully.
+        # If .start() raises (e.g. OS resource limits hit), stop() must not
+        # attempt to join() — that raises RuntimeError.  BLOCKER 3 fix.
+        self._thread_started = False
         self._thread.start()
+        self._thread_started = True
 
     def stop(self) -> bool:
         """Signal the worker to stop; return True only if it terminated cleanly.
@@ -1609,15 +1630,36 @@ class CanonicalAnalysisPipeline:
         deferred to the worker's finally block, which runs once the thread
         eventually exits.  The _processors_closed flag prevents that
         deferred handler from double-closing when this path succeeded.
+
+        Safe to call before start() or when start() raised: this method
+        never invokes join() on a thread whose start() did not complete
+        (BLOCKER 3).
         """
         self._stop.set()
-        if self._thread:
+        # Only join a thread that actually started.  Thread.start() may have
+        # raised (RuntimeError from resource exhaustion, etc.), in which case
+        # self._thread is set but never entered a running state — join()
+        # would raise RuntimeError.  We rely on the presence of ``ident`` to
+        # decide whether the thread has been started, which correctly covers
+        # both the internal path (start() succeeded) and any external test
+        # harness that assigns a pre-started thread onto ``self._thread``.
+        if (
+            self._thread is not None
+            and (self._thread_started or self._thread.ident is not None)
+        ):
             self._thread.join(timeout=2)
-        alive = self._thread is not None and self._thread.is_alive()
+            alive = self._thread.is_alive()
+        else:
+            alive = False
         if not alive:
             if not self._processors_closed:
                 for proc in self._processors:
-                    proc.close()
+                    try:
+                        proc.close()
+                    except Exception:  # noqa: BLE001 - best-effort cleanup
+                        log.exception(
+                            "CanonicalAnalysisPipeline.stop(): processor close() raised"
+                        )
                 self._processors_closed = True
         return not alive
 
@@ -1725,6 +1767,27 @@ class PcmAudioPipelineV2:
 # ---------------------------------------------------------------------------
 # Helpers shared by CavaPipeline and ColourModeEffect
 # ---------------------------------------------------------------------------
+
+
+def _union_interval(
+    updates: list[ProcessorUpdate],
+    default_start: int,
+    default_end: int,
+) -> tuple[int, int]:
+    """Return the (min sample_start, max sample_end) across ProcessorUpdates.
+
+    BLOCKER 6: publication intervals must derive from the ProcessorUpdates
+    themselves — the transport (canonical) frame interval is a fallback used
+    only when no updates carry provenance (e.g. no contributor produced any
+    output this frame).  This lets Beat-only and Loudness-only publications
+    preserve their true feature intervals instead of inheriting the wider
+    transport window.
+    """
+    if not updates:
+        return default_start, default_end
+    starts = [u.sample_start for u in updates]
+    ends = [u.sample_end for u in updates]
+    return min(starts), max(ends)
 
 
 def _band_average(frame: bytes, start: float, end: float) -> float:
@@ -2886,8 +2949,13 @@ class SyncEngine:
         old = self._analyser
         clean_stop = old.stop()
         if not clean_stop:
-            # Old worker did not exit — do not commit anything.  The caller
-            # is responsible for closing the candidate they built.
+            # Old worker did not exit within the 2 s timeout — do NOT commit
+            # anything and do NOT close the candidate for the caller.  The
+            # runtime is left with the old analyser as ``self._analyser``
+            # (BLOCKER 3, Problem C): once the worker eventually exits its
+            # finally block closes the OLD processors, and the caller can
+            # attempt another replacement at that point.  The caller owns
+            # the candidate it constructed and is responsible for closing it.
             raise RuntimeError(
                 "Old analyser worker did not stop within the 2s timeout; "
                 "replacement aborted — old pipeline remains owner."
@@ -2897,9 +2965,10 @@ class SyncEngine:
         try:
             new_analyser.start()
         except Exception as start_exc:
-            # Candidate failed to start.  Close it exactly once, then try to
-            # bring the old analyser back so we do not leave the runtime
-            # without an analyser at all.
+            # Candidate failed to start.  Close it exactly once (BLOCKER 3,
+            # Problem B) via its own stop() — that path is idempotent thanks
+            # to the ``_processors_closed`` guard, so RuntimeError / OSError
+            # on start still leaves the candidate's native resources tidied.
             try:
                 new_analyser.stop()
             except Exception:  # noqa: BLE001 - best-effort cleanup
@@ -2908,6 +2977,7 @@ class SyncEngine:
                 )
             restored = False
             if rebuild_old is not None:
+                rebuilt: AudioPipeline | None = None
                 try:
                     rebuilt = rebuild_old()
                     rebuilt.start()
@@ -2918,6 +2988,15 @@ class SyncEngine:
                         "replace_analyser: rebuild_old() failed during rollback; "
                         "runtime is in degraded state (deactivate to recover)"
                     )
+                    # BLOCKER 3, Problem D: close the failed restoration
+                    # candidate so its native resources do not leak.
+                    if rebuilt is not None:
+                        try:
+                            rebuilt.stop()
+                        except Exception:  # noqa: BLE001
+                            log.exception(
+                                "replace_analyser: failed rebuild candidate stop() raised"
+                            )
             if not restored:
                 # Leave self._analyser pointing at the dead old analyser so
                 # subsequent teardown paths are consistent.  Caller must

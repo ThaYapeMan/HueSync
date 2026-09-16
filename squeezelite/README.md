@@ -15,9 +15,25 @@ coherent, monotonic, seqlock-protected view of squeezelite's ring buffer.
 
 The producer sources target upstream squeezelite's `output_vis.c`.  Run
 `scripts/build-squeezelite.sh` from the repository root — no manual patching
-required — to clone a pinned upstream tag, apply the patch, build, and
+required — to clone the pinned upstream commit, apply the patch, build, and
 install to `/usr/local/bin/squeezelite`.  The manual procedure below is
 retained only for developers maintaining a fork.
+
+## Pinned upstream revision
+
+Upstream (ralph-irving/squeezelite) does not publish git tags.  The current
+patch is generated against, and verified to apply cleanly to, the following
+exact commit:
+
+```
+c7c4248ddd70e47dbfeba0bf4a8a7ec08d8a995c   ralph-irving/squeezelite master
+```
+
+`scripts/build-squeezelite.sh` records this hash in the `SQUEEZELITE_COMMIT`
+variable and refuses to proceed if the checked-out revision does not match.
+When bumping upstream, regenerate `output_vis_v1.patch` (see the notes in
+that file) and update the hash here and in the build script in a single
+commit so they stay synchronised.
 
 ## Applying to squeezelite
 

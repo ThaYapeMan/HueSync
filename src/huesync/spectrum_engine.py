@@ -401,6 +401,19 @@ class CavaCoreSpectrumEngine:
 
     Only constructable when the native cavacore library is available.
     Use check_available() before constructing.
+
+    Per-block position ownership (BLOCKER 5)
+    ----------------------------------------
+    The engine owns ``_next_exec_start`` — the canonical sample-start of the
+    next 480-frame block to execute.  ``feed_block(480_frames)`` executes one
+    block and returns ``(bars, block_start, block_end)`` where block_start is
+    the value of ``_next_exec_start`` before the call.  After the call the
+    engine advances the counter by 480.
+
+    The legacy ``feed(pcm, shared)`` entry point still exists for backward
+    compatibility with SpectrumProcessor's carry-buffered path, but new code
+    should prefer ``feed_block`` so each executed block carries its own
+    interval, independent of how many blocks were consumed in one call.
     """
 
     _BLOCK_SIZE: int = 480  # cavacore execution block: 480 frames at 48 kHz = 10 ms
@@ -428,12 +441,60 @@ class CavaCoreSpectrumEngine:
         )
         self._cava = _CavaCoreBackend(**self._cava_config)
         self._epoch_samples: int = 0
+        # Canonical sample-start of the NEXT 480-frame block to execute.  The
+        # engine advances this in feed_block(); SpectrumProcessor reads it via
+        # ``next_exec_start`` when it needs to know the position of a
+        # carry-buffered flush block.
+        self._next_exec_start: int = 0
 
     @property
     def engine_id(self) -> str:
         return "cavacore"
 
+    @property
+    def block_size(self) -> int:
+        """Number of canonical stereo frames per cavacore execution block."""
+        return self._BLOCK_SIZE
+
+    @property
+    def next_exec_start(self) -> int:
+        """Canonical sample-start of the next feed_block execution."""
+        return self._next_exec_start
+
+    def feed_block(self, pcm: np.ndarray) -> tuple[np.ndarray, int, int] | None:
+        """Execute exactly one 480-frame cavacore block.
+
+        Returns ``(bars, block_start, block_end)`` on success; ``None`` when
+        the block did not produce output (e.g. plan/backend edge cases).  The
+        caller must supply exactly ``_BLOCK_SIZE`` frames — enforced with an
+        assertion so a chunking bug in the caller surfaces immediately.
+
+        The engine tracks its own execution position via ``_next_exec_start``
+        so a single call always produces exactly one interval, independent of
+        how many blocks the caller previously fed as one big buffer.
+        """
+        if len(pcm) != self._BLOCK_SIZE:
+            raise ValueError(
+                f"CavaCoreSpectrumEngine.feed_block requires "
+                f"{self._BLOCK_SIZE} frames, got {len(pcm)}"
+            )
+        result = self._cava.execute(pcm)
+        self._epoch_samples += self._BLOCK_SIZE
+        block_start = self._next_exec_start
+        block_end = block_start + self._BLOCK_SIZE
+        self._next_exec_start = block_end
+        if result is None:
+            return None
+        return result, block_start, block_end
+
     def feed(self, pcm: np.ndarray, shared: SharedAnalysis) -> list[SpectrumUpdate]:
+        """Legacy carry-buffered entry point — kept for compatibility.
+
+        Prefer ``feed_block`` in new code; it returns a per-block interval so
+        the SpectrumProcessor does not have to reconstruct positions from
+        ``len(updates)`` (which is unreliable when the backend coalesces
+        multiple executions into a single returned bar array).
+        """
         result = self._cava.execute(shared.pcm)
         self._epoch_samples += len(shared.pcm)
         if result is None:
@@ -448,10 +509,41 @@ class CavaCoreSpectrumEngine:
         pos = max(0, self._epoch_samples - self._BLOCK_SIZE)
         return [SpectrumUpdate(engine_id="cavacore", bars=result.tolist(), sample_pos=pos)]
 
+    def flush_block(self, source_end: int | None = None) -> tuple[np.ndarray, int, int] | None:
+        """Zero-pad-and-execute the carry buffer at clean EOS.
+
+        Returns ``(bars, block_start, block_end)`` where block_start is the
+        canonical position of the carry's first frame, block_end is clamped
+        to the source's true end when ``source_end`` is provided (so the
+        publication interval does not extend into zero-padding).
+
+        ``None`` is returned when the carry buffer is empty.  This method
+        advances ``_next_exec_start`` by exactly one block, so subsequent
+        calls after a real epoch reset behave predictably.
+        """
+        pending = self._cava.pending_frames
+        result = self._cava.flush()
+        if result is None:
+            return None
+        block_start = self._next_exec_start
+        block_end = block_start + pending if pending > 0 else block_start
+        if source_end is not None:
+            block_end = min(block_end, source_end)
+        # Advance by the full block; the cavacore backend consumed a padded
+        # 480-frame execution regardless of ``pending``.
+        self._next_exec_start = block_start + self._BLOCK_SIZE
+        self._epoch_samples += self._BLOCK_SIZE
+        return result, block_start, block_end
+
+    def reset_position(self) -> None:
+        """Reset only the canonical position counter (leave DSP state intact)."""
+        self._next_exec_start = 0
+
     def reset(self) -> None:
         self._cava.close()
         self._cava = _CavaCoreBackend(**self._cava_config)
         self._epoch_samples = 0
+        self._next_exec_start = 0
 
     def close(self) -> None:
         self._cava.close()
@@ -495,14 +587,18 @@ class SpectrumProcessor:
     def __init__(self, engine: SpectrumEngine) -> None:
         self._engine = engine
         self._is_cava = getattr(engine, "engine_id", None) == "cavacore"
-        # CAVA-only bookkeeping. carry_sample_start is the canonical sample
-        # position at the start of the first frame that is currently sitting
-        # in the CavaCoreBackend's carry buffer.  carry_len is the number of
-        # canonical frames currently carried.  Together they let us compute
-        # the true canonical start position for every 480-frame execution
-        # block, regardless of chunking.
+        # CAVA-only bookkeeping.  With per-block feed_block(), the canonical
+        # block-start is owned by the engine (``_next_exec_start``).  The
+        # SpectrumProcessor now only carries the PCM samples that did not
+        # fill a full block; the engine's own carry keeps the DSP context.
+        # ``_cava_carry`` is the raw canonical PCM prefix that must ride
+        # along with the next incoming frame before another 480-frame block
+        # is available.  ``_cava_carry_sample_start`` records the canonical
+        # position of the first sample in ``_cava_carry`` — used ONLY when
+        # feeding EOS zero-padded blocks so the flush interval starts at the
+        # real carry-start rather than an interpolated approximation.
+        self._cava_carry: np.ndarray | None = None
         self._cava_carry_sample_start: int = 0
-        self._cava_carry_len: int = 0
         # Track total samples fed since the last reset — used for
         # sanity/warning checks.  Not required by the position math.
         self._cava_total_fed: int = 0
@@ -512,63 +608,56 @@ class SpectrumProcessor:
         return self._engine.engine_id
 
     def _feed_cava(self, frame: SharedAnalysisFrame) -> list[ProcessorUpdate]:
-        """CAVA-specific position tracking (item 25-28 correction).
+        """CAVA-specific position tracking (BLOCKER 5 fix).
 
-        The CavaCoreBackend maintains its own carry buffer of "not-yet-full"
-        samples.  We shadow that state with (carry_start, carry_len) so we
-        know the canonical sample position of each 480-frame execution block
-        without depending on the shared STFT.
+        The engine owns the canonical execution-start counter and returns one
+        interval per 480-frame block via ``feed_block``.  We do the PCM
+        blocking here — collect (carry + new) samples, hand them to the
+        engine in 480-frame slices, and record each returned interval as an
+        independent ProcessorUpdate.  This is invariant under arbitrary
+        chunking of the caller's PCM.
         """
-        shared = SharedAnalysis(
-            mag_frames=frame.mag_frames,
-            pcm=frame.pcm,
-            sample_pos=frame.sample_start,
-            n_samples=len(frame.pcm),
-        )
         n_new = len(frame.pcm)
-        # If there was no carry, the next-block-start is at the current chunk
-        # start.  Otherwise carry_sample_start already points at the position
-        # of the oldest frame in the carry buffer.
-        if self._cava_carry_len == 0:
-            self._cava_carry_sample_start = frame.sample_start
-
-        updates = self._engine.feed(frame.pcm, shared)
-
-        # After execute(), (carry_len + n_new) samples spanned the combined
-        # buffer.  Each returned SpectrumUpdate corresponds to one 480-frame
-        # execution block consumed from that combined buffer, in order.
-        n_blocks_out = len(updates)
-        combined_len = self._cava_carry_len + n_new
-        # New carry: whatever remains after n_blocks_out * 480 samples were
-        # consumed from the combined buffer.
-        new_carry_len = combined_len - n_blocks_out * self._CAVA_BLOCK
-        # Guard against unexpected engine behaviour rather than crashing.
-        if new_carry_len < 0:
-            log.warning(
-                "SpectrumProcessor: unexpected CAVA carry length %d "
-                "(combined=%d, blocks=%d) — clamping to 0",
-                new_carry_len, combined_len, n_blocks_out,
-            )
-            new_carry_len = 0
+        # Combine any prior PCM tail with the new samples.
+        if self._cava_carry is not None and len(self._cava_carry) > 0:
+            combined = np.concatenate([self._cava_carry, frame.pcm], axis=0)
+            combined_start = self._cava_carry_sample_start
+        else:
+            combined = frame.pcm
+            combined_start = frame.sample_start
 
         result: list[ProcessorUpdate] = []
-        for i, _u in enumerate(updates):
-            exec_start = self._cava_carry_sample_start + i * self._CAVA_BLOCK
-            exec_end = exec_start + self._CAVA_BLOCK
-            result.append(ProcessorUpdate(
-                processor_id=self._engine.engine_id,
-                sample_start=exec_start,
-                sample_end=exec_end,
-                bars=_u.bars,
-            ))
+        pos = 0
+        block = self._CAVA_BLOCK
+        while pos + block <= len(combined):
+            chunk = np.ascontiguousarray(combined[pos : pos + block])
+            outcome = self._engine.feed_block(chunk)  # type: ignore[attr-defined]
+            if outcome is not None:
+                bars_arr, blk_start, blk_end = outcome
+                bars_list = (
+                    bars_arr.tolist()
+                    if hasattr(bars_arr, "tolist")
+                    else list(bars_arr)
+                )
+                result.append(ProcessorUpdate(
+                    processor_id=self._engine.engine_id,
+                    sample_start=blk_start,
+                    sample_end=blk_end,
+                    bars=bars_list,
+                ))
+            pos += block
 
-        # Advance carry_sample_start to point at the first frame that stays
-        # in the CAVA carry buffer.  For (carry_len + n_new) = 481, 1 block:
-        # new_carry_len = 1, new carry_start = old carry_start + 480.
-        self._cava_carry_sample_start = (
-            self._cava_carry_sample_start + n_blocks_out * self._CAVA_BLOCK
-        )
-        self._cava_carry_len = new_carry_len
+        # Save the trailing partial block as carry for the next feed().
+        if pos < len(combined):
+            self._cava_carry = np.ascontiguousarray(combined[pos:])
+            self._cava_carry_sample_start = combined_start + pos
+        else:
+            self._cava_carry = None
+            # Carry-start is only meaningful when carry is non-empty; keep
+            # the previously-advanced position so a subsequent empty-carry
+            # feed uses the incoming frame's start.
+            self._cava_carry_sample_start = combined_start + pos
+
         self._cava_total_fed += n_new
         return result
 
@@ -602,29 +691,51 @@ class SpectrumProcessor:
         return self._feed_v2(frame)
 
     def flush(self) -> list[ProcessorUpdate]:
-        updates = self._engine.flush()
         result: list[ProcessorUpdate] = []
         if self._is_cava:
-            # CAVA flush executes at most one partially-filled block by
-            # zero-padding.  sample_start is the canonical position at the
-            # start of the (real, non-padded) carry; sample_end is the last
-            # real source frame — NOT the padded 480-frame end.
+            # Flush the SpectrumProcessor's PCM carry into the engine, then
+            # let the engine zero-pad+execute its own remaining carry.  The
+            # engine's flush_block returns a per-block interval clamped to
+            # the real source end (BLOCKER 5).
+            if self._cava_carry is not None and len(self._cava_carry) > 0:
+                pad = np.zeros(
+                    (self._CAVA_BLOCK - len(self._cava_carry), 2),
+                    dtype=self._cava_carry.dtype,
+                )
+                padded = np.concatenate([self._cava_carry, pad], axis=0)
+                outcome = self._engine.feed_block(padded)  # type: ignore[attr-defined]
+                if outcome is not None:
+                    bars_arr, _blk_start, _blk_end = outcome
+                    bars_list = (
+                        bars_arr.tolist()
+                        if hasattr(bars_arr, "tolist")
+                        else list(bars_arr)
+                    )
+                    # The zero-padded block covers only ``len(carry)`` real
+                    # source frames; clamp sample_end accordingly.
+                    real_start = self._cava_carry_sample_start
+                    real_end = real_start + len(self._cava_carry)
+                    result.append(ProcessorUpdate(
+                        processor_id=self._engine.engine_id,
+                        sample_start=real_start,
+                        sample_end=real_end,
+                        bars=bars_list,
+                    ))
+                self._cava_carry = None
+                return result
+            # No SpectrumProcessor-level carry — engine may still have its
+            # own partial carry (legacy code path).  Delegate to flush().
+            updates = self._engine.flush()
             for u in updates:
-                start = self._cava_carry_sample_start
-                # If carry is empty (nothing to flush), still trust the
-                # engine's sample_pos as a fallback.
-                if self._cava_carry_len == 0:
-                    start = u.sample_pos
-                end = start + self._cava_carry_len
-                if end <= start:
-                    end = start
+                start = u.sample_pos
                 result.append(ProcessorUpdate(
                     processor_id=self._engine.engine_id,
                     sample_start=start,
-                    sample_end=end,
+                    sample_end=start,
                     bars=u.bars,
                 ))
             return result
+        updates = self._engine.flush()
         return [
             ProcessorUpdate(
                 processor_id=self._engine.engine_id,
@@ -637,8 +748,8 @@ class SpectrumProcessor:
 
     def reset(self) -> None:
         self._engine.reset()
+        self._cava_carry = None
         self._cava_carry_sample_start = 0
-        self._cava_carry_len = 0
         self._cava_total_fed = 0
 
     def close(self) -> None:

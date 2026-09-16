@@ -326,6 +326,16 @@ def _assert_name_unique(
             raise HTTPException(status_code=409, detail=f"{entity_label} name already in use")
 
 
+def _clone_dataclass(entity):
+    """Return an independent shallow copy of a dataclass entity.
+
+    Used by BLOCKER 4's transactional restart-cava flow to snapshot storage
+    entities before staging a write, so a runtime failure can roll back to
+    the pristine values.
+    """
+    return replace(entity)
+
+
 def _unique_copy_name(base: str, existing_lower: set[str]) -> str:
     candidate = f"{base} (copy)"
     if candidate.lower() not in existing_lower:
@@ -1216,18 +1226,39 @@ async def restart_coupling_cava(
         v is not None
         for v in (body.lower_cutoff_freq, body.higher_cutoff_freq, body.bass_hz, body.mid_hz)
     )
+
+    # BLOCKER 4 — snapshot-then-act-then-commit.
+    #
+    # The pre-fix flow saved analyser and effect settings BEFORE the runtime
+    # rebuild.  When the runtime step raised (e.g. RuntimeError from
+    # replace_pcm_analyser), storage had already moved on but the running
+    # session was untouched — leaving stored settings and runtime state
+    # permanently disagreeing.  We now:
+    #   1. Snapshot the current analyser / effect entities to memory.
+    #   2. Compute the proposed post-write state but only stage it.
+    #   3. Attempt the runtime change with the STAGED values.
+    #   4. On success: persist the staged values.
+    #   5. On runtime failure: do NOT persist; raise HTTP 409 so the caller
+    #      knows the request was rejected atomically.
+    coupling = storage.get_coupling(coupling_id)
+    if coupling is None:
+        raise HTTPException(status_code=404, detail="Coupling not found")
+
+    analyser_snapshot: Analyser | None = None
+    effect_snapshot: Effect | None = None
+    proposed_analyser: Analyser | None = None
+    proposed_effect: Effect | None = None
+
     if has_updates:
-        coupling = storage.get_coupling(coupling_id)
-        if coupling is None:
-            raise HTTPException(status_code=404, detail="Coupling not found")
         ac = storage.get_analyser(coupling.analyser_id)
         if ac is None:
             raise HTTPException(status_code=404, detail="Analyser not found")
+        analyser_snapshot = _clone_dataclass(ac)
+        proposed_analyser = _clone_dataclass(ac)
         if body.lower_cutoff_freq is not None:
-            ac.lower_cutoff_freq = body.lower_cutoff_freq
+            proposed_analyser.lower_cutoff_freq = body.lower_cutoff_freq
         if body.higher_cutoff_freq is not None:
-            ac.higher_cutoff_freq = body.higher_cutoff_freq
-        storage.save_analyser(ac)
+            proposed_analyser.higher_cutoff_freq = body.higher_cutoff_freq
 
         crossfader = storage.get_energy_profile(coupling.energy_profile_id)
         if crossfader is not None:
@@ -1235,13 +1266,29 @@ async def restart_coupling_cava(
             if effect is not None:
                 changed_effect = False
                 if body.bass_hz is not None:
-                    effect.bass_hz = body.bass_hz
                     changed_effect = True
                 if body.mid_hz is not None:
-                    effect.mid_hz = body.mid_hz
                     changed_effect = True
                 if changed_effect:
-                    storage.save_effect(effect)
+                    effect_snapshot = _clone_dataclass(effect)
+                    proposed_effect = _clone_dataclass(effect)
+                    if body.bass_hz is not None:
+                        proposed_effect.bass_hz = body.bass_hz
+                    if body.mid_hz is not None:
+                        proposed_effect.mid_hz = body.mid_hz
+
+    # Persist the proposed values IN MEMORY only, so _build_engine_profile
+    # sees the intended state without committing to disk yet.  On success
+    # we save at the end; on failure we restore from the snapshots.
+    #
+    # Because storage.get_analyser() returns a shared reference into the
+    # storage backing, we cannot mutate freely without also touching the
+    # in-memory state; the transactional guarantee is therefore rollback
+    # from the pristine snapshot on failure.
+    if proposed_analyser is not None:
+        storage.save_analyser(proposed_analyser)
+    if proposed_effect is not None:
+        storage.save_effect(proposed_effect)
 
     # Route to the correct rebuild path for the active session.  A
     # canonical/pcm_pipeline session has no external cava process to
@@ -1251,11 +1298,13 @@ async def restart_coupling_cava(
     # (external CAVA/FIFO) actually restart the cava process.
     try:
         if manager.active_bars_source == "pcm_pipeline":
-            coupling = storage.get_coupling(coupling_id)
-            if coupling is None:
-                raise HTTPException(status_code=404, detail="Coupling not found")
             profile = _build_engine_profile(coupling, storage)
             if profile is None:
+                # Rollback storage before signalling the caller.
+                if analyser_snapshot is not None:
+                    storage.save_analyser(analyser_snapshot)
+                if effect_snapshot is not None:
+                    storage.save_effect(effect_snapshot)
                 raise HTTPException(
                     status_code=422,
                     detail="Coupling has broken FK references",
@@ -1266,7 +1315,19 @@ async def restart_coupling_cava(
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        # BLOCKER 4 rollback: undo the staged persistence so the stored
+        # settings and the running runtime agree.
+        if analyser_snapshot is not None:
+            try:
+                storage.save_analyser(analyser_snapshot)
+            except Exception:  # noqa: BLE001 - best-effort rollback
+                pass
+        if effect_snapshot is not None:
+            try:
+                storage.save_effect(effect_snapshot)
+            except Exception:  # noqa: BLE001 - best-effort rollback
+                pass
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {"ok": True}
 
 

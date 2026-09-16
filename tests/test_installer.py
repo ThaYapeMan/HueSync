@@ -450,6 +450,95 @@ def test_setup_airplay_version_uses_absolute_path() -> None:
             )
 
 
+def test_squeezelite_patch_applicable() -> None:
+    """BLOCKER 1: output_vis_v1.patch must be a real, machine-applicable
+    unified diff that applies cleanly to the pinned upstream squeezelite
+    revision.  Skipped when git/patch are unavailable or when we cannot
+    reach the upstream repository (e.g. offline CI).
+    """
+    import shutil
+    import subprocess
+    import tempfile
+
+    patch_path = ROOT / "squeezelite" / "output_vis_v1.patch"
+    assert patch_path.exists(), "output_vis_v1.patch missing"
+    assert patch_path.stat().st_size > 0, "output_vis_v1.patch is empty"
+
+    body = patch_path.read_text()
+    assert body.startswith("diff --git ") or "\ndiff --git " in body, (
+        "output_vis_v1.patch must be a git-style unified diff"
+    )
+
+    if shutil.which("git") is None or shutil.which("patch") is None:
+        import pytest
+        pytest.skip("git or patch not available")
+
+    # Extract the pinned commit hash from the build script so the two stay
+    # in sync — bumping upstream requires editing exactly one place.
+    build_script = (ROOT / "scripts" / "build-squeezelite.sh").read_text()
+    commit_line = next(
+        (
+            line for line in build_script.splitlines()
+            if line.strip().startswith("SQUEEZELITE_COMMIT=")
+        ),
+        None,
+    )
+    assert commit_line is not None, "build-squeezelite.sh must define SQUEEZELITE_COMMIT"
+    # Format: SQUEEZELITE_COMMIT="${SQUEEZELITE_COMMIT:-<hash>}"
+    import re
+    m = re.search(r":-([0-9a-f]{40})", commit_line)
+    assert m is not None, f"Cannot parse pinned commit hash from {commit_line!r}"
+    pinned = m.group(1)
+
+    with tempfile.TemporaryDirectory() as td:
+        clone_dir = Path(td) / "squeezelite"
+        clone = subprocess.run(
+            [
+                "git", "clone", "--quiet", "--depth", "200",
+                "https://github.com/ralph-irving/squeezelite.git",
+                str(clone_dir),
+            ],
+            capture_output=True,
+        )
+        if clone.returncode != 0:
+            import pytest
+            pytest.skip(
+                f"cannot reach upstream repository: {clone.stderr.decode(errors='replace')}"
+            )
+        checkout = subprocess.run(
+            ["git", "-C", str(clone_dir), "checkout", "--quiet", pinned],
+            capture_output=True,
+        )
+        if checkout.returncode != 0:
+            # Deepen and retry once.
+            subprocess.run(
+                ["git", "-C", str(clone_dir), "fetch", "--quiet", "--unshallow"],
+                capture_output=True,
+            )
+            checkout = subprocess.run(
+                ["git", "-C", str(clone_dir), "checkout", "--quiet", pinned],
+                capture_output=True,
+            )
+        assert checkout.returncode == 0, (
+            f"cannot check out pinned revision {pinned}: "
+            f"{checkout.stderr.decode(errors='replace')}"
+        )
+
+        # patch --dry-run must succeed against this fresh checkout.
+        with open(patch_path, "rb") as pf:
+            result = subprocess.run(
+                ["patch", "--dry-run", "-p1"],
+                stdin=pf,
+                cwd=str(clone_dir),
+                capture_output=True,
+            )
+        assert result.returncode == 0, (
+            f"patch --dry-run failed:\n"
+            f"stdout: {result.stdout.decode(errors='replace')}\n"
+            f"stderr: {result.stderr.decode(errors='replace')}"
+        )
+
+
 def test_validate_script_fd_zero_is_allowed() -> None:
     """validate.sh FD audit must treat 0 open FDs as acceptable (idle AirPlay).
 

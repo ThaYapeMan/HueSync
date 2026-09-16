@@ -397,3 +397,161 @@ def test_replace_analyser_rebuild_failure_still_raises():
 
     # Candidate cleanup still ran.
     candidate.stop.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# BLOCKER 3 — replacement resource / recovery holes
+# ---------------------------------------------------------------------------
+
+
+def test_replace_analyser_runtimeerror_candidate_closed_exactly_once():
+    """RuntimeError from candidate.start() → candidate.stop() invoked once."""
+    old = MagicMock()
+    old.stop.return_value = True
+    old.latest.return_value = None
+    engine = _make_engine_with_old(old)
+
+    candidate = MagicMock()
+    candidate.start.side_effect = RuntimeError("resource limit hit")
+
+    with pytest.raises(RuntimeError, match="Candidate.*failed to start"):
+        engine.replace_analyser(candidate)
+
+    # Exactly one close() equivalent (candidate.stop is the sole cleanup call).
+    assert candidate.stop.call_count == 1
+
+
+def test_replace_analyser_oserror_candidate_closed_exactly_once():
+    """OSError from candidate.start() → candidate.stop() invoked once."""
+    old = MagicMock()
+    old.stop.return_value = True
+    old.latest.return_value = None
+    engine = _make_engine_with_old(old)
+
+    candidate = MagicMock()
+    candidate.start.side_effect = OSError("EMFILE — too many open files")
+
+    with pytest.raises(RuntimeError, match="Candidate.*failed to start"):
+        engine.replace_analyser(candidate)
+
+    assert candidate.stop.call_count == 1
+
+
+def test_replace_analyser_failed_rollback_candidate_closed():
+    """BLOCKER 3, Problem D: when rebuild_old() returns an object whose start()
+    fails, that failed restoration candidate is stopped so its native
+    resources do not leak."""
+    old = MagicMock()
+    old.stop.return_value = True
+    old.latest.return_value = None
+    engine = _make_engine_with_old(old)
+
+    candidate = MagicMock()
+    candidate.start.side_effect = RuntimeError("candidate boom")
+
+    failed_rebuild = MagicMock()
+    failed_rebuild.start.side_effect = RuntimeError("rebuild also boom")
+
+    def rebuild_old():
+        return failed_rebuild
+
+    with pytest.raises(RuntimeError, match="Candidate.*failed to start"):
+        engine.replace_analyser(candidate, rebuild_old=rebuild_old)
+
+    # Failed rebuild candidate was stopped so it does not leak.
+    assert failed_rebuild.stop.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# CanonicalAnalysisPipeline stop() safety
+# ---------------------------------------------------------------------------
+
+
+def test_unstarted_thread_stop_safe():
+    """BLOCKER 3, Problem A: if Thread.start() raised, stop() must not join
+    the unstarted thread — that would raise RuntimeError."""
+    import threading
+
+    from huesync.spectrum_engine import V2SpectrumEngine
+    from huesync.sync_engine import CanonicalAnalysisPipeline
+
+    class _FakeSource:
+        def __init__(self) -> None:
+            self.running = True
+
+        def read(self):
+            return None
+
+    cap = CanonicalAnalysisPipeline(
+        source=_FakeSource(),
+        engine=V2SpectrumEngine(n_bars=8, lower_hz=50.0, upper_hz=10000.0),
+        onset_method="combined",
+        onset_delta=0.1,
+        onset_alpha=0.9,
+        superflux_mu=3,
+        superflux_lag=2,
+        bass_hz=250,
+        mid_hz=2000,
+    )
+
+    # Simulate a Thread.start() failure by monkeypatching Thread to raise.
+    real_thread_cls = threading.Thread
+
+    class _FailingThread(real_thread_cls):
+        def start(self):  # type: ignore[override]
+            raise RuntimeError("simulated OS resource exhaustion at start()")
+
+    threading.Thread = _FailingThread  # type: ignore[misc,assignment]
+    try:
+        with pytest.raises(RuntimeError, match="simulated OS resource"):
+            cap.start()
+    finally:
+        threading.Thread = real_thread_cls  # type: ignore[misc,assignment]
+
+    # stop() must not raise — the underlying Thread was never actually started.
+    result = cap.stop()
+    assert result is True, "stop() should report clean shutdown for unstarted thread"
+
+
+def test_started_thread_stop_joins_and_closes_once():
+    """Complementary control: a successfully-started worker still joins and
+    closes processors exactly once."""
+    from huesync.spectrum_engine import V2SpectrumEngine
+    from huesync.sync_engine import CanonicalAnalysisPipeline
+
+    class _FakeSource:
+        def __init__(self) -> None:
+            self.running = True
+
+        def read(self):  # noqa: D401
+            return None
+
+    engine = V2SpectrumEngine(n_bars=8, lower_hz=50.0, upper_hz=10000.0)
+    cap = CanonicalAnalysisPipeline(
+        source=_FakeSource(),
+        engine=engine,
+        onset_method="combined",
+        onset_delta=0.1,
+        onset_alpha=0.9,
+        superflux_mu=3,
+        superflux_lag=2,
+        bass_hz=250,
+        mid_hz=2000,
+    )
+
+    close_counts: dict[str, int] = {}
+    for proc in cap._processors:
+        orig_close = proc.close
+        proc_id = proc.processor_id
+
+        def _counter(pid=proc_id, orig=orig_close):
+            close_counts[pid] = close_counts.get(pid, 0) + 1
+            orig()
+
+        proc.close = _counter  # type: ignore[method-assign]
+
+    cap.start()
+    result = cap.stop()
+    assert result is True
+    for pid, count in close_counts.items():
+        assert count == 1, f"processor {pid} close() called {count} times, expected 1"

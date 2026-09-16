@@ -1089,6 +1089,93 @@ class SqueezeliteShmStereoSource:
             return True
         return (st.st_dev, st.st_ino) != self._shm_dev_ino
 
+    def _remap_after_replacement(self) -> bool:
+        """Unmap the old (orphaned) segment and re-map the new one at ``self._path``.
+
+        BLOCKER 2: detecting a replacement is not enough — we must actually
+        release the stale mapping and adopt the new inode, otherwise the
+        reader keeps returning old PCM forever.
+
+        Returns True when the new segment is fully mapped, validated and
+        the reader is ready to consume PCM from it.  Returns False when the
+        new file is temporarily absent or its v1 extension block is still
+        in the initialization-in-progress state (write_seq odd); the caller
+        should propagate a StreamInvalidated for this read and retry on the
+        next read cycle without keeping the old mapping live.
+        """
+        if self._path is None:
+            return False
+        # Release the old mmap immediately; the writer's new inode is
+        # unrelated to the fd/mmap pair we are currently holding.
+        if self._mm is not None:
+            try:
+                self._mm.close()
+            except Exception:  # noqa: BLE001 — mmap.close() should not raise, but be defensive
+                pass
+            self._mm = None
+
+        # Reset per-mapping continuity state so the fresh producer's
+        # generation/abs_write_pos/gap_seq are adopted from the new SHM.
+        self._prev_generation = 0
+        self._abs_write_pos_frames = 0
+        self._prev_gap_seq = 0
+        self._prev_index = 0
+        self._prev_running = False
+        self._prev_rate = 0
+        self._prev_updated = 0
+        self._abi_version = 0
+        self._shm_dev_ino = None
+
+        try:
+            fd = self._path.open("rb")
+        except OSError:
+            return False
+        try:
+            try:
+                self._mm = mmap.mmap(fd.fileno(), _MMAP_SIZE_V1, access=mmap.ACCESS_READ)
+            except (ValueError, OSError):
+                try:
+                    self._mm = mmap.mmap(fd.fileno(), _MMAP_SIZE, access=mmap.ACCESS_READ)
+                except (ValueError, OSError):
+                    return False
+            try:
+                st = os.fstat(fd.fileno())
+                self._shm_dev_ino = (st.st_dev, st.st_ino)
+            except OSError:
+                self._shm_dev_ino = None
+        finally:
+            fd.close()
+
+        # Revalidate the v1 extension: magic + exact abi_version + writer not
+        # currently mid-initialisation (write_seq must be even; a coherent
+        # read enforces this).
+        ext = self._read_ext_coherent()
+        if ext is None or ext.magic != SHM_ABI_V1_MAGIC:
+            # No v1 producer active on the replacement segment.  Keep the
+            # mapping (so a later read may still succeed) but mark ABI as
+            # v0 fallback and clear generation state.
+            self._abi_version = 0
+            return True
+        if ext.abi_version != SHM_ABI_VERSION:
+            # Unsupported ABI on the new segment.  Mark and let subsequent
+            # reads surface as StreamInvalidated via the unsupported_abi
+            # short-circuit.
+            self._unsupported_abi = True
+            self._abi_version = 0
+            return True
+        # Fresh generation is established from the new object; subsequent
+        # reads compute delta_frames against this baseline.
+        self._abi_version = ext.abi_version
+        self._prev_generation = ext.generation
+        self._abs_write_pos_frames = ext.abs_write_pos
+        self._prev_gap_seq = ext.gap_seq
+        _, buf_index, running, rate, updated = self._read_header()
+        self._prev_index = buf_index
+        self._prev_running = running
+        self._prev_rate = rate
+        self._prev_updated = updated
+        return True
+
     @property
     def sample_rate(self) -> int:
         return self._read_header()[3]
@@ -1369,11 +1456,12 @@ class SqueezeliteShmStereoSource:
             )
         # Detect SHM segment replacement: squeezelite's post-restart segment
         # has a different inode at the same path.  Our mmap still maps the
-        # old (unlinked) file, so continue reading it would silently return
-        # stale data.  Invalidate the epoch and clear the (dev, ino) tuple
-        # so the caller can re-open at its own cadence.
+        # old (unlinked) file, so continuing to read it would silently return
+        # stale data.  Release the orphaned mapping, remap the new inode
+        # under the same path, and surface a StreamInvalidated for this read
+        # so the caller enters a fresh epoch on the next cycle.
         if self._detect_shm_replacement():
-            self._shm_dev_ino = None
+            self._remap_after_replacement()
             return StreamInvalidated(
                 cause=InvalidationCause.UNKNOWN, known_lost_samples=None
             )

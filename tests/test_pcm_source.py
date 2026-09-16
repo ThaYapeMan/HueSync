@@ -1217,3 +1217,92 @@ def test_stereo_shm_replaced_detected(tmp_path: Path) -> None:
     src.close()
 
     assert isinstance(result, StreamInvalidated)
+
+
+def test_stereo_shm_replacement_remaps_and_delivers_new_pcm(tmp_path: Path) -> None:
+    """BLOCKER 2: after replacement is detected, subsequent reads must come
+    from the new object, not the orphaned old mapping.
+
+    Assertions:
+      OLD_MMAP_RELEASED — the mmap held during ``open()`` is closed after the
+        replacement is detected (the file object is None post-remap).
+      NEW_OBJECT_REMAPPED — the source's (dev, ino) tuple after the remap
+        matches the new file's stat, not the old one.
+      NEW_PCM_DELIVERED — a subsequent read returns PCM whose sample values
+        derive from the NEW segment (0x22 pattern), not the old one (0x11).
+    """
+    # File A: PCM ring filled with a distinctive pattern (all bytes = 0x11).
+    pcm_a = b"\x11\x11" * (VIS_BUF_SIZE)
+    path = _write_stereo_shm_v1(
+        tmp_path,
+        abs_write_pos=100,
+        buf_index=200,
+        pcm_at_120=pcm_a,
+    )
+    src = SqueezeliteShmStereoSource()
+    src.open("x", _path=path, require_v1=True)
+    old_dev_ino = src._shm_dev_ino
+    assert old_dev_ino is not None
+    old_mm = src._mm
+    assert old_mm is not None
+
+    # File B: unlink A and materialise a fresh file at the same path with a
+    # distinct pattern (0x22) so we can prove the reader consumed the new
+    # segment on the next successful read.  Advance abs_write_pos by 4
+    # stereo frames so the reader has a delta to expose.
+    os.unlink(path)
+    # Encode a value that will fit in one stereo frame: int16 samples 0x2222.
+    pattern_two_bytes = b"\x22\x22"
+    pcm_b_head = pattern_two_bytes * 8  # 4 stereo frames × 2 channels × 2 bytes
+    pcm_b = pcm_b_head + b"\x00" * (VIS_BUF_SIZE * 2 - len(pcm_b_head))
+    _write_stereo_shm_v1(
+        tmp_path,
+        abs_write_pos=100,        # baseline aligned with the source's snapshot
+        buf_index=0,
+        pcm_at_120=pcm_b,
+    )
+
+    # First read after replacement: must invalidate the epoch.
+    result_invalid = src.read()
+    assert isinstance(result_invalid, StreamInvalidated), (
+        f"expected StreamInvalidated on replacement, got {type(result_invalid).__name__}"
+    )
+    # OLD_MMAP_RELEASED: the old mmap must have been closed and dropped.
+    # Python's mmap does not expose an explicit is_closed flag, but reading
+    # from a closed mmap raises; verify the source has swapped to a fresh
+    # object rather than keeping the pre-replacement one.
+    assert src._mm is not old_mm, "old mmap must be released, new one adopted"
+    # NEW_OBJECT_REMAPPED: dev/ino now reflects the replacement file.
+    assert src._shm_dev_ino is not None
+    assert src._shm_dev_ino != old_dev_ino, (
+        "dev/ino tuple must reflect the new inode after remap"
+    )
+
+    # Advance the writer in the new segment to expose 4 stereo frames.
+    _mutate_stereo_shm_v1(path, abs_write_pos=104, buf_index=8)
+
+    # Second read: must deliver PCM from the new file.
+    result_data = src.read()
+    src.close()
+    assert isinstance(result_data, DataResult), (
+        f"expected DataResult after remap, got {type(result_data).__name__}"
+    )
+    # NEW_PCM_DELIVERED: sample values derive from pattern B (0x2222 int16),
+    # not pattern A (0x1111).  0x2222 as signed int16 is 8738; scaled by
+    # 1/32768 gives ~0.2666.  Pattern A would give 0x1111 -> ~0.1334.
+    frame = result_data.frame
+    samples = frame.samples
+    assert samples.shape[1] == 2
+    assert samples.size > 0
+    # Every non-silent value must match the new pattern within float rounding.
+    non_zero = samples[np.abs(samples) > 1e-4]
+    assert non_zero.size > 0, "at least some samples must be from the new segment"
+    new_pattern_value = 0x2222 / 32768.0
+    old_pattern_value = 0x1111 / 32768.0
+    assert np.allclose(np.abs(non_zero), new_pattern_value, atol=1e-4), (
+        f"samples must originate from new segment pattern 0x2222 "
+        f"(≈{new_pattern_value:.4f}); saw {non_zero[:4]}"
+    )
+    assert not np.any(np.isclose(np.abs(non_zero), old_pattern_value, atol=1e-4)), (
+        "no samples from old segment pattern 0x1111 should remain"
+    )

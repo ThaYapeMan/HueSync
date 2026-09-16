@@ -1,87 +1,124 @@
-HueSync v1 visualiser SHM producer — squeezelite integration patch.
-
-Applied by scripts/build-squeezelite.sh to a fresh checkout of
-ralph-irving/squeezelite at the pinned tag.  The patch is written against
-upstream squeezelite v2.0.0.x (output_vis.c layout unchanged since v1.9.x).
-
-Changes:
-  * Makefile           — compile output_vis_v1.o and link it into squeezelite.
-  * output_vis.c       — include vis_shm_v1.h, extend the mmap size by
-                         sizeof(vis_shm_v1_ext_t), initialise the extension
-                         after mmap (abort on -1), and wrap each buffer write
-                         with vis_shm_v1_begin_write / vis_shm_v1_end_write.
-                         On a skipped export (trywrlock failure) call
-                         vis_shm_v1_record_gap so the consumer sees the gap.
-
-Idempotency:  scripts/build-squeezelite.sh applies with `patch --forward`,
-which refuses to re-apply if the hunks are already present, so a partially-
-applied checkout is not silently ignored.
----
 diff --git a/Makefile b/Makefile
+index 78511dc..f80dda2 100644
 --- a/Makefile
 +++ b/Makefile
-@@ -SOURCES=$(shell ls *.c)
-+SOURCES=$(shell ls *.c)
-+# HueSync v1 SHM producer.  output_vis_v1.c is a self-contained producer
-+# helper; the wildcard above already picks it up when it lives beside
-+# output_vis.c, this line only documents the dependency for reviewers.
-+HUESYNC_V1_SOURCES=output_vis_v1.c vis_shm_v1.h
+@@ -32,7 +32,7 @@ SOURCES_DSD      = dsd.c dop.c dsd2pcm/dsd2pcm.c
+ SOURCES_FF       = ffmpeg.c
+ SOURCES_ALAC     = alac.c alac_wrapper.cpp
+ SOURCES_RESAMPLE = process.c resample.c
+-SOURCES_VIS      = output_vis.c
++SOURCES_VIS      = output_vis.c output_vis_v1.c
+ SOURCES_IR       = ir.c
+ SOURCES_GPIO     = gpio.c
+ SOURCES_FAAD     = faad.c
 diff --git a/output_vis.c b/output_vis.c
+index c9abb0e..ab8a437 100644
 --- a/output_vis.c
 +++ b/output_vis.c
-@@ #include "squeezelite.h"
- #include "squeezelite.h"
+@@ -28,6 +28,10 @@
+ #include <sys/stat.h>
+ #include <sys/mman.h>
+ #include <fcntl.h>
++/* HueSync v1 SHM producer extension.  The producer helpers live in
++ * output_vis_v1.c; the header defines the extension block layout the
++ * HueSync consumer maps at offset 80. */
 +#include "vis_shm_v1.h"
-
-@@ /* mmap size for the visualiser SHM segment: */
--    size_t mmap_size = sizeof(struct vis_t);
-+    /* HueSync v1: extend the mapping by 40 bytes for the extension block
-+     * and place it immediately after the legacy vis_t header.  Rounded up
-+     * to the ring-buffer origin used by the consumer: 80 + 40 + ring. */
-+    size_t mmap_size = sizeof(struct vis_t) + sizeof(vis_shm_v1_ext_t);
-@@ /* right after mmap succeeds and vis_mmap points at the segment: */
-+    /* HueSync v1: initialise the extension block.  A failure here means
-+     * both getrandom(2) and /dev/urandom were unavailable; abort SHM setup
-+     * rather than fall back to a PID/time generation (which would collide
-+     * across restarts and break the consumer's restart detection). */
-+    vis_shm_v1_ext_t *huesync_ext =
-+        (vis_shm_v1_ext_t *)((char *)vis_mmap + offsetof_after_legacy_vis_t);
-+    if (vis_shm_v1_init(huesync_ext) != 0) {
-+        LOG_ERROR("HueSync v1 SHM init failed; disabling visualiser SHM");
-+        munmap(vis_mmap, mmap_size);
-+        vis_mmap = NULL;
-+        return;
-+    }
-@@ /* inside the buffer-copy path, replace direct writes with the seqlock pair: */
--    /* legacy: memcpy(vis_mmap->buffer + buf_index * 2, samples, n * 4); */
--    /* legacy: buf_index = (buf_index + n) % VIS_BUF_SIZE_STEREO; */
-+    vis_shm_v1_begin_write(huesync_ext);
-+    memcpy(vis_mmap->buffer + buf_index * 2, samples, n * 4);
-+    buf_index = (buf_index + n) % VIS_BUF_SIZE_STEREO;
-+    vis_shm_v1_end_write(huesync_ext, /* n_stereo_frames */ n);
-@@ /* inside the skipped-export branch (pthread_rwlock_trywrlock returned EBUSY): */
-+    vis_shm_v1_record_gap(huesync_ext);
-     /* legacy: fall through / drop the block */
---
-NOTE FOR MAINTAINERS
---------------------
-
-The upstream `output_vis.c` layout is stable across the v1.9.x - v2.0.x
-squeezelite series, but the exact line numbers and surrounding context drift
-between minor releases.  When SQUEEZELITE_VERSION in build-squeezelite.sh is
-bumped:
-
-  1. Run build-squeezelite.sh once; if `patch --forward` fails, regenerate the
-     hunks from the fresh checkout and commit the updated patch.
-  2. `offsetof_after_legacy_vis_t` above is a placeholder for the 80-byte
-     offset called out in squeezelite/README.md.  In upstream this is either
-     the tail of a locally-declared struct or a fixed constant depending on
-     the branch — inspect the checkout and substitute the correct expression.
-  3. The `n_stereo_frames` argument to `vis_shm_v1_end_write` must match the
-     number of stereo frames just placed into the ring buffer.  Upstream
-     tracks samples in scalar `s16` units in some code paths — divide by 2
-     when handing the count to the v1 helper.
-
-This file is not a machine-applicable patch; scripts/build-squeezelite.sh
-still relies on it as documentation.  Automated regeneration against a fresh
-upstream tree is the recommended workflow for producing a bit-exact patch.
+ #if OSX
+ #include <mach/clock.h>
+ #include <mach/mach.h>
+@@ -44,6 +48,12 @@ static int pthread_rwlock_timedwrlock( pthread_rwlock_t * restrict rwlock, const
+ #define VIS_BUF_SIZE 16384
+ #define VIS_LOCK_NS  1000000 // ns to wait for vis wrlock
+ 
++/* HueSync v1: the extension block lives immediately after the legacy header
++ * fields, at offset 80 of the mmap region.  ``buffer`` therefore starts at
++ * offset 120 (= 80 + 40).  Consumers built against the v0 layout that expect
++ * PCM at offset 80 will fail to decode the extension magic and either fall
++ * back to a v0 read path or reject the segment — this is intentional: v1 is
++ * an ABI break flagged by ``vis_shm_v1_ext_t.magic``. */
+ static struct vis_t {
+ 	pthread_rwlock_t rwlock;
+ 	u32_t buf_size;
+@@ -51,6 +61,7 @@ static struct vis_t {
+ 	bool running;
+ 	u32_t rate;
+ 	time_t updated;
++	vis_shm_v1_ext_t huesync_v1_ext;
+ 	s16_t buffer[VIS_BUF_SIZE];
+ } *vis_mmap = NULL;
+ 
+@@ -89,16 +100,26 @@ void _vis_export(struct buffer *outputbuf, struct outputstate *output, frames_t
+ 		
+ 		if (err) {
+ 			LOG_DEBUG("failed to get wrlock - skipping visulizer export");
+-			
++			/* HueSync v1: producer failed to acquire the export lock; record
++			 * the skipped block so the consumer's gap_seq detector fires.
++			 * The counter is buffered inside the producer and published on
++			 * the next successful end_write pair. */
++			vis_shm_v1_record_gap(&vis_mmap->huesync_v1_ext);
+ 		} else {
+-			
++
+ 			if (silence) {
+ 				vis_mmap->running = false;
+ 			} else {
+ 				frames_t vis_cnt = out_frames;
+ 				s32_t *ptr = (s32_t *) outputbuf->readp;
+ 				unsigned i = vis_mmap->buf_index;
+-				
++				frames_t n_stereo_frames = out_frames;
++
++				/* HueSync v1: mark the export as in-progress under the
++				 * seqlock so a racing consumer sees an odd write_seq and
++				 * retries.  End the pair after buf_index / updated / rate
++				 * have all been published. */
++				vis_shm_v1_begin_write(&vis_mmap->huesync_v1_ext);
+ 				if (!output->current_replay_gain) {
+ 					while (vis_cnt--) {
+ 						vis_mmap->buffer[i++] = *(ptr++) >> 16;
+@@ -112,13 +133,18 @@ void _vis_export(struct buffer *outputbuf, struct outputstate *output, frames_t
+ 						if (i == VIS_BUF_SIZE) i = 0;
+ 					}
+ 				}
+-				
++
+ 				vis_mmap->updated = time(NULL);
+ 				vis_mmap->running = true;
+ 				vis_mmap->buf_index = i;
+ 				vis_mmap->rate = output->current_sample_rate;
++				/* HueSync v1: publish abs_write_pos + gap_seq and flip
++				 * write_seq back to even.  n_stereo_frames matches the
++				 * scalar samples we just placed into ``buffer``. */
++				vis_shm_v1_end_write(&vis_mmap->huesync_v1_ext,
++				                    (uint64_t)n_stereo_frames);
+ 			}
+-			
++
+ 			pthread_rwlock_unlock(&vis_mmap->rwlock);
+ 		}
+ 	}
+@@ -159,7 +185,22 @@ void output_vis_init(log_level level, u8_t *mac) {
+ 		vis_mmap->running = false;
+ 		vis_mmap->rate = 44100;
+ 		pthread_rwlockattr_destroy(&attr);
+-		LOG_INFO("opened visulizer shared memory as %s", vis_shm_path);
++		/* HueSync v1: initialise the extension block.  A -1 return means
++		 * both getrandom(2) and /dev/urandom were unavailable — abort SHM
++		 * setup rather than fall back to a PID/time generation, which
++		 * would collide across restarts and defeat consumer restart
++		 * detection. */
++		if (vis_shm_v1_init(&vis_mmap->huesync_v1_ext) != 0) {
++			LOG_WARN("HueSync v1 SHM init failed (no RNG); disabling visualiser SHM");
++			munmap(vis_mmap, sizeof(struct vis_t));
++			vis_mmap = NULL;
++			close(vis_fd);
++			vis_fd = -1;
++			shm_unlink(vis_shm_path);
++			umask(old_mask);
++			return;
++		}
++		LOG_INFO("opened visulizer shared memory as %s (HueSync v1 ABI)", vis_shm_path);
+ 	} else {
+ 		LOG_WARN("unable to open visualizer shared memory");
+ 		vis_mmap = NULL;
