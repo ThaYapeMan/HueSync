@@ -16,6 +16,10 @@ def test_help_and_unsupported_platform_are_read_only(tmp_path):
     env = dict(os.environ, HOME=str(tmp_path))
     result = subprocess.run([str(SCRIPT), '--help'], env=env, capture_output=True, text=True)
     assert result.returncode == 0 and '--check' in result.stdout
+    for requirement in ('existing HueSync target installation', 'Debian 13 (trixie)',
+                        'x86_64', 'systemd running', '/run/systemd/system',
+                        'Does not install, migrate or modify the host', 'docs/testing.md'):
+        assert requirement in result.stdout
     assert not list(tmp_path.iterdir())
     release = Path('/etc/os-release').read_text()
     if 'ID=debian' in release and 'VERSION_ID="13"' in release:
@@ -135,3 +139,30 @@ def test_airplay_first_install_replaces_upstream_sample_only(tmp_path):
         else:
             assert 'output_backend = "pipe"' in config.read_text()
             assert 'output_rate = 44100' in config.read_text()
+
+
+@pytest.mark.parametrize('debian,arch,booted,success,message', [
+    (True, 'x86_64', True, True, ''),
+    (True, 'x86_64', False, False, 'booted systemd target is required'),
+    (True, 'aarch64', True, False, 'x86_64 only'),
+    (False, 'x86_64', True, False, 'Debian 13 (trixie) only'),
+])
+def test_platform_gate_read_only(tmp_path, debian, arch, booted, success, message):
+    # Execute the real probe body with only OS identity paths substituted.
+    # This proves the gate; it does not simulate an installed target.
+    release = tmp_path / 'os-release'
+    release.write_text('ID=debian\nVERSION_ID=13\nVERSION_CODENAME=trixie\n' if debian
+                       else 'ID=ubuntu\nVERSION_ID=26.04\n')
+    systemd = tmp_path / 'systemd'
+    if booted:
+        systemd.mkdir()
+    function = SCRIPT.read_text().split('platform() {', 1)[1].split('\n}', 1)[0]
+    function = function.replace('/etc/os-release', str(release)).replace(
+        '/run/systemd/system', str(systemd))
+    before = sorted(p.name for p in tmp_path.iterdir())
+    shell = ('set -Eeuo pipefail\nfail() { echo "$*" >&2; exit 1; }\n'
+             f'uname() {{ echo {arch}; }}\nplatform() {{'+function+'\n}\nplatform\n')
+    result = subprocess.run(['bash', '-c', shell], capture_output=True, text=True)
+    assert (result.returncode == 0) == success
+    assert message in result.stderr
+    assert sorted(p.name for p in tmp_path.iterdir()) == before

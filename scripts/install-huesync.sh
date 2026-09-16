@@ -67,7 +67,18 @@ verify_services() {
     done
 }
 case "${1:-}" in
-    --help|-h) echo 'Usage: sudo ./scripts/install-huesync.sh | ./scripts/install-huesync.sh --check'; exit 0 ;;
+    --help|-h)
+        cat <<'HELP'
+Usage: sudo ./scripts/install-huesync.sh [--check]
+
+  --check  Read-only verification of an existing HueSync target installation.
+           Requires Debian 13 (trixie), x86_64, with systemd running
+           (/run/systemd/system). Does not install, migrate or modify the host.
+           Use sudo to read private configuration.
+
+For local static/unit validation on development hosts, see docs/testing.md.
+HELP
+        exit 0 ;;
     --check) [[ $# == 1 ]] || fail 'Unexpected arguments'; CHECK=1 ;;
     '') CHECK=0 ;;
     *) fail 'Unknown argument; use --help' ;;

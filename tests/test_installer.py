@@ -9,6 +9,9 @@ PCM is never consumed.
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 import tomllib
 from pathlib import Path
 from unittest.mock import patch
@@ -548,3 +551,17 @@ def test_validate_script_fd_zero_is_allowed() -> None:
     assert "no active AirPlay session" in script, (
         "validate.sh must explain that 0 open FDs is expected when idle"
     )
+
+
+def test_validate_script_executes_canonical_smoke():
+    """Run the exact embedded operator check, with real registry/DSP/EOS calls."""
+    script = (ROOT / 'scripts/validate.sh').read_text()
+    block = script.split("<<'CANONICALCHECK'\n", 1)[1].split('\nCANONICALCHECK', 1)[0]
+    result = subprocess.run(
+        [sys.executable, '-B', '-c', block], cwd=ROOT,
+        env=dict(os.environ, PYTHONPATH=str(ROOT / 'src')),
+        capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert 'Canonical PCM → V2 + Beat → PublicationRecord:' in result.stdout
+    assert 'publications' in result.stdout

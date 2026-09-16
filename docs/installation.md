@@ -86,7 +86,9 @@ sudo ./scripts/install-huesync.sh
 journalctl -u huesync -u shairport-sync -u nqptp
 ```
 
-`--check` performs no apt/build/migration/service-start operation. It checks current
+`--check` verifies an **existing target installation**. It requires Debian 13
+(trixie), x86_64, with systemd running (`/run/systemd/system`); it is not a
+generic CI/WSL/build-host check. It performs no apt/build/migration/service-start operation. It checks current
 schema, installed wheel location and Git metadata, binary SHA256/provenance, shared
 libraries, native CAVA smoke execution, frontend/FIFO, unit validity and service state.
 Use sudo to read private configuration. It does not read live PCM or activate a player.
@@ -117,3 +119,7 @@ with VISEXPORT but without the v1 patch. Runtime selects it only for `bars_sourc
 There is no fallback between these executables; a missing binary is an explicit error.
 Both hashes are verified against the installation manifest. This preserves the
 intentional external-FIFO feature without weakening canonical v1 requirements.
+
+For static/unit checks on development hosts, use [testing.md](testing.md).
+`bash scripts/validate.sh` provides supplementary target diagnostics and a synthetic
+canonical-analysis smoke test using the installed environment; it never consumes live PCM.

@@ -38,7 +38,7 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # V2 engine constants — defined locally to avoid importing from sync_engine.py.
 # Values must stay in sync with BandNormaliser.DEFAULT_ATTACK_TAU_S and the
-# _V2_* class attributes on PcmAudioPipelineV2.
+# former whole-pipeline V2 class attributes (math preserved by extraction).
 # ---------------------------------------------------------------------------
 _SAMPLE_RATE: int = 48000
 _STFT_HOP: int = round(_SAMPLE_RATE * 0.010)    # 480 samples at 48 kHz = 10 ms hop

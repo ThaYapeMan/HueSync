@@ -34,7 +34,7 @@ from huesync.cavacore import SCALING_DECIBEL, CavaCoreBackend  # noqa: E402
 
 _RATE = 48000
 _N_BARS = 30
-_HOP = 480  # matches PcmAudioPipelineV2 STFT hop at 48 kHz
+_HOP = 480  # CAVA execution block at 48 kHz
 
 
 def _make_backend(**kwargs) -> CavaCoreBackend:

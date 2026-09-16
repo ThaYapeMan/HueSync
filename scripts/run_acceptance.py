@@ -154,11 +154,10 @@ _FFMPEG_FALLBACKS: list[str] = [
 
 
 class _OfflineSource:
-    """Stub satisfying PcmAudioPipelineV2's duck-typed source contract.
+    """Source guard for public synchronous CanonicalAnalysisPipeline feed/EOS.
 
-    The harness bypasses _run() and calls _process_canonical_frame() directly,
-    so read() is never invoked.  running=False so the TemporarilyNoData branch
-    in _run() would clear _latest — irrelevant here, but documented for clarity.
+    The harness supplies canonical frames and captures returned PublicationRecords;
+    it never starts the worker or reads a live ingress.
     """
 
     @property

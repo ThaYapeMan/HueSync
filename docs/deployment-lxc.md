@@ -15,6 +15,9 @@ sudo ./scripts/install-huesync.sh --check
 The repository installer is the authoritative standard deployment path. It owns
 packages, full native builds, frontend/wheel installation, schema migration and
 services. Do not reproduce separate manual dependency or producer-patching steps.
+`--check` is read-only verification of an existing Debian 13/trixie x86_64
+installation with systemd running (`/run/systemd/system`). It does not install,
+migrate or modify the host. For development-host checks, see [testing](testing.md).
 Record its commit/binary hashes and run it twice to verify target idempotency.
 
 The host must expose paced snd-dummy/audio devices and appropriate permissions for

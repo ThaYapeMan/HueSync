@@ -788,7 +788,7 @@ class PcmHpss:
 
 
 # ---------------------------------------------------------------------------
-# AirPlayPipeSource — reads shairport-sync's named pipe
+# AirPlayPipeStereoSource — reads shairport-sync's named pipe
 # ---------------------------------------------------------------------------
 
 AIRPLAY_PIPE: Path = Path("/run/huesync/airplay.pcm")

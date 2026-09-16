@@ -756,7 +756,7 @@ def test_cavacore_unavailable_raises_not_silently_falls_back() -> None:
 
     The pipeline must not silently use V2 — the user made an explicit choice.
     Verified by inspecting the compiled source: the fallback branch (log.warning +
-    PcmAudioPipelineV2(...)) must be absent after the fix.
+    a canonical pipeline) must be absent after the fix.
     """
     import inspect
 

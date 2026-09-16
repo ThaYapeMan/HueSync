@@ -13,7 +13,7 @@
 set -uo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VENV="$REPO_DIR/.venv"
+VENV=/opt/huesync/.venv
 FIFO=/run/huesync/airplay.pcm
 RUNDIR=/run/huesync
 SPS_CONF=/usr/local/etc/shairport-sync.conf
@@ -43,28 +43,66 @@ if [[ ! -x "$VENV/bin/python" ]]; then
 else
     _pass "virtualenv present: $VENV"
 
-    if "$VENV/bin/python" -c "import soxr" 2>/dev/null; then
-        SOXR_VER=$("$VENV/bin/python" -c "import soxr; print(soxr.__version__)" 2>/dev/null || echo "?")
+    if "$VENV/bin/python" -I -B -c "import soxr" 2>/dev/null; then
+        SOXR_VER=$("$VENV/bin/python" -I -B -c "import soxr; print(soxr.__version__)" 2>/dev/null || echo "?")
         _pass "soxr importable (version: $SOXR_VER)"
     else
-        _fail "soxr not importable — run: bash scripts/update.sh"
+        _fail "soxr not importable — run: sudo ./scripts/install-huesync.sh"
     fi
 
-    if "$VENV/bin/python" - 2>/dev/null <<'PYCHECK'
-from huesync.canonicalizer import (
-    AudioCanonicalizer, CanonicalData, EndOfStream, StreamInvalidated, TemporarilyNoData,
+    # Exercise the public synchronous canonical API with generated PCM only.
+    # No worker is started and no live source or FIFO is opened.
+    if "$VENV/bin/python" -I -B - <<'CANONICALCHECK'
+import numpy as np
+from huesync.canonicalizer import AnalysisPcmFrame
+from huesync.models import Profile
+from huesync.spectrum_engine import make_spectrum_engine
+from huesync.sync_engine import CanonicalAnalysisPipeline
+
+class NoLiveSource:
+    def read(self):
+        raise AssertionError("Validation must not read live PCM")
+
+profile = Profile(bars_source="pcm_pipeline", spectrum_backend="v2")
+engine = make_spectrum_engine(
+    profile.spectrum_backend, n_bars=profile.bars,
+    lower_hz=profile.lower_cutoff_freq, upper_hz=profile.higher_cutoff_freq,
 )
-from huesync.pcm_source import AirPlayPipeStereoSource
-from huesync.sync_engine import StereoMagStft, PcmAudioPipelineV2
-PYCHECK
+pipeline = CanonicalAnalysisPipeline(
+    source=NoLiveSource(), engine=engine,
+    onset_method=profile.onset_method, onset_delta=profile.onset_delta,
+    onset_alpha=profile.onset_alpha, superflux_mu=profile.superflux_mu,
+    superflux_lag=profile.superflux_lag, bass_hz=profile.bass_hz, mid_hz=profile.mid_hz,
+)
+try:
+    tone = (.25 * np.sin(2 * np.pi * 440 * np.arange(4800) / 48000)).astype(np.float32)
+    samples = np.column_stack((tone, tone))
+    records = pipeline.feed(AnalysisPcmFrame(
+        samples=samples, sample_pos=0, epoch_id="validation", source_id="synthetic",
+        over_range=False,
+    ))
+    records.extend(pipeline.end_of_stream())
+    assert records, "Canonical pipeline produced no publications"
+    assert all(r.epoch == "validation" and r.effective_spectrum_backend == "v2"
+               for r in records)
+    assert any(np.any(np.asarray(r.features.bars) > 0) for r in records), "No Spectrum signal"
+    assert all(np.isfinite(r.features.bars).all() for r in records)
+    queued = pipeline.drain_publications()
+    assert len(queued) == len(records) and all(a is b for a, b in zip(queued, records))
+    assert pipeline.latest() is not None, "Terminal publication disappeared at EOS"
+    print(f"Canonical PCM → V2 + Beat → PublicationRecord: {len(records)} publications")
+finally:
+    assert pipeline.stop(), "Synchronous validation did not close cleanly"
+CANONICALCHECK
     then
-        _pass "Phase 3 imports OK (AudioCanonicalizer, AirPlayPipeStereoSource, PcmAudioPipelineV2)"
+        _pass "Canonical analysis feed/EOS/publication smoke test passed (synthetic PCM)"
     else
-        _fail "Phase 3 import failed — run: bash scripts/update.sh"
+        _fail "Canonical analysis smoke test failed — run: sudo ./scripts/install-huesync.sh"
     fi
 
     # cavacore native library
-    _SO="$REPO_DIR/src/huesync/cavacore/_libcavacore.so"
+    _SO=$("$VENV/bin/python" -I -B -c \
+        'from pathlib import Path; import huesync.cavacore; print(Path(huesync.cavacore.__file__).parent / "_libcavacore.so")')
     if [[ -f "$_SO" ]]; then
         _pass "cavacore native library present: $_SO"
 
@@ -76,7 +114,7 @@ PYCHECK
                 _warn "ldd output contains no fftw entry — unexpected (library may be statically linked)"
             elif echo "$_FFTW_LINE" | grep -q "not found"; then
                 _fail "libfftw3.so not resolved: $_FFTW_LINE"
-                _info "  Fix: apt install libfftw3-dev && bash scripts/update.sh"
+                _info "  Fix: sudo ./scripts/install-huesync.sh"
             else
                 _pass "FFTW resolves: $(echo "$_FFTW_LINE" | sed 's/^[[:space:]]*//')"
             fi
@@ -85,7 +123,7 @@ PYCHECK
         fi
 
         # Python import check + native smoke test (init + idempotent close)
-        if "$VENV/bin/python" - 2>/dev/null <<'PYCHECK'
+        if "$VENV/bin/python" -I -B - 2>/dev/null <<'PYCHECK'
 from huesync.cavacore import CavaCoreBackend, is_cavacore_available
 assert is_cavacore_available(), "is_cavacore_available() returned False"
 b = CavaCoreBackend(n_bars=30, rate=48000, channels=2)
@@ -96,11 +134,11 @@ PYCHECK
         then
             _pass "CavaCoreBackend native smoke test passed"
         else
-            _fail "CavaCoreBackend native smoke test failed — run: bash scripts/update.sh"
+            _fail "CavaCoreBackend native smoke test failed — run: sudo ./scripts/install-huesync.sh"
         fi
     else
         _fail "cavacore native library not found: $_SO"
-        _info "  Fix: bash scripts/update.sh  (installs libfftw3-dev, then pip install rebuilds)"
+        _info "  Fix: sudo ./scripts/install-huesync.sh  (rebuilds the installed native wheel)"
     fi
 fi
 
@@ -143,7 +181,7 @@ if [[ -f "$SPS_CONF" ]]; then
         if grep -qF "$check" "$SPS_CONF"; then
             _pass "  config contains: $check"
         else
-            _fail "  config MISSING: $check — re-run: bash scripts/setup-airplay.sh"
+            _fail "  config MISSING: $check — re-run: sudo ./scripts/install-huesync.sh"
         fi
     done
 else
@@ -167,7 +205,7 @@ if [[ -d "$RUNDIR" ]]; then
     fi
 else
     _fail "$RUNDIR does not exist"
-    _info "  Fix: start huesync.service (RuntimeDirectory=huesync) or"
+    _info "  Fix: run the repository installer or"
     _info "       run: systemd-tmpfiles --create /etc/tmpfiles.d/huesync-run.conf"
 fi
 
@@ -194,7 +232,7 @@ elif [[ -d "$RUNDIR" ]]; then
     # /run/huesync directory exists but FIFO is absent.  setup-airplay.sh
     # provisions the FIFO via tmpfiles.d ('p' entry); if it is missing, the
     # old tmpfiles.d (directory only) is in place — re-run setup-airplay.sh.
-    _warn "$FIFO not present — re-run: bash scripts/setup-airplay.sh"
+    _warn "$FIFO not present — re-run: sudo ./scripts/install-huesync.sh"
     _info "  (The 'p' tmpfiles.d entry pre-creates the FIFO at boot so HueSync"
     _info "   can open it before iOS connects.)"
 else
@@ -255,18 +293,18 @@ if [[ -f "$TMPFILES" ]]; then
     if grep -qF "d /run/huesync" "$TMPFILES"; then
         _pass "  'd' entry: creates /run/huesync directory at boot"
     else
-        _warn "  directory entry missing — re-run: bash scripts/setup-airplay.sh"
+        _warn "  directory entry missing — re-run: sudo ./scripts/install-huesync.sh"
     fi
     if grep -qF "p /run/huesync/airplay.pcm" "$TMPFILES"; then
         _pass "  'p' entry: pre-creates AirPlay FIFO at boot"
     else
-        _warn "  FIFO 'p' entry missing — re-run: bash scripts/setup-airplay.sh"
+        _warn "  FIFO 'p' entry missing — re-run: sudo ./scripts/install-huesync.sh"
         _info "  (Without it, the FIFO only exists after an iOS client connects)"
     fi
 else
     _warn "No tmpfiles.d entry at $TMPFILES"
     _info "  /run/huesync and the AirPlay FIFO will not exist after reboot"
-    _info "  Run: bash scripts/setup-airplay.sh"
+    _info "  Run: sudo ./scripts/install-huesync.sh"
 fi
 
 # ---------------------------------------------------------------------------
