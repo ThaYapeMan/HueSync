@@ -38,7 +38,13 @@ Spectrum interval. Sequence/latest/queue commit under one lock.
 Sequence is monotonic delivery order. Audio intervals can arrive out of order:
 CAVA [1920,2400) may be available before Beat [0,480). The later Beat record remains
 [0,480); it is not discarded, shifted or unioned with a transport interval.
-`latest()` is the last delivered record's features, not the greatest event timestamp.
+`latest()` is the freshest live snapshot by `(sample_end, sample_start)` within
+an epoch. An exact interval tie prefers the later delivery, so same-interval Beat
+can update the live snapshot. A new epoch clears the old snapshot before publishing.
+The queue still includes every delivered record, even when a delayed record does
+not replace the live snapshot. Sequence/latest/queue are updated under the same
+lock, but latest's sequence can be less than the delivery counter. Live Effects
+therefore do not replay older intervals merely because they arrived late.
 
 Per dispatch, exact interval keys merge. Spectrum-bearing keys are delivered first,
 then other first-seen keys in processor/update order. Equal keys merge regardless of
@@ -62,7 +68,8 @@ record has empty bars but retains its real contribution and interval.
 - `drain_publications()` returns queued records and resets drop counters. Inspect
   the count before draining; sequence gaps also reveal missed delivery. This is
   best-effort bounded history, not a durable event log.
-- `pub_late_dropped_count` is retained for compatibility and remains zero.
+- The obsolete `pub_late_dropped_count` API has been removed. Late delivery is
+  valid, not a drop; only bounded-queue overflow has drop telemetry.
 - Polling `latest()` may miss intermediate events. Offline acceptance captures the
   lists returned from public feed/EOS calls; consumers must not infer new delivery
   from feature-value equality or assume CSV timestamps are globally sorted.
@@ -91,3 +98,8 @@ Manager deactivation can be retried. An incomplete stop raises an explicit error
 retains the session/source, and exposes `analysis_stopping=true`. A new activation
 first completes that teardown. Source close and release happen only after termination.
 Do not repeatedly call pipeline.start on a retiring analyser.
+
+Follower teardown is separately owned: stop the follower once, cancel and await its
+task (including connection cleanup), then clear its references. Analysis retirement
+retries do not repeat follower cleanup. Errors other than the expected task
+cancellation propagate; they are not converted into successful cleanup.

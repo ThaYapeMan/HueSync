@@ -60,20 +60,19 @@ def test_real_cava_and_beat_publish_every_detected_onset():
     cap._beat_detector.feed = observe
     rng = np.random.default_rng(33)
     records = []
-    visible_onsets = 0
+    latest_end = 0
     try:
         for i in range(400):
             pcm = (rng.normal(size=(480, 2)) * (0.5 if i % 30 < 2 else 0.002)).astype('float32')
             records.extend(cap.feed(AnalysisPcmFrame(
                 samples=pcm, sample_pos=i * 480, epoch_id='e', source_id='s', over_range=False,
             )))
-            visible_onsets += bool(cap.latest().onset)
+            assert cap._latest_pub.sample_end >= latest_end
+            latest_end = cap._latest_pub.sample_end
         published = [(r.sample_pos, r.sample_end) for r in records
                      if 'beat_detector' in r.effective_processor_ids and r.features.onset]
         assert detected, 'fixture must produce actual positive onsets'
         assert published == detected
-        assert visible_onsets > 0, 'polling consumers must also see Beat output'
-        assert cap.pub_late_dropped_count == 0
         for r in records:
             carry = r.carried_spectrum_interval
             assert (carry is None or carry == (r.sample_pos, r.sample_end)

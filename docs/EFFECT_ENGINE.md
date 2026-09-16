@@ -16,9 +16,12 @@ state operates at the rendering cadence, independently of native Spectrum execut
 cadence. Analysis parameter changes route to their owner; rendering changes do not
 implicitly rebuild the analysis architecture.
 
-`latest()` provides the latest delivered features. It can represent a delayed Beat
-interval with explicitly historical Spectrum bars. Polling is not guaranteed delivery
-of every event; record-aware consumers use sequence and the bounded queue. See
+`latest()` provides the freshest audio interval, ordered by `(sample_end, sample_start)`
+within an epoch; exact ties prefer later delivery. Delayed historical contributions
+remain in the delivery queue but do not rewind the live Effects snapshot. Polling
+is not guaranteed delivery of every event, including historical onsets; record-aware
+consumers use sequence and the bounded queue. Carried Spectrum bars in those records
+retain explicit provenance. See
 [audio-pipeline.md](audio-pipeline.md).
 
 Loudness/Chroma extension protocols are not production algorithms. Legacy HPSS/tap

@@ -405,7 +405,6 @@ def test_late_arriving_publication_retains_event_time():
             assert delayed.features.onset
             assert delayed.effective_processor_ids == ("beat_probe",)
             assert delayed.carried_spectrum_interval == ((i - 4) * 480, (i - 3) * 480)
-    assert cap.pub_late_dropped_count == 0
 
 
 def test_pending_state_is_bounded_across_many_feeds():
@@ -438,7 +437,6 @@ def test_eos_with_delayed_processor_preserves_interval():
     assert len(records) == 1
     assert (records[0].sample_pos, records[0].sample_end) == (0, 480)
     assert records[0].features.onset
-    assert cap.pub_late_dropped_count == 0
 
 
 # ---------------------------------------------------------------------------

@@ -73,8 +73,11 @@ interval, or from a completed interval ending no later than the contribution sta
 to fresh contributor IDs. Missing history yields empty bars, not future bars or
 lost Beat/Loudness/Chroma updates. No processor waits indefinitely for another.
 
-`latest()` is a polling snapshot, not guaranteed event delivery. Consumers needing
-all records use the bounded publication queue and check overflow. See
+`latest()` is the freshest audio-interval polling snapshot, not the last delivered
+historical record. Within an epoch compare `(sample_end, sample_start)`; exact ties
+prefer later delivery. A new epoch starts a fresh snapshot. Delayed records remain
+in the delivery queue without rewinding live Effects. Consumers needing all records
+use the bounded publication queue and check overflow. See
 [audio-pipeline.md](audio-pipeline.md) for EOS, bounds and sequence semantics.
 
 ## Retirement and physical source safety

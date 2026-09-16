@@ -22,6 +22,12 @@ bounded historical bars, and actual manager teardown while a reader remains bloc
 Only the CAVA native execution boundary is substituted. The test releases the reader,
 verifies exactly-once cleanup, then verifies a new worker processes decoded PCM.
 
+`tests/test_live_snapshot_cleanup.py` distinguishes delivery history from the freshest
+live snapshot, including equal-interval ties, epochs and delayed EOS. It also exercises
+repeated manager teardown with a blocked reader and an owned follower task, verifies
+cleanup errors propagate, and checks subsequent activation. Historical Beat records
+must survive in the queue; they need not replace a newer live Spectrum snapshot.
+
 ## Producer checks without deployment
 
 Use a fresh temporary checkout of pinned upstream

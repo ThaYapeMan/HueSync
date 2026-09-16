@@ -1067,9 +1067,8 @@ class CanonicalAnalysisPipeline:
         self._pending_onset: list[ProcessorUpdate] = []
         self._canonicalizer = AudioCanonicalizer()
         self._current_epoch_id: str | None = None
-        # Publication state — the authoritative record is _latest_pub.
-        # Both pub_seq and latest() derive from it under _pub_lock so that
-        # readers always observe a consistent snapshot.
+        # All record state commits under _pub_lock. Sequence/queue track delivery;
+        # _latest_pub tracks the freshest audio interval for live Effects.
         self._latest_pub: PublicationRecord | None = None
         self._pub_seq: int = 0
         self._pub_lock = threading.Lock()
@@ -1093,7 +1092,6 @@ class CanonicalAnalysisPipeline:
         # orders delivery; sample intervals may go backwards when results arrive
         # later. Missing/evicted history means empty bars, never future bars.
         self._bar_history: deque[tuple[int, int, list[float]]] = deque(maxlen=1000)
-        self._pub_late_dropped: int = 0  # compatibility: valid late updates are never dropped
         # Guards double-close on the processor list: stop() closes only if the
         # worker thread has terminated within the join timeout; if it hasn't,
         # the worker's finally block picks up the responsibility once it
@@ -1128,12 +1126,6 @@ class CanonicalAnalysisPipeline:
         """
         with self._pub_lock:
             return self._pub_dropped
-
-    @property
-    def pub_late_dropped_count(self) -> int:
-        """Compatibility counter: always zero; delayed updates are published."""
-        with self._pub_lock:
-            return self._pub_late_dropped
 
     @property
     def effective_spectrum_backend(self) -> str:
@@ -1228,7 +1220,19 @@ class CanonicalAnalysisPipeline:
                 effective_processor_ids=effective_processor_ids,
                 carried_spectrum_interval=carried_spectrum_interval,
             )
-            self._latest_pub = record
+            # Delayed contributions remain in delivery order in the queue, but
+            # cannot rewind the live Effects snapshot. Epoch changes are ordered
+            # by the single pipeline writer (epoch IDs themselves are opaque).
+            # For equal ends, prefer the later start; exact interval ties prefer
+            # this later delivery, including same-interval Beat contributions.
+            latest = self._latest_pub
+            if (
+                latest is None
+                or record.epoch != latest.epoch
+                or (record.sample_end, record.sample_pos)
+                >= (latest.sample_end, latest.sample_pos)
+            ):
+                self._latest_pub = record
             # Bounded queue: count drops rather than blocking DSP.
             maxlen = self._pub_queue.maxlen
             if maxlen is not None and len(self._pub_queue) == maxlen:
@@ -1550,7 +1554,6 @@ class CanonicalAnalysisPipeline:
             result = list(self._pub_queue)
             self._pub_queue.clear()
             self._pub_dropped = 0
-            self._pub_late_dropped = 0
             return result
 
     # ------------------------------------------------------------------
@@ -1667,6 +1670,7 @@ class CanonicalAnalysisPipeline:
         return not alive
 
     def latest(self) -> AudioFeatures | None:
+        """Freshest audio-interval snapshot; delivery history is in the queue."""
         with self._pub_lock:
             return self._latest_pub.features if self._latest_pub else None  # type: ignore[return-value]
 

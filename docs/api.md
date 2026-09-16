@@ -24,7 +24,9 @@ absent rather than represented by the terminated process.
 ## Stop and retirement
 
 A stop timeout closes the unused candidate, retains the old worker and refuses a
-second reader. Manager status includes `analysis_stopping`. Teardown cancels session
+second reader. Manager status includes `analysis_stopping`. Follower stop/task cleanup completes
+once and its references are cleared; repeated analysis-retirement retries do not
+repeat that cleanup. Unexpected cleanup errors propagate. Teardown cancels session
 work but retains the source/session until the owned analysis worker terminates.
 An unsuccessful teardown raises a retriable operational error; no new session starts.
 `POST /api/couplings/deactivate` reports this as HTTP 409 with the retirement detail.

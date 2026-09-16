@@ -758,8 +758,18 @@ class PlayerManager:
             session.unsync_task.cancel()
         if session.follower:
             session.follower.stop()
+            session.follower = None
         if session.follower_task:
-            session.follower_task.cancel()
+            task = session.follower_task
+            task.cancel()
+            try:
+                # Own completion of the follower's connection cleanup before
+                # a retry can cancel it again or start a replacement follower.
+                await task
+            except asyncio.CancelledError:
+                if asyncio.current_task().cancelling():
+                    raise  # do not swallow cancellation of teardown itself
+            session.follower_task = None
         if session.poller_task:
             session.poller_task.cancel()
         if session.task:
