@@ -905,6 +905,7 @@ class SqueezeliteShmStereoSource:
 
     def __init__(self) -> None:
         self._mm: mmap.mmap | None = None
+        self._path: Path | None = None
         self._prev_index: int = 0
         self._prev_running: bool = False
         self._prev_rate: int = 0
@@ -915,6 +916,15 @@ class SqueezeliteShmStereoSource:
         self._prev_generation: int = 0
         self._abs_write_pos_frames: int = 0  # in stereo frames
         self._prev_gap_seq: int = 0
+        # (st_dev, st_ino) at the time of mmap.  Used to detect SHM
+        # replacement (e.g. squeezelite recreated the segment with a fresh
+        # inode while our mmap kept pointing at the unlinked file).  See
+        # _detect_shm_replacement().
+        self._shm_dev_ino: tuple[int, int] | None = None
+        # ABI is considered unsupported once we see a v1-magic block whose
+        # abi_version is not equal to SHM_ABI_VERSION.  Subsequent reads
+        # short-circuit to StreamInvalidated so the caller can rebuild.
+        self._unsupported_abi: bool = False
 
     def open(
         self,
@@ -927,14 +937,17 @@ class SqueezeliteShmStereoSource:
 
         When ``require_v1`` is True (the default for the production canonical
         LMS PCM path), the SHM segment MUST expose the HueSync v1 extension
-        header at offset 80 (magic 0x48555345 'HUSE').  A stock squeezelite
-        exposes only the legacy v0 header, which cannot classify full-lap
-        aliasing or same-second restarts reliably — activation is rejected
-        with an actionable RuntimeError explaining how to rebuild squeezelite
-        with the producer patch.  Tests that need to exercise the v0
-        fall-through code path may pass ``require_v1=False`` explicitly.
+        header at offset 80 (magic 0x48555345 'HUSE') AND advertise the
+        exact ABI version this consumer supports (SHM_ABI_VERSION == 1).
+        A stock squeezelite exposes only the legacy v0 header, and a future
+        producer running a newer v2 layout would be silently misinterpreted
+        by this reader — activation is therefore rejected in either case
+        with an actionable RuntimeError explaining how to rebuild
+        squeezelite.  Tests that need to exercise the v0 fall-through code
+        path may pass ``require_v1=False`` explicitly.
         """
         path = _path if _path is not None else Path(f"/dev/shm/squeezelite-{mac}")
+        self._path = path
         fd = path.open("rb")
         try:
             # Try v1 size first; fall back to v0 if file is smaller.
@@ -942,6 +955,16 @@ class SqueezeliteShmStereoSource:
                 self._mm = mmap.mmap(fd.fileno(), _MMAP_SIZE_V1, access=mmap.ACCESS_READ)
             except (ValueError, OSError):
                 self._mm = mmap.mmap(fd.fileno(), _MMAP_SIZE, access=mmap.ACCESS_READ)
+            # Record the (st_dev, st_ino) tuple identifying this SHM segment
+            # so subsequent reads can detect that the producer replaced the
+            # segment (new inode, same path) while we still hold the old
+            # mmap.  Stat the open descriptor, not the path, so we observe
+            # the file the mmap actually refers to.
+            try:
+                st = os.fstat(fd.fileno())
+                self._shm_dev_ino = (st.st_dev, st.st_ino)
+            except OSError:
+                self._shm_dev_ino = None
         finally:
             fd.close()
         self._source_id = f"lms:{mac}"
@@ -959,10 +982,28 @@ class SqueezeliteShmStereoSource:
                 )
             self._abi_version = 0
         else:
-            self._abi_version = ext.abi_version
-            self._prev_generation = ext.generation
-            self._abs_write_pos_frames = ext.abs_write_pos
-            self._prev_gap_seq = ext.gap_seq
+            # Exact ABI version match.  A future producer running v2 has a
+            # different layout and cannot be interpreted safely — surface it
+            # as an actionable RuntimeError rather than a torn-read
+            # heuristic, matching the require_v1=False fallback branch which
+            # would otherwise happily downgrade to v0 semantics.
+            if ext.abi_version != SHM_ABI_VERSION:
+                if require_v1:
+                    self.close()
+                    raise RuntimeError(
+                        f"Squeezelite SHM at {path} advertises ABI version "
+                        f"{ext.abi_version}, but this consumer only supports "
+                        f"version {SHM_ABI_VERSION}.  Rebuild squeezelite "
+                        "against the HueSync v1 producer patch, or upgrade "
+                        "HueSync to a matching consumer."
+                    )
+                self._unsupported_abi = True
+                self._abi_version = 0
+            else:
+                self._abi_version = ext.abi_version
+                self._prev_generation = ext.generation
+                self._abs_write_pos_frames = ext.abs_write_pos
+                self._prev_gap_seq = ext.gap_seq
 
         _, buf_index, running, rate, updated = self._read_header()
         self._prev_index = buf_index
@@ -1005,10 +1046,18 @@ class SqueezeliteShmStereoSource:
         )
 
     def _read_ext_coherent(self) -> _ShmExtHeader | None:
-        """Seqlock retry loop matching SqueezeliteShmSource._read_ext_coherent."""
+        """Seqlock retry loop matching SqueezeliteShmSource._read_ext_coherent.
+
+        Reject snapshots whose abi_version does not match SHM_ABI_VERSION —
+        a future producer would corrupt continuity accounting silently.
+        """
         for _ in range(MAX_SEQLOCK_RETRIES):
             ext = self._read_ext_header()
             if ext is None or ext.magic != SHM_ABI_V1_MAGIC:
+                return None
+            if ext.abi_version != SHM_ABI_VERSION:
+                # A newer producer wrote a layout we do not understand.
+                # Surface the mismatch so the caller can invalidate.
                 return None
             if ext.write_seq % 2 == 1:
                 continue
@@ -1018,6 +1067,27 @@ class SqueezeliteShmStereoSource:
                 continue
             return ext
         return None
+
+    def _detect_shm_replacement(self) -> bool:
+        """Return True when the file at ``self._path`` no longer matches the
+        (dev, ino) tuple recorded at open() time.
+
+        squeezelite recreates its SHM segment with a fresh inode on restart
+        (the old file is unlinked and a new one created at the same path).
+        Our existing mmap keeps referring to the old, now-orphan inode until
+        we notice and remap.  A stat on the path each read cycle catches the
+        swap the first time it happens.
+        """
+        if self._path is None or self._shm_dev_ino is None:
+            return False
+        try:
+            st = os.stat(self._path)
+        except OSError:
+            # The file was unlinked before the producer recreated it.  Treat
+            # that as a replacement too: the mmap we hold no longer maps a
+            # live producer.
+            return True
+        return (st.st_dev, st.st_ino) != self._shm_dev_ino
 
     @property
     def sample_rate(self) -> int:
@@ -1127,11 +1197,22 @@ class SqueezeliteShmStereoSource:
         # Final seqlock verification: refuse the block if a writer ran while
         # we were copying.  A single retry loop already handled the metadata
         # coherence; this catches races against the PCM copy itself.
+        #
+        # The full snapshot spans (metadata read, PCM copy, metadata re-read)
+        # so verify EVERY authoritative field agrees:
+        #   - magic must still be present (segment not truncated)
+        #   - abi_version unchanged (producer not rewritten mid-copy)
+        #   - write_seq matches AND is even (no writer since the coherent read)
+        #   - generation matches (producer did not restart during the copy)
+        #   - abs_write_pos matches (no writer since the coherent read)
         ext_after = self._read_ext_header()
         if (
             ext_after is None
             or ext_after.magic != SHM_ABI_V1_MAGIC
+            or ext_after.abi_version != SHM_ABI_VERSION
+            or ext_after.write_seq % 2 == 1
             or ext_after.write_seq != ext.write_seq
+            or ext_after.generation != ext.generation
             or ext_after.abs_write_pos != ext.abs_write_pos
         ):
             return StreamInvalidated(cause=InvalidationCause.UNKNOWN, known_lost_samples=None)
@@ -1279,6 +1360,23 @@ class SqueezeliteShmStereoSource:
         is present (the production default) the read is coherent under a
         seqlock and stream continuity is authoritative rather than heuristic.
         """
+        # If open() detected an unsupported v1 ABI version and the caller
+        # elected to continue anyway (require_v1=False), every subsequent
+        # read must surface as an invalidation — there is no safe fallback.
+        if self._unsupported_abi:
+            return StreamInvalidated(
+                cause=InvalidationCause.UNKNOWN, known_lost_samples=None
+            )
+        # Detect SHM segment replacement: squeezelite's post-restart segment
+        # has a different inode at the same path.  Our mmap still maps the
+        # old (unlinked) file, so continue reading it would silently return
+        # stale data.  Invalidate the epoch and clear the (dev, ino) tuple
+        # so the caller can re-open at its own cadence.
+        if self._detect_shm_replacement():
+            self._shm_dev_ino = None
+            return StreamInvalidated(
+                cause=InvalidationCause.UNKNOWN, known_lost_samples=None
+            )
         if self._abi_version >= 1:
             return self._read_v1()
         return self._read_v0()

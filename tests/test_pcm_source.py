@@ -18,14 +18,20 @@ import pytest
 
 from huesync.pcm_source import (
     _BUF_OFFSET,
+    _BUF_OFFSET_V1,
     _HDR_FMT,
     _HDR_OFFSET,
     _HDR_SIZE,
     _MMAP_SIZE,
+    _MMAP_SIZE_V1,
+    _V2_EXT_FMT,
+    _V2_EXT_OFFSET,
+    _V2_EXT_SIZE,
     AIRPLAY_BYTES_PER_FRAME,
     AIRPLAY_CHANNELS,
     AIRPLAY_SAMPLE_RATE,
     AIRPLAY_SAMPLE_WIDTH,
+    SHM_ABI_V1_MAGIC,
     VIS_BUF_SIZE,
     WINDOW_SIZE,
     AirPlayPipeSource,
@@ -894,3 +900,320 @@ def test_shm_stereo_initial_rate_zero_no_spurious_invalidation(tmp_path: Path) -
     src.close()
 
     assert isinstance(result, DataResult)
+
+
+# ---------------------------------------------------------------------------
+# SqueezeliteShmStereoSource — v1 ABI tests (production path)
+# ---------------------------------------------------------------------------
+
+
+def _write_stereo_shm_v1(
+    tmp_path: Path,
+    *,
+    buf_index: int = 0,
+    running: bool = True,
+    rate: int = 44100,
+    updated: int = 0,
+    magic: int = SHM_ABI_V1_MAGIC,
+    abi_version: int = 1,
+    write_seq: int = 2,
+    generation: int = 0xC0FFEE,
+    abs_write_pos: int = 0,
+    gap_seq: int = 0,
+    pcm_at_120: bytes | None = None,
+    name: str = "shm-v1",
+) -> Path:
+    """Materialise a fully-formed v1 SHM segment on disk.
+
+    Layout mirrors what the patched squeezelite producer would write:
+      * legacy vis_t header at offset 0 (56 bytes lock + 24 bytes fields)
+      * v1 extension header at offset 80 (40 bytes)
+      * PCM ring buffer at offset 120 (VIS_BUF_SIZE * sizeof(int16_t) bytes)
+
+    Note that PCM starts at 120 on the v1 path — writing samples at 80 would
+    corrupt the extension header and cause every read to invalidate.
+    ``pcm_at_120`` accepts a raw byte string that occupies the leading part
+    of the ring buffer; leftover bytes stay zero.  ``write_seq`` defaults to
+    2 (even, stable) so the seqlock accepts the snapshot immediately.
+    """
+    p = tmp_path / name
+    data = bytearray(_MMAP_SIZE_V1)
+    # legacy vis_t header
+    struct.pack_into(
+        _HDR_FMT,
+        data,
+        _HDR_OFFSET,
+        VIS_BUF_SIZE,
+        buf_index,
+        int(running),
+        rate,
+        updated,
+    )
+    # v1 extension header
+    struct.pack_into(
+        _V2_EXT_FMT,
+        data,
+        _V2_EXT_OFFSET,
+        magic,
+        abi_version,
+        0,             # flags reserved
+        write_seq,
+        generation,
+        abs_write_pos,
+        gap_seq,
+    )
+    if pcm_at_120 is not None:
+        assert len(pcm_at_120) <= VIS_BUF_SIZE * 2, "pcm block would overflow the ring"
+        data[_BUF_OFFSET_V1 : _BUF_OFFSET_V1 + len(pcm_at_120)] = pcm_at_120
+    p.write_bytes(bytes(data))
+    return p
+
+
+def _mutate_stereo_shm_v1(
+    path: Path,
+    **fields: object,
+) -> None:
+    """Overwrite one or more header fields on an existing v1 SHM file.
+
+    Accepts the same keyword names as ``_write_stereo_shm_v1`` (limited to
+    fields the tests actually mutate).  PCM bytes are left untouched.
+    """
+    data = bytearray(path.read_bytes())
+    # legacy header fields
+    buf_size = VIS_BUF_SIZE
+    _, cur_buf_index, cur_running_byte, cur_rate, cur_updated = struct.unpack(
+        _HDR_FMT, bytes(data[_HDR_OFFSET : _HDR_OFFSET + _HDR_SIZE])
+    )
+    buf_index = int(fields.get("buf_index", cur_buf_index))
+    running = fields.get("running", None)
+    running_byte = int(running) if running is not None else cur_running_byte
+    rate = int(fields.get("rate", cur_rate))
+    updated = int(fields.get("updated", cur_updated))
+    struct.pack_into(
+        _HDR_FMT,
+        data,
+        _HDR_OFFSET,
+        buf_size,
+        buf_index,
+        running_byte,
+        rate,
+        updated,
+    )
+    # v1 extension fields
+    cur_magic, cur_abi, _flags, cur_seq, cur_gen, cur_abs, cur_gap = struct.unpack(
+        _V2_EXT_FMT, bytes(data[_V2_EXT_OFFSET : _V2_EXT_OFFSET + _V2_EXT_SIZE])
+    )
+    magic = int(fields.get("magic", cur_magic))
+    abi_version = int(fields.get("abi_version", cur_abi))
+    write_seq = int(fields.get("write_seq", cur_seq))
+    generation = int(fields.get("generation", cur_gen))
+    abs_write_pos = int(fields.get("abs_write_pos", cur_abs))
+    gap_seq = int(fields.get("gap_seq", cur_gap))
+    struct.pack_into(
+        _V2_EXT_FMT,
+        data,
+        _V2_EXT_OFFSET,
+        magic,
+        abi_version,
+        0,
+        write_seq,
+        generation,
+        abs_write_pos,
+        gap_seq,
+    )
+    if "pcm_at_120" in fields:
+        pcm = fields["pcm_at_120"]
+        assert isinstance(pcm, (bytes, bytearray))
+        assert len(pcm) <= VIS_BUF_SIZE * 2
+        data[_BUF_OFFSET_V1 : _BUF_OFFSET_V1 + len(pcm)] = pcm
+    path.write_bytes(bytes(data))
+
+
+def test_stereo_v1_basic_read(tmp_path: Path) -> None:
+    """A valid v1 SHM segment with PCM at offset 120 reads back non-zero stereo."""
+    # 4 stereo frames = 8 int16 values.  All non-zero so the finite check
+    # and downstream shape verification stay meaningful.
+    frames = [1000, -1000, 2000, -2000, 3000, -3000, 4000, -4000]
+    pcm = struct.pack(f"<{len(frames)}h", *frames)
+    p = _write_stereo_shm_v1(
+        tmp_path,
+        buf_index=len(frames),
+        abs_write_pos=len(frames) // 2,
+        pcm_at_120=pcm,
+    )
+    src = SqueezeliteShmStereoSource()
+    src.open("x", _path=p, require_v1=True)
+    # Rewind the consumer's view so the fresh producer bytes count as new.
+    src._prev_index = 0
+    src._abs_write_pos_frames = 0
+    result = src.read()
+    src.close()
+
+    assert isinstance(result, DataResult)
+    assert result.frame.samples.shape == (4, 2)
+    assert result.frame.channels == 2
+    assert result.frame.sample_rate == 44100
+    assert np.any(np.abs(result.frame.samples) > 0.0)
+
+
+def test_stereo_pcm_at_offset_120(tmp_path: Path) -> None:
+    """v1 reader must consume PCM from offset 120, not the extension at 80."""
+    # Fill positions 80..119 (the extension) with a distinctive non-zero
+    # byte AFTER writing the header, then place real PCM starting at 120.
+    # If the reader still copied from 80 it would see the sentinel and the
+    # decoded samples would not match the payload we placed at 120.
+    real_frames = [500, -500, 600, -600]
+    pcm = struct.pack("<4h", *real_frames)
+    p = _write_stereo_shm_v1(
+        tmp_path,
+        buf_index=len(real_frames),
+        abs_write_pos=len(real_frames) // 2,
+        pcm_at_120=pcm,
+    )
+    # Overwrite the 40 bytes 80..119 with 0xAA in a way that keeps the
+    # extension header valid: we cannot corrupt the header, so instead we
+    # verify by comparing the read samples to what a decoder acting on
+    # offset 120 would produce.  A read that used offset 80 would have to
+    # reinterpret the header bytes as PCM and would produce a very
+    # different waveform.
+    src = SqueezeliteShmStereoSource()
+    src.open("x", _path=p, require_v1=True)
+    src._prev_index = 0
+    src._abs_write_pos_frames = 0
+    result = src.read()
+    src.close()
+
+    assert isinstance(result, DataResult)
+    expected_l = np.array(real_frames[0::2], dtype=np.float32) / 32768.0
+    expected_r = np.array(real_frames[1::2], dtype=np.float32) / 32768.0
+    np.testing.assert_allclose(result.frame.samples[:, 0], expected_l, rtol=1e-6)
+    np.testing.assert_allclose(result.frame.samples[:, 1], expected_r, rtol=1e-6)
+
+
+def test_stereo_v0_rejected(tmp_path: Path) -> None:
+    """A segment without the v1 magic must be rejected under require_v1=True."""
+    # magic=0 → no v1 header present.
+    p = _write_stereo_shm_v1(
+        tmp_path, magic=0, abi_version=0, generation=0, write_seq=0
+    )
+    src = SqueezeliteShmStereoSource()
+    with pytest.raises(RuntimeError, match="v1 ABI"):
+        src.open("x", _path=p, require_v1=True)
+
+
+def test_stereo_wrong_abi_version_rejected(tmp_path: Path) -> None:
+    """A v1-magic segment advertising abi_version != 1 is rejected."""
+    p = _write_stereo_shm_v1(tmp_path, abi_version=2)
+    src = SqueezeliteShmStereoSource()
+    with pytest.raises(RuntimeError, match="ABI version"):
+        src.open("x", _path=p, require_v1=True)
+
+
+def test_stereo_full_lap_detected(tmp_path: Path) -> None:
+    """abs_write_pos advancing by exactly one ring worth invalidates the epoch."""
+    frame_capacity = VIS_BUF_SIZE // 2  # ring capacity in stereo frames
+    p = _write_stereo_shm_v1(tmp_path, abs_write_pos=100, buf_index=0)
+    src = SqueezeliteShmStereoSource()
+    src.open("x", _path=p, require_v1=True)
+    _mutate_stereo_shm_v1(p, abs_write_pos=100 + frame_capacity, buf_index=0)
+    result = src.read()
+    src.close()
+
+    assert isinstance(result, StreamInvalidated)
+
+
+def test_stereo_generation_change_detected(tmp_path: Path) -> None:
+    """A generation change between polls invalidates the epoch (producer restart)."""
+    p = _write_stereo_shm_v1(tmp_path, generation=1, abs_write_pos=10)
+    src = SqueezeliteShmStereoSource()
+    src.open("x", _path=p, require_v1=True)
+    _mutate_stereo_shm_v1(p, generation=2, abs_write_pos=0, buf_index=0)
+    result = src.read()
+    src.close()
+
+    assert isinstance(result, StreamInvalidated)
+
+
+def test_stereo_gap_sequence_invalidates_once(tmp_path: Path) -> None:
+    """gap_seq incrementing once invalidates once; subsequent reads with the same value do not."""
+    # Provide enough advance in abs_write_pos so the ADVANCE branch would
+    # otherwise fire — the gap check should preempt that.
+    frames = [1, 2, 3, 4]
+    pcm = struct.pack("<4h", *frames)
+    p = _write_stereo_shm_v1(
+        tmp_path,
+        buf_index=4,
+        abs_write_pos=2,
+        gap_seq=0,
+        pcm_at_120=pcm,
+    )
+    src = SqueezeliteShmStereoSource()
+    src.open("x", _path=p, require_v1=True)
+    src._prev_index = 0
+    src._abs_write_pos_frames = 0
+    # gap_seq bumps to 1.
+    _mutate_stereo_shm_v1(p, gap_seq=1, abs_write_pos=4, buf_index=8)
+    first = src.read()
+    assert isinstance(first, StreamInvalidated)
+
+    # Next poll with the same gap_seq must not invalidate again.  We add
+    # fresh PCM so the ADVANCE branch has data to return.
+    more_frames = [10, 20, 30, 40]
+    _mutate_stereo_shm_v1(
+        p,
+        gap_seq=1,
+        abs_write_pos=6,
+        buf_index=12,
+        pcm_at_120=struct.pack("<8h", *frames, *more_frames),
+    )
+    second = src.read()
+    src.close()
+
+    assert not isinstance(second, StreamInvalidated), (
+        "Second read with unchanged gap_seq must not invalidate."
+    )
+
+
+def test_stereo_counter_regression_invalidates(tmp_path: Path) -> None:
+    """abs_write_pos moving backwards signals a producer restart."""
+    p = _write_stereo_shm_v1(tmp_path, abs_write_pos=5000, buf_index=0)
+    src = SqueezeliteShmStereoSource()
+    src.open("x", _path=p, require_v1=True)
+    _mutate_stereo_shm_v1(p, abs_write_pos=10, buf_index=20)
+    result = src.read()
+    src.close()
+
+    assert isinstance(result, StreamInvalidated)
+
+
+def test_stereo_torn_read_rejected(tmp_path: Path) -> None:
+    """An odd write_seq (writer never finishes) must not yield DataResult."""
+    p = _write_stereo_shm_v1(tmp_path, write_seq=1, abs_write_pos=10, buf_index=20)
+    src = SqueezeliteShmStereoSource()
+    # A persistently odd seqlock on open means _read_ext_header sees an
+    # in-progress write from the first byte, so the source treats it as v0.
+    # Opening with require_v1=False bypasses the strict activation check.
+    src.open("x", _path=p, require_v1=False)
+    result = src.read()
+    src.close()
+
+    # Either invalidated (v1 path bailed on torn read) or a v0 fall-through
+    # response (TemporarilyNoData / StreamInvalidated) is acceptable, but a
+    # DataResult with the corrupt snapshot is not.
+    assert not isinstance(result, DataResult)
+
+
+def test_stereo_shm_replaced_detected(tmp_path: Path) -> None:
+    """A fresh file at the same path (different inode) invalidates the epoch."""
+    p = _write_stereo_shm_v1(tmp_path, abs_write_pos=10, buf_index=20)
+    src = SqueezeliteShmStereoSource()
+    src.open("x", _path=p, require_v1=True)
+    # Unlink and recreate: the mmap held by the source keeps pointing at
+    # the unlinked inode, while a stat on the path now returns a fresh
+    # (dev, ino) tuple.
+    os.unlink(p)
+    _write_stereo_shm_v1(tmp_path, abs_write_pos=0, buf_index=0)
+    result = src.read()
+    src.close()
+
+    assert isinstance(result, StreamInvalidated)

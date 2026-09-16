@@ -33,6 +33,10 @@
 #include <stdint.h>
 #include <stddef.h>
 
+/* Magic value stored little-endian; bytes in memory are 0x45, 0x53, 0x55, 0x48
+ * ('E', 'S', 'U', 'H').  Interpreted as a 32-bit little-endian integer this
+ * yields 0x48555345, whose ASCII spelling in most-significant-byte-first order
+ * is 'HUSE'.  Both forms refer to the same constant. */
 #define VIS_SHM_V1_MAGIC     UINT32_C(0x48555345)  /* 'HUSE' */
 #define VIS_SHM_V1_VERSION   UINT16_C(1)
 
@@ -60,3 +64,25 @@ _Static_assert(offsetof(vis_shm_v1_ext_t, write_seq)     ==  8, "write_seq offse
 _Static_assert(offsetof(vis_shm_v1_ext_t, generation)    == 12, "generation offset");
 _Static_assert(offsetof(vis_shm_v1_ext_t, abs_write_pos) == 20, "abs_write_pos offset");
 _Static_assert(offsetof(vis_shm_v1_ext_t, gap_seq)       == 28, "gap_seq offset");
+
+/*
+ * Producer helpers — implemented in output_vis_v1.c.  These live inside
+ * squeezelite once the patched output_vis.c is built.
+ *
+ * vis_shm_v1_init() returns 0 on success and -1 on failure (kernel RNG and
+ * /dev/urandom both unavailable).  On failure the caller MUST abort SHM setup;
+ * silently falling back to a PID/time-based generation defeats restart
+ * detection on the consumer side.
+ */
+int  vis_shm_v1_init(vis_shm_v1_ext_t *ext);
+void vis_shm_v1_begin_write(vis_shm_v1_ext_t *ext);
+void vis_shm_v1_end_write(vis_shm_v1_ext_t *ext, uint64_t n_stereo_frames_written);
+void vis_shm_v1_record_gap(vis_shm_v1_ext_t *ext);
+void vis_shm_v1_write_samples(
+    vis_shm_v1_ext_t *ext,
+    int16_t         *ring_buffer,
+    size_t           ring_capacity,
+    uint32_t        *ring_write_pos,
+    const int16_t   *src,
+    uint64_t         n_stereo_frames
+);

@@ -76,7 +76,7 @@ PYCHECK
                 _warn "ldd output contains no fftw entry — unexpected (library may be statically linked)"
             elif echo "$_FFTW_LINE" | grep -q "not found"; then
                 _fail "libfftw3.so not resolved: $_FFTW_LINE"
-                _info "  Fix: apt install libfftw3-3 && bash scripts/update.sh"
+                _info "  Fix: apt install libfftw3-dev && bash scripts/update.sh"
             else
                 _pass "FFTW resolves: $(echo "$_FFTW_LINE" | sed 's/^[[:space:]]*//')"
             fi

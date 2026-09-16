@@ -25,6 +25,8 @@
 
 #include "vis_shm_v1.h"
 
+#include <errno.h>
+#include <fcntl.h>
 #include <stdatomic.h>
 #include <string.h>
 #include <sys/random.h>
@@ -39,27 +41,90 @@
  */
 static uint64_t vis_shm_v1_pending_gaps = 0;
 
-/* Call once during squeezelite startup, after the SHM segment is mapped. */
-void vis_shm_v1_init(vis_shm_v1_ext_t *ext) {
-    uint64_t gen = 0;
-    ssize_t got = getrandom(&gen, sizeof(gen), 0);
-    if (got != (ssize_t)sizeof(gen)) {
-        /* fallback: mix PID + wall clock + a fixed sentinel */
-        gen = (uint64_t)getpid()
-            ^ (uint64_t)time(NULL)
-            ^ UINT64_C(0xDEADBEEFCAFEBABE);
+/*
+ * Read a uint64 of high-quality randomness for the generation field.
+ *
+ * Primary source: getrandom(2).  When getrandom() is unavailable (kernel too
+ * old, or blocked) fall back to reading /dev/urandom directly.  If both
+ * sources fail we return non-zero and the caller MUST abort SHM setup — a
+ * PID/time-based fallback can collide across process restarts and would
+ * silently defeat the whole reason generation exists.
+ */
+static int vis_shm_v1_read_generation(uint64_t *out) {
+    ssize_t got = getrandom(out, sizeof(*out), 0);
+    if (got == (ssize_t)sizeof(*out)) {
+        return 0;
     }
-    memset(ext, 0, sizeof(*ext));
-    ext->magic       = VIS_SHM_V1_MAGIC;
-    ext->abi_version = VIS_SHM_V1_VERSION;
-    ext->flags       = 0;
-    ext->write_seq   = 0;  /* even = stable */
-    ext->generation  = gen;
+
+    int fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        return -1;
+    }
+    size_t remaining = sizeof(*out);
+    unsigned char *buf = (unsigned char *)out;
+    while (remaining > 0) {
+        ssize_t n = read(fd, buf, remaining);
+        if (n <= 0) {
+            if (n < 0 && errno == EINTR) {
+                continue;
+            }
+            close(fd);
+            return -1;
+        }
+        buf += n;
+        remaining -= (size_t)n;
+    }
+    close(fd);
+    return 0;
+}
+
+/*
+ * Call once during squeezelite startup, after the SHM segment is mapped.
+ *
+ * Returns 0 on success, -1 on failure.  On failure the SHM segment is left
+ * with write_seq odd (the initialization-in-progress marker), so any consumer
+ * that races the failed setup will observe a torn read and reject the block
+ * rather than adopt an uninitialised generation.  The caller MUST treat -1
+ * as fatal and abort SHM setup — falling back to a PID/time value would
+ * defeat the point of generation.
+ */
+int vis_shm_v1_init(vis_shm_v1_ext_t *ext) {
+    /*
+     * Atomic initialisation protocol: mark write_seq as odd BEFORE touching
+     * any other field, so any reader that races startup observes a torn
+     * snapshot and rejects it.  Only after all fields are populated and a
+     * full seq-cst fence has been issued do we flip write_seq back to even
+     * ('ready').  Skipping this step lets a reader see valid magic and an
+     * even (stable) seqlock counter while abs_write_pos / generation are
+     * still zero from mmap.
+     */
+    ext->write_seq = 1;  /* odd = initialisation in progress */
+    atomic_thread_fence(memory_order_seq_cst);
+
+    uint64_t gen = 0;
+    if (vis_shm_v1_read_generation(&gen) != 0) {
+        /* Leave write_seq odd so no reader accepts this segment. */
+        return -1;
+    }
+
+    /*
+     * Populate the remaining fields.  Cannot use memset(ext, 0, sizeof(*ext))
+     * here because that would clobber the odd write_seq marker set above.
+     */
+    ext->magic         = VIS_SHM_V1_MAGIC;
+    ext->abi_version   = VIS_SHM_V1_VERSION;
+    ext->flags         = 0;
+    ext->generation    = gen;
     ext->abs_write_pos = 0;
     ext->gap_seq       = 0;
+    memset(ext->_pad, 0, sizeof(ext->_pad));
     vis_shm_v1_pending_gaps = 0;
-    /* Ensure all writes are visible before the consumer sees the magic. */
+
+    /* Ensure all writes are visible before we flip write_seq back to even. */
     atomic_thread_fence(memory_order_seq_cst);
+    ext->write_seq = 2;  /* even = ready; distinct from any legacy zero */
+    atomic_thread_fence(memory_order_seq_cst);
+    return 0;
 }
 
 /*

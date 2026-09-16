@@ -264,3 +264,136 @@ def test_sync_engine_replace_analyser():
     old_analyser.stop.assert_called_once()
     new_analyser.start.assert_called_once()
     assert engine._analyser is new_analyser
+
+
+# ---------------------------------------------------------------------------
+# Transactional replace_analyser (items 11-14, 16)
+# ---------------------------------------------------------------------------
+
+
+def _make_engine_with_old(old_analyser):
+    """Construct a minimal SyncEngine with the given mock old analyser."""
+    profile = Profile(
+        id="p1", name="test", effect_type="spectrum_rgb", bars=10,
+        bars_source="pcm_pipeline", spectrum_backend="v2",
+    )
+    with patch("huesync.sync_engine.CavaPipeline"):
+        return SyncEngine(fifo_path=None, profile=profile, analyser=old_analyser)
+
+
+def test_replace_analyser_does_not_commit_before_start_succeeds():
+    """The candidate is NEVER assigned to self._analyser before start() returns."""
+    old = MagicMock()
+    old.stop.return_value = True
+    old.latest.return_value = None
+    engine = _make_engine_with_old(old)
+
+    candidate = MagicMock()
+    observed_analyser: list[object] = []
+
+    def track_start():
+        # At the moment start() is called, engine._analyser must still be old.
+        observed_analyser.append(engine._analyser)
+
+    candidate.start.side_effect = track_start
+    engine.replace_analyser(candidate)
+
+    assert observed_analyser == [old], (
+        "self._analyser must remain the OLD analyser until candidate.start() "
+        f"returns; observed {observed_analyser}"
+    )
+    assert engine._analyser is candidate
+
+
+def test_replace_analyser_timeout_aborts_and_does_not_touch_candidate():
+    """If old.stop() returns False (timeout), replacement aborts without
+    committing the candidate; the caller must close it."""
+    old = MagicMock()
+    old.stop.return_value = False  # simulate zombie worker
+    old.latest.return_value = None
+    engine = _make_engine_with_old(old)
+
+    candidate = MagicMock()
+
+    with pytest.raises(RuntimeError, match="did not stop"):
+        engine.replace_analyser(candidate)
+
+    # Candidate must not have been started or committed.
+    candidate.start.assert_not_called()
+    assert engine._analyser is old
+
+
+def test_replace_analyser_failed_start_closes_candidate_and_restores_old():
+    """If candidate.start() raises, the candidate is stopped exactly once and
+    the old analyser is rebuilt via the caller-supplied factory and started."""
+    old = MagicMock()
+    old.stop.return_value = True
+    old.latest.return_value = None
+    engine = _make_engine_with_old(old)
+
+    candidate = MagicMock()
+    candidate.start.side_effect = RuntimeError("engine unavailable")
+
+    rebuilt = MagicMock()
+    rebuilt.latest.return_value = None
+    rebuild_calls: list[int] = []
+
+    def rebuild_old():
+        rebuild_calls.append(1)
+        return rebuilt
+
+    with pytest.raises(RuntimeError, match="Candidate.*failed to start"):
+        engine.replace_analyser(candidate, rebuild_old=rebuild_old)
+
+    # Candidate.stop() called exactly once as part of rollback.
+    candidate.stop.assert_called_once()
+    # Rebuild called exactly once.
+    assert rebuild_calls == [1]
+    # Rebuilt old was started and installed.
+    rebuilt.start.assert_called_once()
+    assert engine._analyser is rebuilt
+
+
+def test_replace_analyser_failed_start_without_rebuild_leaves_old_reference():
+    """If no rebuild_old is supplied, a failed candidate leaves self._analyser
+    pointing at the stopped old analyser so teardown remains consistent."""
+    old = MagicMock()
+    old.stop.return_value = True
+    old.latest.return_value = None
+    engine = _make_engine_with_old(old)
+
+    candidate = MagicMock()
+    candidate.start.side_effect = RuntimeError("boom")
+
+    with pytest.raises(RuntimeError, match="Candidate.*failed to start"):
+        engine.replace_analyser(candidate)
+
+    # Candidate.stop() called exactly once.
+    candidate.stop.assert_called_once()
+    # No rebuild attempted.
+    assert engine._analyser is old
+    # Candidate was never committed.
+    assert engine._analyser is not candidate
+
+
+def test_replace_analyser_rebuild_failure_still_raises():
+    """If both candidate.start() AND rebuild_old().start() fail, replace
+    still raises the original candidate error so the caller can react."""
+    old = MagicMock()
+    old.stop.return_value = True
+    old.latest.return_value = None
+    engine = _make_engine_with_old(old)
+
+    candidate = MagicMock()
+    candidate.start.side_effect = RuntimeError("candidate boom")
+
+    def rebuild_old():
+        rebuilt = MagicMock()
+        rebuilt.start.side_effect = RuntimeError("rebuild boom")
+        return rebuilt
+
+    with pytest.raises(RuntimeError, match="Candidate.*failed to start"):
+        engine.replace_analyser(candidate, rebuild_old=rebuild_old)
+
+    # Candidate cleanup still ran.
+    candidate.stop.assert_called_once()

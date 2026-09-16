@@ -471,16 +471,109 @@ class SpectrumProcessor:
     This is the canonical spectrum composition point: adding a new SpectrumEngine
     (engine #3) only requires updating the ENGINES registry; SpectrumProcessor
     and CanonicalAnalysisPipeline require no changes.
+
+    Sample-position ownership (items 25-28)
+    ---------------------------------------
+    The two engine families use different position sources:
+
+    - V2SpectrumEngine consumes the shared STFT ``mag_frames`` at 480-sample
+      hop.  Its output positions are the canonical ``hop_sample_starts`` from
+      CanonicalAnalysisPipeline (chunk-independent, tied to the shared STFT
+      epoch counter).
+    - CavaCoreSpectrumEngine has its own internal carry buffer that is
+      completely independent of the shared STFT.  Position tracking therefore
+      cannot use ``hop_sample_starts`` — we maintain a private
+      ``_cava_carry_sample_start`` and ``_cava_carry_len`` inside the
+      processor.  Each 480-frame execution block is timestamped at
+      ``carry_start + block_offset_in_combined_buffer``.  The shared STFT
+      warming up (or being reset) cannot corrupt CAVA positions because
+      SpectrumProcessor holds these fields itself.
     """
+
+    _CAVA_BLOCK: int = 480  # matches CavaCoreSpectrumEngine._BLOCK_SIZE
 
     def __init__(self, engine: SpectrumEngine) -> None:
         self._engine = engine
+        self._is_cava = getattr(engine, "engine_id", None) == "cavacore"
+        # CAVA-only bookkeeping. carry_sample_start is the canonical sample
+        # position at the start of the first frame that is currently sitting
+        # in the CavaCoreBackend's carry buffer.  carry_len is the number of
+        # canonical frames currently carried.  Together they let us compute
+        # the true canonical start position for every 480-frame execution
+        # block, regardless of chunking.
+        self._cava_carry_sample_start: int = 0
+        self._cava_carry_len: int = 0
+        # Track total samples fed since the last reset — used for
+        # sanity/warning checks.  Not required by the position math.
+        self._cava_total_fed: int = 0
 
     @property
     def processor_id(self) -> str:
         return self._engine.engine_id
 
-    def feed(self, frame: SharedAnalysisFrame) -> list[ProcessorUpdate]:
+    def _feed_cava(self, frame: SharedAnalysisFrame) -> list[ProcessorUpdate]:
+        """CAVA-specific position tracking (item 25-28 correction).
+
+        The CavaCoreBackend maintains its own carry buffer of "not-yet-full"
+        samples.  We shadow that state with (carry_start, carry_len) so we
+        know the canonical sample position of each 480-frame execution block
+        without depending on the shared STFT.
+        """
+        shared = SharedAnalysis(
+            mag_frames=frame.mag_frames,
+            pcm=frame.pcm,
+            sample_pos=frame.sample_start,
+            n_samples=len(frame.pcm),
+        )
+        n_new = len(frame.pcm)
+        # If there was no carry, the next-block-start is at the current chunk
+        # start.  Otherwise carry_sample_start already points at the position
+        # of the oldest frame in the carry buffer.
+        if self._cava_carry_len == 0:
+            self._cava_carry_sample_start = frame.sample_start
+
+        updates = self._engine.feed(frame.pcm, shared)
+
+        # After execute(), (carry_len + n_new) samples spanned the combined
+        # buffer.  Each returned SpectrumUpdate corresponds to one 480-frame
+        # execution block consumed from that combined buffer, in order.
+        n_blocks_out = len(updates)
+        combined_len = self._cava_carry_len + n_new
+        # New carry: whatever remains after n_blocks_out * 480 samples were
+        # consumed from the combined buffer.
+        new_carry_len = combined_len - n_blocks_out * self._CAVA_BLOCK
+        # Guard against unexpected engine behaviour rather than crashing.
+        if new_carry_len < 0:
+            log.warning(
+                "SpectrumProcessor: unexpected CAVA carry length %d "
+                "(combined=%d, blocks=%d) — clamping to 0",
+                new_carry_len, combined_len, n_blocks_out,
+            )
+            new_carry_len = 0
+
+        result: list[ProcessorUpdate] = []
+        for i, _u in enumerate(updates):
+            exec_start = self._cava_carry_sample_start + i * self._CAVA_BLOCK
+            exec_end = exec_start + self._CAVA_BLOCK
+            result.append(ProcessorUpdate(
+                processor_id=self._engine.engine_id,
+                sample_start=exec_start,
+                sample_end=exec_end,
+                bars=_u.bars,
+            ))
+
+        # Advance carry_sample_start to point at the first frame that stays
+        # in the CAVA carry buffer.  For (carry_len + n_new) = 481, 1 block:
+        # new_carry_len = 1, new carry_start = old carry_start + 480.
+        self._cava_carry_sample_start = (
+            self._cava_carry_sample_start + n_blocks_out * self._CAVA_BLOCK
+        )
+        self._cava_carry_len = new_carry_len
+        self._cava_total_fed += n_new
+        return result
+
+    def _feed_v2(self, frame: SharedAnalysisFrame) -> list[ProcessorUpdate]:
+        """V2 path: uses shared STFT ``hop_sample_starts`` (chunk-independent)."""
         shared = SharedAnalysis(
             mag_frames=frame.mag_frames,
             pcm=frame.pcm,
@@ -488,13 +581,6 @@ class SpectrumProcessor:
             n_samples=len(frame.pcm),
         )
         updates = self._engine.feed(frame.pcm, shared)
-        # Chunk-independent positions: prefer the canonical hop_sample_starts
-        # supplied by CanonicalAnalysisPipeline over the engine's own naive
-        # sample_pos.  Engines like V2 compute their sample_pos from the local
-        # frame.sample_start + i * hop, which is only correct if the STFT
-        # buffer was empty at the start of the frame — false in practice
-        # because push() batches samples across calls.  hop_sample_starts is
-        # computed against the epoch cursor and is authoritative.
         hop_starts = frame.hop_sample_starts
         result: list[ProcessorUpdate] = []
         for i, u in enumerate(updates):
@@ -510,8 +596,35 @@ class SpectrumProcessor:
             ))
         return result
 
+    def feed(self, frame: SharedAnalysisFrame) -> list[ProcessorUpdate]:
+        if self._is_cava:
+            return self._feed_cava(frame)
+        return self._feed_v2(frame)
+
     def flush(self) -> list[ProcessorUpdate]:
         updates = self._engine.flush()
+        result: list[ProcessorUpdate] = []
+        if self._is_cava:
+            # CAVA flush executes at most one partially-filled block by
+            # zero-padding.  sample_start is the canonical position at the
+            # start of the (real, non-padded) carry; sample_end is the last
+            # real source frame — NOT the padded 480-frame end.
+            for u in updates:
+                start = self._cava_carry_sample_start
+                # If carry is empty (nothing to flush), still trust the
+                # engine's sample_pos as a fallback.
+                if self._cava_carry_len == 0:
+                    start = u.sample_pos
+                end = start + self._cava_carry_len
+                if end <= start:
+                    end = start
+                result.append(ProcessorUpdate(
+                    processor_id=self._engine.engine_id,
+                    sample_start=start,
+                    sample_end=end,
+                    bars=u.bars,
+                ))
+            return result
         return [
             ProcessorUpdate(
                 processor_id=self._engine.engine_id,
@@ -524,6 +637,9 @@ class SpectrumProcessor:
 
     def reset(self) -> None:
         self._engine.reset()
+        self._cava_carry_sample_start = 0
+        self._cava_carry_len = 0
+        self._cava_total_fed = 0
 
     def close(self) -> None:
         self._engine.close()

@@ -429,7 +429,12 @@ def analyse_pcm(
     violations: list[str] = []
     source_pos: int = 0  # source-rate stereo frame counter
     _last_rec: list[object] = []  # capture last PublicationRecord for metadata
-    _max_sample_end: list[int] = [0]  # track authoritative source end for duration metadata
+    _max_sample_end: list[int] = [0]  # publication extent (max PublicationRecord.sample_end)
+    # Item 29: source-authoritative canonical frame counter — total canonical
+    # frames handed to the analyser.  Independent of engine warmup and
+    # publication cadence.  This is the authoritative source_duration_s
+    # numerator; the max_sample_end reflects only what was published.
+    _total_canonical_frames: list[int] = [0]
 
     def _capture_row(features: object, sample_pos: int, rec: object | None = None) -> None:
         """Record one AudioFeatures snapshot as a CSV row."""
@@ -507,6 +512,9 @@ def analyse_pcm(
 
     def _feed_canonical(cresult: CanonicalData) -> None:
         """Re-chunk canonical batch into HOP blocks and capture each snapshot."""
+        # Item 29: count every canonical frame handed to the analyser BEFORE
+        # rechunking — this is the source-authoritative duration numerator.
+        _total_canonical_frames[0] += int(len(cresult.frame.samples))
         for hop_frame in rechunker.push(cresult.frame):
             _push_and_capture(hop_frame)
 
@@ -554,27 +562,69 @@ def analyse_pcm(
         list(getattr(last_rec, "effective_processor_ids", []))
         if last_rec else []
     )
-    # SharedAnalysisFrame is fixed to a 2048-sample Hamming window (StereoMagStft).
-    # The underlying spectrum engine may use a different internal FFT (cavacore),
-    # so report both explicitly instead of conflating them.
     engine_obj = getattr(pipeline, "_engine", None) or engine
-    spec_engine_info: dict[str, Any] = {
-        "id": pipeline.effective_spectrum_backend,
-    }
-    if hasattr(engine_obj, "window_size"):
-        spec_engine_info["fft"] = int(engine_obj.window_size)
+    effective_id = pipeline.effective_spectrum_backend
+
+    # Item 31: report engine-specific spectrum metadata separately from
+    # the shared StereoMagStft parameters.  The shared STFT (2048 Hamming)
+    # feeds V2 and BeatDetector; CAVA's internal FFT is independent and
+    # is NOT 2048 Hamming.
+    spec_engine_info: dict[str, Any] = {"id": effective_id}
+    if effective_id == "cavacore":
+        # cavacore executes 480-frame blocks at 100 Hz.  It uses its own
+        # dual-FFT scheme (normal_fft=4096, bass_fft=8192 by default) and a
+        # Hann analysis window.  Do NOT report shared STFT params here.
+        spec_engine_info.update({
+            "engine_id": "cavacore",
+            "execution_block_frames": 480,
+            "execution_rate_hz": 100.0,
+            "normal_fft": 4096,
+            "bass_fft": 8192,
+            "window": "hann",
+        })
+    else:
+        # V2 consumes the shared StereoMagStft (2048 Hamming).  For future
+        # engines with a distinct window_size property, capture it.
+        spec_engine_info.update({
+            "engine_id": effective_id,
+            "execution_rate_hz": 100.0,
+            "window": "hamming",
+        })
+        if hasattr(engine_obj, "window_size"):
+            spec_engine_info["fft"] = int(engine_obj.window_size)
+
+    # Item 30/31: canonical source duration is the source-authoritative
+    # frame count; analysis_publication_extent_s is what actually reached
+    # PublicationRecord.sample_end.  V2 warmup shortens the latter but
+    # NEVER the former.  CAVA EOS zero-padding never inflates either.
+    source_duration_s = round(_total_canonical_frames[0] / CANONICAL_RATE, 6)
+    analysis_publication_extent_s = (
+        round(_max_sample_end[0] / CANONICAL_RATE, 6)
+        if _max_sample_end[0] > 0 else 0.0
+    )
+
     info: dict[str, Any] = {
         "backend": backend,
-        "effective_backend": pipeline.effective_spectrum_backend,
-        "effective_engine": pipeline.effective_spectrum_backend,
+        "effective_backend": effective_id,
+        "effective_engine": effective_id,
         "effective_processor_ids": effective_processor_ids,
-        # Shared analysis FFT (StereoMagStft): fixed 2048 Hamming for onset + V2.
+        # --- Shared analysis STFT (used by V2 + BeatDetector) --------------
+        "shared_stft_fft_size": WINDOW_SIZE,
+        "shared_stft_window": "hamming",
+        "shared_stft_hop": hop,
+        # Backwards-compatible aliases (do not remove — CSV consumers depend
+        # on these).  For CAVA, the shared_analysis_* fields still describe
+        # the shared STFT (used only by BeatDetector), NOT the spectrum
+        # engine.  Do not conflate them.
         "shared_analysis_fft": WINDOW_SIZE,
         "shared_analysis_window": "hamming",
-        # Spectrum engine's internal transform (may differ from shared_analysis_*).
-        "spectrum_engine": pipeline.effective_spectrum_backend,
+        # --- Spectrum engine (may differ from shared STFT) ----------------
+        "spectrum_engine": effective_id,
         "spectrum_engine_details": spec_engine_info,
-        # Legacy field names, kept for CSV-consumer compatibility.
+        # Legacy field names — for V2 they equal the shared STFT.  For
+        # CAVA they still describe the shared STFT (BeatDetector input),
+        # and callers should look at spectrum_engine_details for CAVA's
+        # own FFT parameters.
         "fft_size": WINDOW_SIZE,
         "onset_fft_size": WINDOW_SIZE,
         "window": "hamming",
@@ -591,8 +641,16 @@ def analyse_pcm(
         "bass_hz": _DEFAULT_BASS_HZ,
         "mid_hz": _DEFAULT_MID_HZ,
         "exertion_clip": _DEFAULT_EXERTION_CLIP,
-        # Source duration derived from the maximum publication sample_end so
-        # that padding tails are excluded from the reported duration.
+        # --- Duration reporting ------------------------------------------
+        # source_duration_s: canonical frames fed / rate — authoritative,
+        # independent of engine warmup or publication cadence.
+        "source_duration_s": source_duration_s,
+        "total_canonical_frames": _total_canonical_frames[0],
+        # analysis_publication_extent_s: max PublicationRecord.sample_end /
+        # rate — reflects what was published.  Shortened by V2 warmup;
+        # never inflated by CAVA zero-padding.
+        "analysis_publication_extent_s": analysis_publication_extent_s,
+        # Legacy field, retained for CSV consumers.
         "max_sample_end": _max_sample_end[0],
         "violations": violations,
     }
@@ -626,11 +684,14 @@ def write_meta(
 ) -> None:
     hop = pipeline_info["hop"]
     canonical_rate = pipeline_info["canonical_rate"]
-    max_sample_end = int(pipeline_info.get("max_sample_end", 0))
-    # Source-authoritative duration: max PublicationRecord.sample_end divided
-    # by the canonical rate.  This excludes any zero-padding tail introduced
-    # by soxr/STFT and reflects real analysed audio only.
-    source_duration_s = round(max_sample_end / canonical_rate, 6) if max_sample_end > 0 else 0.0
+    # Item 30: source_duration_s is source-authoritative (total canonical
+    # frames fed / rate), while analysis_publication_extent_s is derived
+    # from the last publication.  Both are stored so downstream tools can
+    # detect V2 warmup gaps and CAVA padding artefacts separately.
+    source_duration_s = float(pipeline_info.get("source_duration_s", 0.0))
+    analysis_publication_extent_s = float(
+        pipeline_info.get("analysis_publication_extent_s", 0.0)
+    )
     # Legacy row-based estimate, retained for backward compatibility.
     analysed_s = round(n_rows * hop / canonical_rate, 3) if n_rows > 0 else 0.0
 
@@ -652,7 +713,14 @@ def write_meta(
         },
         "n_rows": n_rows,
         "analysed_duration_s": analysed_s,
+        # Two distinct duration fields (item 30):
+        # - source_duration_s: from total canonical frames fed to the
+        #   analyser.  Unaffected by V2 warmup or CAVA zero-padding.
+        # - analysis_publication_extent_s: from max PublicationRecord.
+        #   sample_end.  Shortened by V2 warmup; never inflated by CAVA
+        #   zero-padding at EOS.
         "source_duration_s": source_duration_s,
+        "analysis_publication_extent_s": analysis_publication_extent_s,
         "violations": pipeline_info.get("violations", []),
     }
     meta_path.write_text(json.dumps(meta, indent=2))

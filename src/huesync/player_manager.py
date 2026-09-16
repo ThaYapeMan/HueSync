@@ -425,6 +425,16 @@ class PlayerManager:
         return self._active.profile.onset_method if self._active else None
 
     @property
+    def active_bars_source(self) -> str | None:
+        """The bars_source currently in effect on the active session, or None.
+
+        Used by the coupling PATCH router to decide whether an ``analyser_id``
+        swap crosses a mode boundary (canonical ↔ FIFO) and therefore needs a
+        full deactivate/reactivate rather than a live pipeline swap.
+        """
+        return self._active.profile.bars_source if self._active else None
+
+    @property
     def active_sensitivity(self) -> float | None:
         return self._active.profile.sensitivity if self._active else None
 
@@ -844,13 +854,22 @@ class PlayerManager:
             self._active.sync_engine.update_render(profile, mellow_profile)
 
     def replace_pcm_analyser(self, profile: Profile) -> None:
-        """Swap the active spectrum engine without restarting squeezelite or the Hue session.
+        """Transactionally swap the active spectrum engine.
 
-        Stops the current CanonicalAnalysisPipeline worker, builds a new one
-        with the engine selected by profile.spectrum_backend, and starts it.
-        Only valid for bars_source='pcm_pipeline' sessions that have an active
-        shm_source.  No-ops silently if no session is active or the session
-        has no shm_source (cava path).
+        Semantics:
+        1. Snapshot the current profile so we can roll back on failure.
+        2. Build a candidate CanonicalAnalysisPipeline WITHOUT touching
+           ``self._active``.  If construction itself raises (invalid config,
+           unavailable engine) neither the old pipeline nor the session
+           profile are touched.
+        3. Delegate the atomic stop-old / start-new dance to
+           ``SyncEngine.replace_analyser``, supplying a rebuild callable so a
+           failed candidate does not leave the runtime without an analyser.
+        4. On success: commit ``self._active.profile = profile``.
+        5. On failure: restore the previous profile on the session so
+           storage, session profile, and runtime stay in sync.  The caller
+           (api.py) is responsible for rolling back persisted Analyser
+           configuration on the returned exception.
         """
         if self._active is None or self._active.sync_engine is None:
             return
@@ -861,9 +880,33 @@ class PlayerManager:
                 "(bars_source='cava'?); ignoring spectrum_backend swap"
             )
             return
-        new_pipeline = _make_canonical_pipeline(source, profile)
+
+        old_profile = self._active.profile
+
+        # Step 1: build candidate first.  If this raises we have not yet
+        # stopped the old pipeline, so no rollback is required.
+        candidate = _make_canonical_pipeline(source, profile)
+
+        # Rebuild closure — used by SyncEngine.replace_analyser if the
+        # candidate fails to start.  It re-uses the exact same source and
+        # the pre-swap profile so the analyser matches what storage still
+        # (or will) contain after the caller rolls back.
+        def _rebuild_old() -> CanonicalAnalysisPipeline:
+            return _make_canonical_pipeline(source, old_profile)
+
+        try:
+            self._active.sync_engine.replace_analyser(
+                candidate, rebuild_old=_rebuild_old
+            )
+        except Exception:
+            # Restore session profile so the runtime matches what the caller
+            # will roll storage back to.  The exception propagates so api.py
+            # can restore persisted Analyser configuration.
+            self._active.profile = old_profile
+            raise
+
+        # SUCCESS: commit new profile only after start succeeded.
         self._active.profile = profile
-        self._active.sync_engine.replace_analyser(new_pipeline)
         log.info(
             "replace_pcm_analyser: new spectrum_backend=%r active",
             profile.spectrum_backend,
