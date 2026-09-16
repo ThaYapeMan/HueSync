@@ -1,6 +1,7 @@
 # HueSync Analysis Architecture — Frozen Design
 
 **Committed:** 2026-09-15
+**Revised:** 2026-09-16 (batches 1-3 final correction round)
 **Status:** FROZEN — do not redesign without explicit review
 **Primary commit:** analysis-arch-freeze
 
@@ -50,6 +51,27 @@ still warming up (no output yet) does not appear in the effective ids — this m
 metadata a truthful audit of what actually contributed to the record, not a static
 enumeration of what could contribute in principle.
 
+### Publication is NOT gated on Spectrum bars
+
+`_process_canonical_frame()` emits a `PublicationRecord` whenever ANY processor
+produced output — Beat-only and future Loudness-only publications are first-class.
+When the `SpectrumProcessor` produced no updates in this call but the record still
+publishes, the pipeline reuses the last known bars via the private `_last_bars`
+carry-forward field.  `SpectrumProcessor`'s ID is NOT in `effective_processor_ids`
+for a carry-forward publication — `_last_bars` is a payload-completeness helper,
+not a contribution.
+
+### Interval merging is simple, not a DAG
+
+Every `ProcessorUpdate` returned in one `_process_canonical_frame()` call
+describes the same canonical interval `[frame.sample_pos, frame.sample_pos + N)`.
+Multiple SpectrumProcessor updates (V2: N mag_frames → N updates) create N
+publications; onset updates accompany them 1:1 with a drain on the last one.
+A single carry-forward publication is emitted for the entire canonical interval
+when Spectrum produced no updates but another processor did.  Out-of-order
+`sample_start` values from a processor produce a warning (not a crash) so a
+future engine cannot tear the pipeline down through misbookkeeping.
+
 ### One STFT pass, shared
 
 `StereoMagStft` runs once per `_process_canonical_frame()` call. The resulting
@@ -81,6 +103,20 @@ the analysis thread or the Hue session.
 Both `V2SpectrumEngine` and the `BeatDetector` consume `mag_frames` from the
 shared `StereoMagStft`. CavaCore has its own internal FFT (different window size)
 but still receives `mag_frames` via `SharedAnalysisFrame` for future use.
+
+### CAVA sample positions are independent of the shared STFT
+
+`SpectrumProcessor` maintains its own `_cava_carry_sample_start` and
+`_cava_carry_len` fields for the CAVA engine.  Every 480-frame execution block
+is timestamped at `carry_sample_start + block_index * 480`.  This is the
+authoritative CAVA position source — `hop_sample_starts` from the shared STFT
+is NOT consulted for CAVA blocks, so a shared-STFT warmup or reset can never
+corrupt CAVA's block timestamps.  V2, in contrast, consumes shared mag_frames
+directly and uses `hop_sample_starts` for its update positions.
+
+At CAVA EOS (`flush()`), the emitted `sample_end` is clamped to
+`carry_sample_start + carry_len` — the real source extent, not the zero-padded
+480-frame extent.
 
 ### Legacy CAVA FIFO is separate
 
@@ -152,19 +188,44 @@ against a stock squeezelite that only exposes v0.  This is the production canoni
 LMS path (`bars_source='pcm_pipeline'`).  Legacy code paths that still need v0 access
 must pass `require_v1=False` explicitly.
 
+Build/deployment: run `scripts/build-squeezelite.sh` on the LXC to compile and
+install the patched squeezelite binary (requires `libfftw3-dev`, not `libfftw3-3`).
+The script is idempotent and safe to re-run.  Producer sources live under
+`squeezelite/` and are versioned; there are no uncommitted required files.
+
+### Coherent snapshot contract
+
+A full v1 read requires a coherent view of:
+
+1. `write_seq` (seqlock counter, even == stable)
+2. `generation` (per-process random ID)
+3. All extension fields (`abs_write_pos`, `gap_seq`, `write_seq2`, `gen2`)
+4. PCM bytes at the current `buf_index`
+5. Re-read `write_seq2` and `generation2`
+
+If either the `write_seq` mismatches or `generation` != `generation2`, the
+snapshot is torn and the reader retries.  When retries are exhausted the
+event is `TORN_READ` and the epoch invalidates.
+
 ### Transactional live analyser replacement
 
-`SyncEngine.replace_analyser(new_analyser)` is transactional:
+`SyncEngine.replace_analyser(new_analyser)` is transactional in the ordinary case:
 
-1. The old analyser is asked to stop; `stop()` returns `False` if the worker did not
-   terminate within the timeout.  In that case the replacement is aborted with a
-   `RuntimeError` — the old pipeline remains owner and no runtime state is lost.
-2. Old processors are closed only after the worker thread has genuinely terminated
-   (H1 protocol).  Closing while a `feed()` is in flight would invalidate native
-   resources such as the cavacore FFT plan.
-3. If `new_analyser.start()` raises, the runtime is left in a degraded state and the
-   exception propagates to the caller — the standard recovery path is a full coupling
-   deactivate.
+1. The old analyser is asked to stop.  `stop()` returns `False` if the worker did
+   not terminate within its 2-second timeout.  In that case the replacement is
+   aborted with a `RuntimeError` — the old analyser is left in place and the
+   caller must retry or deactivate.
+2. Old processors are closed only after the worker thread has genuinely
+   terminated (H1 protocol).  Closing while a `feed()` is still in flight would
+   invalidate native resources such as the cavacore FFT plan.  If `stop()`
+   timed out, the worker thread's `finally` block picks up the responsibility
+   and closes processors when it eventually exits — exactly once, guarded by
+   `_processors_closed`.
+3. If `new_analyser.start()` raises, `replace_analyser` attempts to restart
+   the old analyser to keep the session alive.  If that restart ALSO fails,
+   the session is invalid and the caller must deactivate the coupling —
+   there is no in-place recovery for a double failure.  The pipeline does NOT
+   silently pretend the old analyser is still working.
 
 ### Atomic publication state
 
@@ -172,9 +233,18 @@ must pass `require_v1=False` explicitly.
 Both `latest()` and `pub_seq` are derived from it under `_pub_lock`, so consumers
 always observe a consistent `(sequence, features, sample_pos)` triple.
 
+The single `_pub_lock` covers all three publication fields:
+`_latest_pub`, `_pub_queue`, and `_pub_seq`.  A publication is committed inside
+one critical section — a reader can never observe `pub_seq` incremented
+without the corresponding record already being in `_latest_pub` and appended
+to `_pub_queue`.
+
 The publication queue is bounded (`maxlen=1000`) as a best-effort stream: slow
 consumers can lose old records, and `pub_dropped_count` exposes the loss so
 downstream can detect overflow instead of silently missing frames.
+`drain_publications()` empties the queue and resets `pub_dropped_count` atomically
+under `_pub_lock`, so a caller draining the stream sees an exact drop count for
+the window it just consumed.
 
 ### Terminal publication lifetime
 
@@ -184,6 +254,23 @@ downstream can detect overflow instead of silently missing frames.
 - `EndOfStream`: flush processor carry buffers and reset DSP.  `_latest_pub`
   persists until the next epoch or a `StreamInvalidated`.
 - Epoch transition: reset DSP and clear `_latest_pub` exactly once at the boundary.
+
+### Acceptance duration reporting
+
+`scripts/run_acceptance.py` exports TWO distinct duration fields to
+`<csv>.meta.json`:
+
+- `source_duration_s`: total canonical frames fed to the analyser divided by
+  the canonical rate.  Source-authoritative — independent of engine warmup
+  and publication cadence.  Never affected by V2 warmup or CAVA EOS padding.
+- `analysis_publication_extent_s`: `max(PublicationRecord.sample_end) /
+  canonical_rate`.  Reflects what was actually published.  Shortened by V2
+  warmup; the CAVA carry-length clamp at EOS keeps it from being inflated by
+  zero-padding.
+
+The two values are equal for a pipeline that publishes every fed sample and
+diverge exactly by the engine warmup.  Downstream tools use the difference to
+detect warmup-related gaps.
 
 ### BeatDetector concurrency
 

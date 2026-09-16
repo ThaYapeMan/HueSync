@@ -1081,6 +1081,12 @@ class CanonicalAnalysisPipeline:
         # STFT sample-position tracking so hop_sample_starts is chunk-independent.
         self._stft_frame_count: int = 0
         self._epoch_start_sample_pos: int = 0
+        # Last known spectrum bars, carried forward when SpectrumProcessor
+        # produces no output in a frame but another processor (e.g. BeatDetector)
+        # does.  This lets Beat-only or Loudness-only publications still ship a
+        # valid AudioFeatures.bars payload.  Cleared on epoch transition and on
+        # StreamInvalidated via _reset_dsp().
+        self._last_bars: list[float] | None = None
         # Guards double-close on the processor list: stop() closes only if the
         # worker thread has terminated within the join timeout; if it hasn't,
         # the worker's finally block picks up the responsibility once it
@@ -1178,6 +1184,9 @@ class CanonicalAnalysisPipeline:
         self._source_sample_end = 0
         self._stft_frame_count = 0
         self._epoch_start_sample_pos = 0
+        # NOTE: _last_bars is deliberately reset here so a fresh epoch never
+        # inherits carry-over bars from a previous stream.
+        self._last_bars = None
 
     def _publish(
         self,
@@ -1266,7 +1275,29 @@ class CanonicalAnalysisPipeline:
         )
 
     def _process_canonical_frame(self, frame: AnalysisPcmFrame) -> list[PublicationRecord]:
-        """Process one AnalysisPcmFrame; return new PublicationRecords."""
+        """Process one AnalysisPcmFrame; return new PublicationRecords.
+
+        Composition policy (items 20-22): every processor in ``self._processors``
+        may contribute zero or more ``ProcessorUpdate`` records per canonical
+        frame.  A ``PublicationRecord`` is emitted whenever ANY processor
+        produced output — publication is NOT gated on the SpectrumProcessor
+        specifically.  This allows Beat-only publications (e.g. onset triggered
+        during cavacore's carry warmup) and future Loudness-only publications.
+
+        Contributor accounting: ``effective_processor_ids`` lists only the
+        processors that produced ≥1 update THIS frame.  A processor whose
+        carry buffer is still warming up (no output) is NOT in the list, even
+        when its previous output is carried forward via ``_last_bars``.
+
+        Interval merging (item 21): all ProcessorUpdates from one canonical
+        call describe the same canonical interval
+        (``[frame.sample_pos, frame.sample_pos + len(samples))``).  Multiple
+        SpectrumProcessor updates (V2: N per N mag_frames) create N
+        publications; onset accompanies them 1:1 with a final drain on the
+        last publication.  When SpectrumProcessor produces no updates but
+        another processor did, we emit a single publication for the whole
+        canonical interval.
+        """
         epoch_id: str = frame.epoch_id
         samples: np.ndarray = frame.samples
 
@@ -1293,21 +1324,21 @@ class CanonicalAnalysisPipeline:
 
         # Track the last real (non-padded) source sample position for EOS interval clamping.
         self._source_sample_end = frame.sample_pos + len(samples)
+        canonical_start = frame.sample_pos
+        canonical_end = frame.sample_pos + len(samples)
 
         shared_frame = SharedAnalysisFrame(
             pcm=samples,
             mag_frames=mag_frames,
             epoch_id=epoch_id,
-            sample_start=frame.sample_pos,
-            sample_end=frame.sample_pos + len(samples),
+            sample_start=canonical_start,
+            sample_end=canonical_end,
             hop_sample_starts=hop_starts,
         )
 
         # Run all processors generically; route bars→spectrum_updates, rest→pending_onset.
-        # effective_processor_ids reports ONLY contributing processors (those that
-        # produced at least one ProcessorUpdate on this frame) — a processor whose
-        # carry buffer is still warming up must not appear in effective ids.
         spectrum_updates: list[ProcessorUpdate] = []
+        other_updates: list[ProcessorUpdate] = []
         contributing_ids: list[str] = []
         for proc in self._processors:
             pus = proc.feed(shared_frame)
@@ -1317,11 +1348,42 @@ class CanonicalAnalysisPipeline:
                 if pu.bars is not None:
                     spectrum_updates.append(pu)
                 else:
-                    self._pending_onset.append(pu)
+                    other_updates.append(pu)
+
+        # Update _last_bars whenever SpectrumProcessor produced output.
+        if spectrum_updates:
+            self._last_bars = list(spectrum_updates[-1].bars or [])
+
+        # Queue other_updates (onset etc.) for the next publication.
+        self._pending_onset.extend(other_updates)
 
         records: list[PublicationRecord] = []
         n_updates = len(spectrum_updates)
         effective_ids = tuple(contributing_ids)
+
+        if n_updates == 0:
+            # No spectrum output.  Publish a single record only if SOMETHING
+            # else contributed this frame (Beat-only, Loudness-only, etc.).
+            if not contributing_ids:
+                return records
+            onset_batch = list(self._pending_onset)
+            self._pending_onset.clear()
+            # Carry-forward bars if available; empty list otherwise.  Note:
+            # SpectrumProcessor's ID is NOT in contributing_ids in this branch.
+            bars_for_publication = list(self._last_bars) if self._last_bars else []
+            features = self._build_features(bars_for_publication, onset_batch)
+            record = self._publish(
+                epoch_id=epoch_id,
+                sample_start=canonical_start,
+                sample_end=canonical_end,
+                features=features,
+                effective_engine_id=self._spectrum_processor.processor_id,
+                effective_processor_ids=effective_ids,
+            )
+            records.append(record)
+            return records
+
+        prev_start = -1
         for i, su in enumerate(spectrum_updates):
             # Last update drains all accumulated onset; earlier updates pop one each.
             # V2: N updates from N mag_frames — onset is 1:1 with frames.
@@ -1331,6 +1393,17 @@ class CanonicalAnalysisPipeline:
                 self._pending_onset.clear()
             else:
                 onset_batch = [self._pending_onset.pop(0)] if self._pending_onset else []
+
+            if prev_start >= 0 and su.sample_start < prev_start:
+                # Defensive: a processor emitted an out-of-order update
+                # (sample_start earlier than the previous publication in the
+                # same canonical call).  Log so acceptance tests catch it,
+                # but proceed rather than tearing the pipeline down.
+                log.warning(
+                    "ProcessorUpdate ordering: %s sample_start=%d < previous %d",
+                    su.processor_id, su.sample_start, prev_start,
+                )
+            prev_start = su.sample_start
 
             features = self._build_features(su.bars or [], onset_batch)
             record = self._publish(
@@ -1351,8 +1424,13 @@ class CanonicalAnalysisPipeline:
         keep rendering the last-known state rather than snapping to black
         during short gaps.  _latest_pub is only cleared on epoch transitions
         or StreamInvalidated.
+
+        Same generic composition policy as _process_canonical_frame: publish
+        when ANY processor contributes flush output; effective_processor_ids
+        contains only actual contributors.
         """
         spectrum_updates: list[ProcessorUpdate] = []
+        other_updates: list[ProcessorUpdate] = []
         contributing_ids: list[str] = []
         for proc in self._processors:
             pus = proc.flush()
@@ -1362,7 +1440,9 @@ class CanonicalAnalysisPipeline:
                 if pu.bars is not None:
                     spectrum_updates.append(pu)
                 else:
-                    self._pending_onset.append(pu)
+                    other_updates.append(pu)
+
+        self._pending_onset.extend(other_updates)
 
         records: list[PublicationRecord] = []
         n_updates = len(spectrum_updates)
@@ -1370,6 +1450,30 @@ class CanonicalAnalysisPipeline:
             return records
         epoch_id = self._current_epoch_id
         effective_ids = tuple(contributing_ids)
+
+        if n_updates == 0:
+            # No spectrum flush.  Publish only if another processor produced
+            # flush output (Beat/Loudness EOS).  If nothing contributed, we
+            # emit nothing — the source has nothing new to say.
+            if not contributing_ids:
+                return records
+            onset_batch = list(self._pending_onset)
+            self._pending_onset.clear()
+            bars_for_publication = list(self._last_bars) if self._last_bars else []
+            pub_start = self._source_sample_end  # end-of-known-source anchor
+            pub_end = self._source_sample_end
+            features = self._build_features(bars_for_publication, onset_batch)
+            record = self._publish(
+                epoch_id=epoch_id,
+                sample_start=pub_start,
+                sample_end=pub_end,
+                features=features,
+                effective_engine_id=self._spectrum_processor.processor_id,
+                effective_processor_ids=effective_ids,
+            )
+            records.append(record)
+            return records
+
         for i, su in enumerate(spectrum_updates):
             if i == n_updates - 1:
                 onset_batch = list(self._pending_onset)

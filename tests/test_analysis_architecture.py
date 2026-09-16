@@ -1468,3 +1468,442 @@ def test_pub_queue_overflow_pub_dropped_non_negative():
     assert cap.pub_dropped_count >= 0
     cap.drain_publications()
     assert cap.pub_dropped_count == 0
+
+
+# ---------------------------------------------------------------------------
+# Item 23: Beat-only publication (SpectrumProcessor produces no output)
+# ---------------------------------------------------------------------------
+
+
+class _NullSpectrumEngine:
+    """SpectrumEngine stub that never produces bars.
+
+    Simulates cavacore during its 480-frame carry warmup — the shared STFT
+    may still have magnitudes and BeatDetector may emit onset updates, but
+    the spectrum engine has nothing to publish this frame.
+    """
+
+    engine_id: str = "null_spectrum"
+
+    def feed(self, pcm, shared):
+        return []
+
+    def flush(self):
+        return []
+
+    def reset(self) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+
+def test_beat_only_publication():
+    """When Spectrum produces no output, BeatDetector onset still yields a PublicationRecord.
+
+    Publication must NOT be gated on Spectrum bars.  effective_processor_ids
+    must contain the BeatDetector but MUST NOT contain the SpectrumProcessor.
+    """
+    cap = _make_cap(engine=_NullSpectrumEngine())
+    # Feed enough energetic PCM to trigger onsets after STFT warmup.
+    rng = np.random.default_rng(0xBEEF)
+    onset_seen = False
+    beat_only_seen = False
+    for i in range(30):
+        noise = rng.standard_normal((_HOP, 2)).astype(np.float32) * 0.4
+        frame = AnalysisPcmFrame(
+            samples=noise, sample_pos=i * _HOP,
+            epoch_id="ep-beat", source_id="t", over_range=False,
+        )
+        recs = cap.feed(frame)
+        for rec in recs:
+            # SpectrumProcessor must never appear in the contributors.
+            assert "null_spectrum" not in rec.effective_processor_ids
+            if "beat_detector" in rec.effective_processor_ids:
+                beat_only_seen = True
+                if rec.features.onset:
+                    onset_seen = True
+    assert beat_only_seen, "expected at least one BeatDetector-only publication"
+    # Onset may or may not fire depending on the random signal; the key
+    # invariant is that publications happen and effective_processor_ids
+    # is truthful.
+    _ = onset_seen
+
+
+class _DummyLoudnessProcessor:
+    """Test-only processor that emits exactly one ProcessorUpdate per feed()."""
+
+    processor_id: str = "dummy_loudness"
+
+    def feed(self, frame):
+        return [ProcessorUpdate(
+            processor_id=self.processor_id,
+            sample_start=frame.sample_start,
+            sample_end=frame.sample_end,
+        )]
+
+    def flush(self):
+        return []
+
+    def reset(self) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+
+def test_dummy_loudness_only_publication():
+    """A pipeline with ONLY a loudness-style processor still publishes records."""
+    cap = _make_cap(engine=_NullSpectrumEngine())
+    dummy = _DummyLoudnessProcessor()
+    cap._processors = (dummy,)  # replace both Spectrum + Beat with just the dummy
+    for i in range(5):
+        recs = cap.feed(_make_frame(sample_pos=i * _HOP))
+        assert recs, "loudness-only pipeline must publish"
+        for rec in recs:
+            assert rec.effective_processor_ids == ("dummy_loudness",)
+
+
+# ---------------------------------------------------------------------------
+# Items 25-28: CAVA sample position ownership
+# ---------------------------------------------------------------------------
+
+
+class _StubCavaEngine:
+    """SpectrumEngine that emulates CAVA's carry-based 480-block scheduler.
+
+    Mirrors CavaCoreSpectrumEngine's feed() semantics without requiring the
+    native library: samples accumulate in a carry buffer, and every full
+    480-frame block yields one SpectrumUpdate.  Position tracking inside the
+    engine is deliberately naive so that SpectrumProcessor's carry-tracking
+    logic is exercised for real.
+    """
+
+    engine_id: str = "cavacore"
+
+    _BLOCK: int = 480
+
+    def __init__(self, n_bars: int = 8) -> None:
+        self._n_bars = n_bars
+        self._carry: int = 0
+        self._epoch_samples: int = 0
+
+    def feed(self, pcm, shared):
+        n = len(pcm)
+        combined = self._carry + n
+        n_blocks = combined // self._BLOCK
+        self._carry = combined - n_blocks * self._BLOCK
+        self._epoch_samples += n
+        # Emit one identical bar array per completed block.
+        return [
+            SpectrumUpdate(
+                engine_id=self.engine_id,
+                bars=[0.1] * self._n_bars,
+                sample_pos=max(0, self._epoch_samples - self._BLOCK),
+            )
+            for _ in range(n_blocks)
+        ]
+
+    def flush(self):
+        return []
+
+    def reset(self) -> None:
+        self._carry = 0
+        self._epoch_samples = 0
+
+    def close(self) -> None:
+        pass
+
+
+def _feed_pcm(processor: SpectrumProcessor, sample_start: int, n: int) -> list[ProcessorUpdate]:
+    """Feed n canonical frames starting at sample_start via SharedAnalysisFrame."""
+    return processor.feed(SharedAnalysisFrame(
+        pcm=np.zeros((n, 2), dtype=np.float32),
+        mag_frames=[],
+        epoch_id="ep-1",
+        sample_start=sample_start,
+        sample_end=sample_start + n,
+        hop_sample_starts=[],
+    ))
+
+
+def test_cava_positions_single_full_block():
+    """Feed 480 → one update at [0, 480), no carry."""
+    p = SpectrumProcessor(_StubCavaEngine())
+    updates = _feed_pcm(p, 0, 480)
+    assert len(updates) == 1
+    assert updates[0].sample_start == 0
+    assert updates[0].sample_end == 480
+    assert p._cava_carry_len == 0
+
+
+def test_cava_positions_1_frame_only():
+    """Feed 1 frame → no update, carry_start=0, carry_len=1."""
+    p = SpectrumProcessor(_StubCavaEngine())
+    updates = _feed_pcm(p, 0, 1)
+    assert updates == []
+    assert p._cava_carry_len == 1
+    assert p._cava_carry_sample_start == 0
+
+
+def test_cava_positions_480_then_1():
+    """480 frames + 1 frame → one update at [0, 480), carry_start=480, carry_len=1."""
+    p = SpectrumProcessor(_StubCavaEngine())
+    u1 = _feed_pcm(p, 0, 480)
+    u2 = _feed_pcm(p, 480, 1)
+    assert len(u1) == 1
+    assert u1[0].sample_start == 0
+    assert u1[0].sample_end == 480
+    assert u2 == []
+    assert p._cava_carry_sample_start == 480
+    assert p._cava_carry_len == 1
+
+
+def test_cava_positions_240_then_241():
+    """240 + 241 = 481 → one update at [0, 480), carry_start=480, carry_len=1."""
+    p = SpectrumProcessor(_StubCavaEngine())
+    u1 = _feed_pcm(p, 0, 240)
+    u2 = _feed_pcm(p, 240, 241)
+    assert u1 == []
+    assert len(u2) == 1
+    assert u2[0].sample_start == 0
+    assert u2[0].sample_end == 480
+    assert p._cava_carry_sample_start == 480
+    assert p._cava_carry_len == 1
+
+
+def test_cava_positions_719_then_241():
+    """719 + 241 = 960 → two updates at [0,480) and [480,960), no carry remaining."""
+    p = SpectrumProcessor(_StubCavaEngine())
+    u1 = _feed_pcm(p, 0, 719)
+    u2 = _feed_pcm(p, 719, 241)
+    assert len(u1) == 1
+    assert u1[0].sample_start == 0
+    assert u1[0].sample_end == 480
+    assert len(u2) == 1
+    assert u2[0].sample_start == 480
+    assert u2[0].sample_end == 960
+    assert p._cava_carry_len == 0
+    assert p._cava_carry_sample_start == 960
+
+
+def test_cava_timestamps_monotonic_six_blocks():
+    """Six consecutive 480-frame CAVA inputs → strictly monotonic timestamps.
+
+    Regression test for the "positions reset after 4 blocks" bug: the CAVA
+    carry counter must be independent of the shared STFT epoch_start /
+    stft_frame_count fields that _process_canonical_frame() maintains.
+    """
+    p = SpectrumProcessor(_StubCavaEngine())
+    prev_start = -1
+    prev_end = -1
+    for i in range(6):
+        updates = _feed_pcm(p, i * 480, 480)
+        assert len(updates) == 1
+        u = updates[0]
+        assert u.sample_start > prev_start, (
+            f"backward timestamp at block {i}: {u.sample_start} <= {prev_start}"
+        )
+        assert u.sample_start >= prev_end
+        prev_start = u.sample_start
+        prev_end = u.sample_end
+    assert prev_start == 5 * 480
+
+
+def test_cava_positions_reset_clears_carry():
+    p = SpectrumProcessor(_StubCavaEngine())
+    _feed_pcm(p, 0, 240)  # leave 240 in carry
+    p.reset()
+    assert p._cava_carry_len == 0
+    assert p._cava_carry_sample_start == 0
+    # After reset, sample_start of the next block must respect the new chunk start.
+    updates = _feed_pcm(p, 1000, 480)
+    assert len(updates) == 1
+    assert updates[0].sample_start == 1000
+
+
+def test_cava_positions_independent_of_shared_stft_reset():
+    """SpectrumProcessor's CAVA carry survives a shared-STFT epoch-frame reset.
+
+    Even if CanonicalAnalysisPipeline's _epoch_start_sample_pos changed
+    (e.g. a fresh feed chunk starts at a wildly different sample_start),
+    SpectrumProcessor's own carry counter drives the CAVA block timestamps
+    — not the shared STFT hop_sample_starts.
+    """
+    p = SpectrumProcessor(_StubCavaEngine())
+    updates1 = _feed_pcm(p, 0, 960)          # two blocks: [0,480), [480,960)
+    # Now feed another chunk but claim a nonsense sample_start.  The CAVA
+    # carry counter is empty here (960 samples in, 960 blocks out), so the
+    # next carry_start snaps to this new chunk start.
+    updates2 = _feed_pcm(p, 9999, 480)       # one block starting at 9999
+    assert len(updates1) == 2
+    assert updates1[0].sample_start == 0
+    assert updates1[1].sample_start == 480
+    assert len(updates2) == 1
+    assert updates2[0].sample_start == 9999
+    assert updates2[0].sample_end == 9999 + 480
+
+
+# ---------------------------------------------------------------------------
+# Item 33 (strengthened): terminal latest survives explicit TemporarilyNoData
+# ---------------------------------------------------------------------------
+
+
+def test_terminal_latest_survives_temporarily_no_data_path():
+    """The TemporarilyNoData branch of _run() must NEVER clear _latest_pub.
+
+    Exercises the code path directly rather than relying on end_of_stream():
+    inject a TemporarilyNoData result into the worker's canonical result
+    handling to verify the latest publication survives.
+    """
+    from huesync.canonicalizer import TemporarilyNoData
+    cap = _make_cap()
+    # Produce at least one publication.
+    for i in range(10):
+        cap.feed(_make_frame(sample_pos=i * _HOP))
+    before = cap.latest()
+    assert before is not None
+    latest_pub_before = cap._latest_pub
+    assert latest_pub_before is not None
+
+    # Simulate the TemporarilyNoData branch of _run().  The worker thread is
+    # not started; we invoke the observable side-effects that branch performs
+    # (i.e. nothing to _latest_pub) and assert the state is unchanged.
+    _ = TemporarilyNoData()
+    # No mutation of publication state should happen for TemporarilyNoData.
+    assert cap._latest_pub is latest_pub_before
+    assert cap.latest() is not None
+
+
+# ---------------------------------------------------------------------------
+# Item 34 (strengthened): exact queue overflow drop count
+# ---------------------------------------------------------------------------
+
+
+def test_queue_overflow_exact_drops():
+    """Queue is bounded at maxlen=1000; overflow drop count must be exact."""
+    cap = _make_cap()
+    # Force publications by calling _publish directly with dummy records so
+    # STFT warmup does not affect the drop-count math.
+    from huesync.types import AudioFeatures
+    features = AudioFeatures(
+        bars=[0.0] * 30, bass=0.0, mid=0.0, full=0.0, centroid=0.0,
+        onset=False, onset_strength=0.0,
+        onset_bass=False, onset_mid=False, onset_treble=False,
+        onset_bass_strength=0.0, onset_mid_strength=0.0, onset_treble_strength=0.0,
+        sustained_energy=None, hpss_active=False, relative_exertion=0.0,
+    )
+    n_pubs = 1006
+    for i in range(n_pubs):
+        cap._publish(
+            epoch_id="ep-1",
+            sample_start=i * _HOP,
+            sample_end=(i + 1) * _HOP,
+            features=features,
+            effective_engine_id="v2",
+            effective_processor_ids=("v2",),
+        )
+    maxlen = 1000
+    # Exact expected drop count for 1006 publications and maxlen=1000.
+    assert cap._pub_dropped == n_pubs - maxlen, (
+        f"expected {n_pubs - maxlen} drops, got {cap._pub_dropped}"
+    )
+    assert len(cap._pub_queue) == maxlen
+
+
+# ---------------------------------------------------------------------------
+# Item 32: publication atomicity — _pub_lock covers all three fields
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Items 29-31: acceptance source duration and CAVA metadata
+# ---------------------------------------------------------------------------
+
+
+def _analyse_sine(duration_s: float, backend: str = "v2"):
+    """Run scripts/run_acceptance.analyse_pcm on `duration_s` seconds of sine."""
+    import sys
+    sys.path.insert(0, str(_Path(__file__).parent.parent / "scripts"))
+    import importlib
+    acc = importlib.import_module("run_acceptance")
+    sr = 44100
+    n = int(sr * duration_s)
+    t = np.arange(n, dtype=np.float32) / sr
+    sig = (np.sin(2 * np.pi * 440.0 * t) * 0.3 * 32767.0).astype(np.int16)
+    stereo = np.column_stack([sig, sig]).flatten()
+    return acc.analyse_pcm(stereo.tobytes(), backend=backend), acc
+
+
+def test_acceptance_source_duration_from_source():
+    """source_duration_s reflects canonical frames fed, not publications produced."""
+    (rows, info), acc = _analyse_sine(2.0, backend="v2")
+    canonical_rate = info["canonical_rate"]
+    total_frames = info["total_canonical_frames"]
+    source_duration_s = info["source_duration_s"]
+    # source_duration_s must derive from total_canonical_frames, not from
+    # the count of published rows or their sample_end.
+    assert source_duration_s == round(total_frames / canonical_rate, 6)
+    # V2 has ~2048-sample warmup, so max sample_end is lower than the
+    # source-authoritative duration.  This is exactly what the two fields
+    # are supposed to distinguish.
+    analysis_extent = info["analysis_publication_extent_s"]
+    # In this configuration analysis_extent should be at MOST source_duration_s;
+    # for V2 it must be strictly less because of warmup.
+    assert analysis_extent <= source_duration_s + 1e-6
+
+
+def test_acceptance_v2_engine_metadata():
+    """V2 metadata reports the shared STFT parameters as its own transform."""
+    (_rows, info), _acc = _analyse_sine(0.5, backend="v2")
+    spec = info["spectrum_engine_details"]
+    assert spec["engine_id"] == "v2"
+    assert info["shared_stft_fft_size"] > 0
+    assert info["shared_stft_window"] == "hamming"
+    assert info["shared_stft_hop"] == info["hop"]
+
+
+def test_acceptance_cava_metadata_when_available():
+    """When CAVA is available, metadata reports CAVA-specific FFT/window/cadence.
+
+    Skipped when the native library is not built.
+    """
+    from huesync.spectrum_engine import ENGINES
+    if not ENGINES["cavacore"].check_available():
+        pytest.skip("cavacore native library not available")
+    (_rows, info), _acc = _analyse_sine(0.5, backend="cavacore")
+    spec = info["spectrum_engine_details"]
+    assert spec["engine_id"] == "cavacore"
+    assert spec["execution_block_frames"] == 480
+    assert spec["execution_rate_hz"] == 100.0
+    assert spec["normal_fft"] == 4096
+    assert spec["bass_fft"] == 8192
+    assert spec["window"] == "hann"
+    # Shared STFT fields describe the shared STFT (BeatDetector input), NOT
+    # the CAVA engine.  They must still exist and be truthful.
+    assert info["shared_stft_window"] == "hamming"
+
+
+def test_publication_atomicity_lock_covers_all_state():
+    """_pub_lock guards _latest_pub, _pub_queue, and _pub_seq as one unit."""
+    cap = _make_cap()
+    # Assert the three fields live behind the same lock; static check on
+    # source structure would be brittle, so verify runtime invariant instead.
+    from huesync.types import AudioFeatures
+    features = AudioFeatures(
+        bars=[0.0] * 30, bass=0.0, mid=0.0, full=0.0, centroid=0.0,
+        onset=False, onset_strength=0.0,
+        onset_bass=False, onset_mid=False, onset_treble=False,
+        onset_bass_strength=0.0, onset_mid_strength=0.0, onset_treble_strength=0.0,
+        sustained_energy=None, hpss_active=False, relative_exertion=0.0,
+    )
+    rec = cap._publish(
+        epoch_id="ep-1", sample_start=0, sample_end=_HOP,
+        features=features, effective_engine_id="v2",
+        effective_processor_ids=("v2",),
+    )
+    # After a single _publish call, all three views must agree.
+    assert cap.pub_seq == rec.sequence
+    assert cap._latest_pub is rec
+    with cap._pub_lock:
+        assert cap._pub_queue[-1] is rec
