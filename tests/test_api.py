@@ -68,6 +68,10 @@ def _make_mock_manager() -> MagicMock:
     type(manager).active_higher_cutoff_freq = PropertyMock(return_value=None)
     type(manager).active_player_type = PropertyMock(return_value=None)
     type(manager).airplay_receiving = PropertyMock(return_value=None)
+    # active_bars_source drives cross-mode analyser_id routing in
+    # _apply_coupling_action.  Default to "cava" so tests that do not
+    # explicitly set it still see the legacy FIFO restart path.
+    type(manager).active_bars_source = PropertyMock(return_value="cava")
     # Async methods
     manager.activate_coupling = AsyncMock()
     manager.deactivate = AsyncMock()
@@ -693,6 +697,139 @@ def test_ac_swap_session_remains_active(client: TestClient):
     assert saved_ac2 is not None
     assert saved_ac2.bars == 50          # AC2, not AC1's default 30
     assert saved_ac2.onset_delta == 0.5  # AC2, not AC1's default 0.1
+
+
+def test_analyser_id_canonical_to_fifo_deactivates_and_reactivates(
+    client: TestClient,
+):
+    """Changing analyser_id from a pcm_pipeline Analyser to a cava Analyser
+    crosses a mode boundary that cannot be hot-swapped.  Router must call
+    deactivate() then activate_coupling() (item 19).
+    """
+    # Old analyser: pcm_pipeline; new analyser: cava.
+    coupling = _make_full_coupling(client._storage)
+    old_ac = client._storage.get_analyser(coupling.analyser_id)
+    old_ac.bars_source = "pcm_pipeline"
+    old_ac.spectrum_backend = "v2"
+    client._storage.save_analyser(old_ac)
+
+    client._storage.set_active_coupling_id(coupling.id)
+    # Simulate an active pcm_pipeline session.
+    type(client._manager).active_bars_source = PropertyMock(
+        return_value="pcm_pipeline"
+    )
+
+    new_ac = Analyser(name="Cava AC", bars_source="cava", spectrum_backend="v2")
+    client._storage.save_analyser(new_ac)
+
+    resp = client.patch(
+        f"/api/couplings/{coupling.id}",
+        json={"analyser_id": new_ac.id},
+    )
+    assert resp.status_code == 200
+    # Cross-mode swap: full deactivate + reactivate.
+    client._manager.deactivate.assert_awaited_once()
+    client._manager.activate_coupling.assert_awaited_once()
+    # Hot-swap paths must NOT have been used.
+    client._manager.restart_cava.assert_not_awaited()
+
+
+def test_analyser_id_fifo_to_canonical_deactivates_and_reactivates(
+    client: TestClient,
+):
+    """Changing analyser_id from a cava Analyser to a pcm_pipeline Analyser
+    also crosses the mode boundary and requires a full reactivate (item 19).
+    """
+    coupling = _make_full_coupling(client._storage)
+    # Old analyser is the default cava one from _make_full_coupling.
+    client._storage.set_active_coupling_id(coupling.id)
+    type(client._manager).active_bars_source = PropertyMock(return_value="cava")
+
+    new_ac = Analyser(
+        name="PCM AC", bars_source="pcm_pipeline", spectrum_backend="v2",
+    )
+    client._storage.save_analyser(new_ac)
+
+    resp = client.patch(
+        f"/api/couplings/{coupling.id}",
+        json={"analyser_id": new_ac.id},
+    )
+    assert resp.status_code == 200
+    client._manager.deactivate.assert_awaited_once()
+    client._manager.activate_coupling.assert_awaited_once()
+    client._manager.restart_cava.assert_not_awaited()
+
+
+def test_analyser_id_same_mode_canonical_uses_replace_pcm_analyser(
+    client: TestClient,
+):
+    """A within-mode analyser_id swap (pcm_pipeline → pcm_pipeline) must
+    route to replace_pcm_analyser (live swap), NOT to deactivate or to
+    restart_cava (item 19)."""
+    coupling = _make_full_coupling(client._storage)
+    old_ac = client._storage.get_analyser(coupling.analyser_id)
+    old_ac.bars_source = "pcm_pipeline"
+    old_ac.spectrum_backend = "v2"
+    client._storage.save_analyser(old_ac)
+
+    client._storage.set_active_coupling_id(coupling.id)
+    type(client._manager).active_bars_source = PropertyMock(
+        return_value="pcm_pipeline"
+    )
+
+    new_ac = Analyser(
+        name="PCM AC 2", bars_source="pcm_pipeline", spectrum_backend="v2",
+    )
+    client._storage.save_analyser(new_ac)
+
+    resp = client.patch(
+        f"/api/couplings/{coupling.id}",
+        json={"analyser_id": new_ac.id},
+    )
+    assert resp.status_code == 200
+    client._manager.deactivate.assert_not_awaited()
+    client._manager.activate_coupling.assert_not_awaited()
+    client._manager.restart_cava.assert_not_awaited()
+    client._manager.replace_pcm_analyser.assert_called_once()
+
+
+def test_restart_cava_endpoint_on_canonical_session_routes_to_pcm_path(
+    client: TestClient,
+):
+    """POST /api/couplings/{id}/restart-cava on a pcm_pipeline session must
+    route to replace_pcm_analyser rather than the FIFO/cava restart path
+    (item 18).
+    """
+    coupling = _make_full_coupling(client._storage)
+    ac = client._storage.get_analyser(coupling.analyser_id)
+    ac.bars_source = "pcm_pipeline"
+    ac.spectrum_backend = "v2"
+    client._storage.save_analyser(ac)
+
+    client._storage.set_active_coupling_id(coupling.id)
+    type(client._manager).active_bars_source = PropertyMock(
+        return_value="pcm_pipeline"
+    )
+
+    resp = client.post(f"/api/couplings/{coupling.id}/restart-cava", json={})
+    assert resp.status_code == 200
+    client._manager.restart_cava.assert_not_awaited()
+    client._manager.replace_pcm_analyser.assert_called_once()
+
+
+def test_restart_cava_endpoint_on_cava_session_routes_to_cava_restart(
+    client: TestClient,
+):
+    """POST /api/couplings/{id}/restart-cava on a cava/FIFO session keeps
+    the legacy behaviour: manager.restart_cava is called (item 18)."""
+    coupling = _make_full_coupling(client._storage)
+    client._storage.set_active_coupling_id(coupling.id)
+    type(client._manager).active_bars_source = PropertyMock(return_value="cava")
+
+    resp = client.post(f"/api/couplings/{coupling.id}/restart-cava", json={})
+    assert resp.status_code == 200
+    client._manager.restart_cava.assert_awaited_once()
+    client._manager.replace_pcm_analyser.assert_not_called()
 
 
 def test_bars_source_change_deactivates_session(client: TestClient):

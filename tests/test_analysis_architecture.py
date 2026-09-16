@@ -378,6 +378,75 @@ def test_beat_detector_reset_rebuilds_onset_pipeline():
     assert id(bd._onset_pipeline) != old_id
 
 
+def test_beat_detector_reset_rebuild_race_preserves_new_config():
+    """A rebuild that completes concurrently with a reset must not be
+    overwritten by the reset committing its captured-earlier state.
+
+    Reproduces the item-17 defect: pre-fix reset() captured self._state at
+    the top of the call, built a new state from that snapshot, then
+    committed via a plain attribute assignment at the bottom.  A rebuild()
+    landing between capture and commit would be silently reverted.
+
+    Forces the race deterministically: we monkey-patch _make_state so that
+    reset()'s intermediate work takes long enough to guarantee rebuild()
+    commits in the middle.  With the _rebuild_lock in place, rebuild()
+    cannot commit while reset() holds the lock (or vice versa), so the
+    surviving state must always match the rebuild parameters.
+    """
+    bd = _make_beat_detector(method="combined")
+    assert bd._state.onset_method == "combined"
+
+    barrier = threading.Barrier(2)
+    real_make_state = BeatDetector._make_state
+    rebuild_done = threading.Event()
+
+    def slow_make_state(cls, *args, **kw):  # type: ignore[no-untyped-def]
+        # Only slow the RESET path (which passes the OLD "combined" method).
+        # The rebuild path passes "superflux" and must run fast.
+        if args and args[0] == "combined":
+            barrier.wait()             # sync with rebuild
+            rebuild_done.wait(1.0)     # let rebuild finish first
+        return real_make_state.__func__(cls, *args, **kw)
+
+    BeatDetector._make_state = classmethod(slow_make_state)  # type: ignore[assignment]
+    try:
+        def do_reset() -> None:
+            bd.reset()
+
+        def do_rebuild() -> None:
+            barrier.wait()
+            bd.rebuild(
+                onset_method="superflux",
+                onset_delta=0.1,
+                onset_alpha=0.9,
+                superflux_mu=3,
+                superflux_lag=2,
+                bass_hz=250,
+                mid_hz=2000,
+            )
+            rebuild_done.set()
+
+        t_reset = threading.Thread(target=do_reset)
+        t_rebuild = threading.Thread(target=do_rebuild)
+        t_reset.start()
+        t_rebuild.start()
+        t_reset.join(timeout=3)
+        t_rebuild.join(timeout=3)
+        assert not t_reset.is_alive() and not t_rebuild.is_alive()
+    finally:
+        BeatDetector._make_state = real_make_state  # type: ignore[assignment]
+
+    # The rebuild committed "superflux" while reset was mid-flight.  With
+    # the _rebuild_lock fix, reset's commit either waited (still ended with
+    # superflux, because reset built its new state from the current locked
+    # snapshot which is now "superflux") or ran first (reset committed
+    # combined, rebuild then committed superflux).  Either way the final
+    # onset_method must be "superflux" — never "combined".
+    assert bd._state.onset_method == "superflux", (
+        "reset() overwrote a concurrently-installed rebuild()"
+    )
+
+
 def test_beat_detector_flush_returns_empty():
     bd = _make_beat_detector()
     assert bd.flush() == []
@@ -565,6 +634,84 @@ def test_h1_close_not_called_when_thread_still_alive(monkeypatch):
         "Processors must not be closed while the worker thread is still alive"
     )
     zombie.join(timeout=0.1)  # cleanup (daemon)
+
+
+def test_stop_timeout_defers_close_to_worker_finally():
+    """When stop() times out, the worker's finally block must close
+    processors exactly once when it eventually exits (item 15).
+
+    Simulates a stuck feed() by making source.read() block for ~0.5 s.  A
+    stop(timeout≈0.1) returns False without closing processors.  Once the
+    read blocks release and the worker exits its loop, the finally block
+    picks up the close responsibility so no native resources leak.
+    """
+    close_calls: list[str] = []
+    release_read = threading.Event()
+
+    class _BlockingSource:
+        def read(self):
+            from huesync.canonicalizer import TemporarilyNoData
+            # Block until the test releases us; simulates a wedged read.
+            release_read.wait(2.0)
+            return TemporarilyNoData()
+
+        @property
+        def running(self) -> bool:
+            return True
+
+    class _TrackingEngine:
+        @property
+        def engine_id(self) -> str:
+            return "tracking"
+
+        def feed(self, pcm, shared):
+            return []
+
+        def flush(self):
+            return []
+
+        def reset(self) -> None:
+            pass
+
+        def close(self) -> None:
+            close_calls.append("engine_close")
+
+    cap = _make_cap(engine=_TrackingEngine(), source=_BlockingSource())
+    # Patch the join timeout by temporarily overriding stop's behaviour:
+    # we invoke stop() while the worker is blocked in read().
+    cap.start()
+    # Give the worker a moment to enter read().
+    time.sleep(0.05)
+    # Reduce the join wait so stop() returns quickly with a timeout.
+    original_join = cap._thread.join
+    cap._thread.join = lambda timeout=None: original_join(timeout=0.1)  # type: ignore[assignment]
+
+    clean = cap.stop()
+    assert clean is False, "Blocked worker must cause stop() to return False"
+    assert close_calls == [], (
+        "stop() must NOT close processors while the worker is still alive"
+    )
+
+    # Now release the worker; it will loop, see _stop, exit, and its
+    # finally block must run close() exactly once.
+    release_read.set()
+    # Wait for the real thread to exit.
+    original_join(timeout=2.0)
+    # Small window for finally to run.
+    for _ in range(50):
+        if close_calls:
+            break
+        time.sleep(0.02)
+
+    assert close_calls == ["engine_close"], (
+        f"Worker's finally block must close processors exactly once; got {close_calls}"
+    )
+
+    # Calling stop() again after the fact must NOT double-close.
+    cap.stop()
+    assert close_calls == ["engine_close"], (
+        "Second stop() must not re-close processors already handled by _run finally"
+    )
 
 
 # ---------------------------------------------------------------------------

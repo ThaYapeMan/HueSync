@@ -356,6 +356,12 @@ async def _apply_coupling_action(
                                 process to restart.
       * cava sessions:          spectrum / band changes are handled by
                                 ``restart_cava`` (external CAVA / FIFO path).
+
+    Cross-mode ``analyser_id`` swap (canonical ↔ FIFO):
+      A change of ``analyser_id`` where the new Analyser has a different
+      ``bars_source`` than the currently active session cannot be hot-swapped
+      — SyncEngine initialisation differs between the two paths.  Such a
+      change triggers a full deactivate + reactivate cycle.
     """
     profile = _build_engine_profile(coupling, storage)
     if not profile:
@@ -365,6 +371,19 @@ async def _apply_coupling_action(
     if changed & _C_DEACTIVATE_FIELDS:
         await manager.deactivate()
         return
+
+    # Cross-mode analyser swap: the currently active session runs on
+    # bars_source X, and the new analyser has bars_source Y ≠ X.  Neither
+    # replace_pcm_analyser (needs an existing pcm_pipeline session) nor
+    # restart_cava (needs a running cava/FIFO) can bridge that boundary.
+    # A full deactivate + reactivate is required.
+    if "analyser_id" in changed:
+        old_bars_source = manager.active_bars_source
+        new_bars_source = profile.bars_source
+        if old_bars_source is not None and old_bars_source != new_bars_source:
+            await manager.deactivate()
+            await manager.activate_coupling(coupling)
+            return
 
     # A new SpectrumEngine (spectrum_backend swap) or any change to the bar
     # geometry (bars / cutoffs) or the Analyser identity (analyser_id) needs
@@ -1224,8 +1243,28 @@ async def restart_coupling_cava(
                 if changed_effect:
                     storage.save_effect(effect)
 
+    # Route to the correct rebuild path for the active session.  A
+    # canonical/pcm_pipeline session has no external cava process to
+    # restart — the equivalent operation is replace_pcm_analyser, which
+    # rebuilds the running CanonicalAnalysisPipeline with the persisted
+    # analyser configuration.  Only sessions whose bars_source is "cava"
+    # (external CAVA/FIFO) actually restart the cava process.
     try:
-        await manager.restart_cava()
+        if manager.active_bars_source == "pcm_pipeline":
+            coupling = storage.get_coupling(coupling_id)
+            if coupling is None:
+                raise HTTPException(status_code=404, detail="Coupling not found")
+            profile = _build_engine_profile(coupling, storage)
+            if profile is None:
+                raise HTTPException(
+                    status_code=422,
+                    detail="Coupling has broken FK references",
+                )
+            manager.replace_pcm_analyser(profile)
+        else:
+            await manager.restart_cava()
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     return {"ok": True}
