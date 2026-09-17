@@ -242,3 +242,37 @@ An active repaired binding is deactivated; there is no automatic activation.
 The runtime lease prevents repair while the current HueSync process owns the file.
 After success, resume `sudo ./scripts/install-huesync.sh`, then select/activate the
 intended Coupling. Never edit the JSON manually to bypass validation.
+
+
+## LMS follow mode
+
+VirtualPlayers have a `follow_mode` setting:
+
+- `manual` (default, including existing configurations): retains the existing
+  fixed `follow_player_mac` and its event-driven track mirroring behavior.
+- `sync_group`: manually sync HueSync with a room in LMS first. Native LMS sync
+  delivers the audio. HueSync passively observes `listen 1` and queries its own
+  player's `sync ?` on activation/reconnection, on sync/client notifications,
+  and every five seconds. It never sends playback commands or changes group
+  membership in this mode.
+
+The Virtual Player editor exposes both modes and retains the manual MAC when
+switching to automatic mode. Changing modes deactivates an active owning session;
+activate the Coupling again to use the new setting.
+
+Auto mode excludes all HueSync-managed player identities. With multiple external
+group members it keeps the selected peer while that peer remains present;
+otherwise it selects the first normalized MAC in sorted order. The displayed
+target and latency configuration follow that selection. Different rooms can
+have different latency settings even though they share a queue; use manual mode
+when a specific room must be pinned.
+
+Now Playing shows a warning when HueSync is not synced, when only managed players
+are grouped, or when LMS cannot be queried. No target is inferred from which
+independent player happens to be playing. A query failure clears the detected
+target until a successful refresh. Automatic selection is runtime state, not a
+replacement for the saved manual MAC.
+
+Local tests cover selection, notifications, polling, reconnect, teardown, and
+absence of playback/group mutations. Live LMS/plugin and audio delivery behavior
+still requires target-LXC verification.

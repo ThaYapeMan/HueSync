@@ -307,6 +307,11 @@ class VirtualPlayer:
     # event feed.  Empty string means no following — HueSync plays
     # whatever LMS sends it directly.
     follow_player_mac: str = ""
+    follow_mode: str = "manual"
+
+    def __post_init__(self) -> None:
+        if self.follow_mode not in {"manual", "sync_group"}:
+            raise ValueError(f"Invalid follow_mode {self.follow_mode!r}")
 
     def to_dict(self) -> dict:
         return {
@@ -319,6 +324,7 @@ class VirtualPlayer:
             "player_mac": self.player_mac,
             "alsa_device": self.alsa_device,
             "follow_player_mac": self.follow_player_mac,
+            "follow_mode": self.follow_mode,
         }
 
     @classmethod

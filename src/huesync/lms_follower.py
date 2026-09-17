@@ -9,6 +9,9 @@ to 'playlist newsong', 'playlist stop', and 'playlist pause' events from
 the configured follow_player_mac by mirroring those commands to HueSync's
 own player.
 
+LmsSyncGroupObserver instead preserves native sync membership and uses only
+read-only group queries and notifications. It never invokes mirroring helpers.
+
 Reconnects automatically with exponential backoff on any disconnection.
 """
 
@@ -17,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import socket
+from collections.abc import Awaitable, Callable, Iterable
 from urllib.parse import quote, unquote
 
 log = logging.getLogger(__name__)
@@ -361,3 +365,112 @@ class LmsFollower:
         except Exception as exc:
             log.warning("LMS follower: failed to send %s command: %s",
                         "pause" if state else "unpause", exc)
+
+
+class LmsSyncGroupObserver(LmsFollower):
+    """Read-only LMS group observer; never invokes the manual mirroring helpers.
+
+    One serialized refresh loop owns target changes. Notifications request an
+    early refresh, with a five-second poll covering missed/reconnect events.
+    """
+
+    def __init__(
+        self, lms_host: str, huesync_mac: str,
+        managed_macs: Callable[[], Iterable[str]],
+        on_target_changed: Callable[[str | None], Awaitable[None]],
+        cli_port: int = _DEFAULT_CLI_PORT,
+        poll_interval: float = 5.0,
+    ) -> None:
+        super().__init__(lms_host, "", huesync_mac, cli_port)
+        self._managed_macs = managed_macs
+        self._on_target_changed = on_target_changed
+        self._poll_interval = poll_interval
+        self._refresh_requested = asyncio.Event()
+        self._group_warning: str | None = "Checking LMS sync group"
+        self._target_initialized = False
+
+    @property
+    def warning(self) -> str | None:
+        return self._group_warning or super().warning
+
+    async def _connect_and_listen(self) -> None:
+        self._refresh_requested.set()
+        await super()._connect_and_listen()
+
+    async def _run(self) -> None:
+        monitor = asyncio.create_task(self._monitor_group(), name="lms-sync-group")
+        try:
+            await super()._run()
+        finally:
+            monitor.cancel()
+            try:
+                await monitor
+            except asyncio.CancelledError:
+                pass
+
+    async def _handle_line(self, line: str) -> None:
+        # Observe only: even newsong/pause/stop must never reach the mirroring
+        # dispatcher. A sync command may name either member, so refresh for any.
+        parts = line.split()
+        if len(parts) >= 2 and parts[1] in {"sync", "client"}:
+            self._refresh_requested.set()
+
+    async def _monitor_group(self) -> None:
+        while not self._stop_event.is_set():
+            self._refresh_requested.clear()
+            try:
+                await self._refresh_group()
+            except Exception:
+                # Keep monitoring after transient probe/status failures.
+                self._group_warning = "Cannot update LMS sync-group status — retrying"
+                log.exception("LMS sync-group observation failed")
+            try:
+                await asyncio.wait_for(
+                    self._refresh_requested.wait(), timeout=self._poll_interval,
+                )
+            except TimeoutError:
+                pass
+
+    async def _refresh_group(self) -> None:
+        from .lms_status import query_lms_sync_peers
+
+        query = asyncio.create_task(asyncio.to_thread(
+            query_lms_sync_peers, self._host, self._huesync_mac, self._port,
+        ))
+        try:
+            peers = await asyncio.shield(query)
+        except asyncio.CancelledError:
+            # Own the bounded blocking query until its socket has closed.
+            try:
+                await query
+            except Exception:
+                pass
+            raise
+        except (OSError, ValueError):
+            self._group_warning = "Cannot query LMS sync group — check the LMS connection"
+            await self._set_target(None)
+            return
+
+        excluded = {mac.strip().lower() for mac in self._managed_macs()}
+        excluded.add(self._huesync_mac.lower())
+        eligible = sorted({mac.strip().lower() for mac in peers} - excluded - {""})
+        if not peers:
+            self._group_warning = (
+                "Not synced with any player — sync HueSync with a room in LMS to receive audio"
+            )
+        elif not eligible:
+            self._group_warning = (
+                "No external player in the LMS sync group — sync HueSync with a room in LMS"
+            )
+        else:
+            self._group_warning = None
+        target = self._follow_mac if self._follow_mac in eligible else next(iter(eligible), None)
+        await self._set_target(target)
+
+    async def _set_target(self, target: str | None) -> None:
+        if not self._target_initialized or target != (self._follow_mac or None):
+            # Commit only after the manager has reconciled its displayed target
+            # and probe. A failed reconciliation is retried on the next refresh.
+            await self._on_target_changed(target)
+            self._follow_mac = target or ""
+            self._target_initialized = True

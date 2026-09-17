@@ -22,7 +22,7 @@ from .hue_bridge import list_entertainment_areas
 from .hue_output import ChannelInfo, HueDriver, HueOutputConfig, get_channel_infos
 from .latency import FixedLatencyProbe, NoLatencyProbe
 from .lms_discovery import discover_lms
-from .lms_follower import LmsFollower
+from .lms_follower import LmsFollower, LmsSyncGroupObserver
 from .lms_status import query_lms_status, query_lms_sync_peers, unsync_player
 from .models import BridgeConfig, Controller, Coupling, Profile, VirtualPlayerType
 from .pcm_source import (
@@ -580,6 +580,31 @@ class PlayerManager:
         else:
             await self._activate_lms_cava(session, profile, mellow_profile, output_config, channels)
 
+        if player.follow_mode == "sync_group":
+            async def target_changed(mac: str | None) -> None:
+                if session.stopping:
+                    return
+                await self._apply_probe_for_master(session, mac)
+                self._detected_sync_master = mac
+                self._detected_sync_master_name = None
+                if mac:
+                    try:
+                        status = await asyncio.to_thread(query_lms_status, player.lms_host, mac)
+                        self._detected_sync_master_name = status.player_name
+                    except OSError:
+                        pass  # MAC remains a usable display identity.
+
+            session.follower = LmsSyncGroupObserver(
+                player.lms_host, profile.player_mac,
+                managed_macs=lambda: [
+                    vp.player_mac for vp in self.storage.list_virtual_players()
+                ],
+                on_target_changed=target_changed,
+            )
+            session.follower_task = session.follower.start()
+            session.follower_task.add_done_callback(_log_task_failure)
+            return  # Auto mode must never schedule the manual unsync path.
+
         follow_mac = player.follow_player_mac
         if follow_mac:
             session.follower = LmsFollower(
@@ -1060,6 +1085,8 @@ class PlayerManager:
         if session.coupling:
             vp = self.storage.get_virtual_player(session.coupling.player_id)
             if vp:
+                if vp.follow_mode == "sync_group":
+                    return  # The session observer owns dynamic target/probe updates.
                 follow_mac = vp.follow_player_mac or None
 
         lms_host = profile.lms_host

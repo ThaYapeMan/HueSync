@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from dataclasses import replace
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
@@ -152,6 +153,7 @@ class VirtualPlayerCreateBody(BaseModel):
     player_mac: str = ""
     alsa_device: str = ""
     follow_player_mac: str = ""
+    follow_mode: Literal["manual", "sync_group"] = "manual"
 
 
 class VirtualPlayerPatchBody(BaseModel):
@@ -163,6 +165,7 @@ class VirtualPlayerPatchBody(BaseModel):
     display_name: str | None = None
     alsa_device: str | None = None
     follow_player_mac: str | None = None
+    follow_mode: Literal["manual", "sync_group"] | None = None
 
 
 class ZoneCreateBody(BaseModel):
@@ -338,7 +341,8 @@ _C_DEACTIVATE_FIELDS: frozenset[str] = frozenset({
     # a new process (player_id) or a new Zone cannot be hot-swapped into a
     # running session.
     "player_id", "zone_id",
-    "lms_host", "lms_port", "player_name", "display_name", "alsa_device", "follow_player_mac",
+    "lms_host", "lms_port", "player_name", "display_name", "alsa_device",
+    "follow_player_mac", "follow_mode",
 })
 # FK fields that do NOT require a full restart — handled via lighter live-update
 # paths in _apply_coupling_action().
@@ -746,6 +750,7 @@ async def create_virtual_player(request: Request, body: VirtualPlayerCreateBody)
         player_mac=mac,
         alsa_device=body.alsa_device,
         follow_player_mac=body.follow_player_mac,
+        follow_mode=body.follow_mode,
     )
     storage.save_virtual_player(player)
     return JSONResponse(content=player.to_dict(), status_code=201)
@@ -767,6 +772,8 @@ async def patch_virtual_player(player_id: str, request: Request, body: VirtualPl
     if player is None:
         raise HTTPException(status_code=404, detail="VirtualPlayer not found")
     updates = body.model_dump(exclude_unset=True)
+    if "follow_mode" in updates and updates["follow_mode"] is None:
+        raise HTTPException(status_code=422, detail="follow_mode cannot be null")
     if "type" in updates:
         if updates["type"] not in VIRTUAL_PLAYER_TYPES:
             raise HTTPException(status_code=422, detail=f"Unknown player type {updates['type']!r}")

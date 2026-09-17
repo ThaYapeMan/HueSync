@@ -458,3 +458,13 @@ def test_each_restore_retains_its_own_private_safety_copy(configured, tmp_path):
     assert first.stat().st_mode & 0o777 == second.stat().st_mode & 0o777 == 0o600
     old.chmod(0o600)
     assert old.read_bytes() == before
+
+def test_auto_follow_mode_and_manual_target_survive_backup(configured, tmp_path):
+    player = configured.get_virtual_player("lms")
+    player.follow_mode = "sync_group"
+    configured.save_virtual_player(player)
+    target = Storage(tmp_path / "restored.json")
+    restore_configuration(target, export_configuration(configured))
+    restored = target.get_virtual_player("lms")
+    assert restored.follow_mode == "sync_group"
+    assert restored.follow_player_mac == "speaker-mac"

@@ -1512,3 +1512,49 @@ def test_patch_analyser_cava_fifo_with_cavacore_rejected(client: TestClient):
 
     patch_resp = client.patch(f"/api/analysers/{ac_id}", json={"bars_source": "cava"})
     assert patch_resp.status_code == 422
+
+
+def test_virtual_player_follow_mode_roundtrip_and_default(client):
+    response = client.post("/api/virtual-players", json={"player_name": "Default"})
+    assert response.status_code == 201
+    assert response.json()["follow_mode"] == "manual"
+    player_id = response.json()["id"]
+    response = client.patch(f"/api/virtual-players/{player_id}", json={
+        "follow_mode": "sync_group", "follow_player_mac": "aa:bb:cc:dd:ee:ff",
+    })
+    assert response.status_code == 200
+    assert response.json()["follow_mode"] == "sync_group"
+    assert client._storage.get_virtual_player(player_id).follow_mode == "sync_group"
+    response = client.patch(f"/api/virtual-players/{player_id}", json={"follow_mode": "manual"})
+    assert response.json()["follow_player_mac"] == "aa:bb:cc:dd:ee:ff"
+
+
+@pytest.mark.parametrize("value", ["auto", "", None, 1])
+def test_invalid_follow_mode_rejected_without_mutation(client, value):
+    created = client.post("/api/virtual-players", json={"player_name": "Manual"}).json()
+    before = client._storage.get_virtual_player(created["id"]).to_dict()
+    response = client.patch(f"/api/virtual-players/{created['id']}", json={"follow_mode": value})
+    assert response.status_code == 422
+    assert client._storage.get_virtual_player(created["id"]).to_dict() == before
+
+
+def test_follow_mode_change_deactivates_owning_session(client):
+    coupling = _make_full_coupling(client._storage)
+    client._storage.set_active_coupling_id(coupling.id)
+    response = client.patch(
+        f"/api/virtual-players/{coupling.player_id}", json={"follow_mode": "sync_group"},
+    )
+    assert response.status_code == 200
+    client._manager.deactivate.assert_awaited_once()
+
+
+def test_persisted_follow_mode_validation_and_missing_default():
+    from huesync.schema import empty_config, validate_current
+
+    data = empty_config()
+    data["virtual_players"] = [{"id": "old"}]
+    validate_current(data)
+    assert VirtualPlayer.from_dict(data["virtual_players"][0]).follow_mode == "manual"
+    data["virtual_players"][0]["follow_mode"] = "invalid"
+    with pytest.raises(ValueError, match="follow_mode"):
+        validate_current(data)

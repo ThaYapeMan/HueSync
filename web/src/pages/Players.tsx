@@ -46,6 +46,7 @@ interface FormState {
   display_name: string
   alsa_device: string
   follow_player_mac: string
+  follow_mode: 'manual' | 'sync_group'
 }
 
 function defaultForm(player?: VirtualPlayer): FormState {
@@ -57,6 +58,7 @@ function defaultForm(player?: VirtualPlayer): FormState {
     display_name: player?.display_name ?? '',
     alsa_device: player?.alsa_device ?? '',
     follow_player_mac: player?.follow_player_mac ?? '',
+    follow_mode: player?.follow_mode ?? 'manual',
   }
 }
 
@@ -159,6 +161,7 @@ export function Players({ activeCouplingId = null }: { activeCouplingId?: string
           display_name: form.display_name,
           alsa_device: form.alsa_device,
           follow_player_mac: form.follow_player_mac,
+          follow_mode: form.follow_mode,
         })
       } else {
         await createVirtualPlayer({
@@ -169,6 +172,7 @@ export function Players({ activeCouplingId = null }: { activeCouplingId?: string
           display_name: form.display_name,
           alsa_device: form.alsa_device,
           follow_player_mac: form.follow_player_mac,
+          follow_mode: form.follow_mode,
         })
       }
       setEditorOpen(false)
@@ -360,6 +364,22 @@ export function Players({ activeCouplingId = null }: { activeCouplingId?: string
                   />
                 </FormRow>
 
+                <FormRow label="Follow mode">
+                  <Select value={form.follow_mode} onValueChange={(v) => set('follow_mode', v)}>
+                    <SelectTrigger aria-label="Follow mode"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="manual">Manual — fixed player</SelectItem>
+                      <SelectItem value="sync_group">Automatic — LMS sync group</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </FormRow>
+                {form.follow_mode === 'sync_group' ? (
+                  <p className="text-sm text-muted-foreground">
+                    Sync HueSync with a room in LMS. HueSync observes that group automatically
+                    and never changes its membership or sends playback commands.
+                    Your manual target is retained when switching modes.
+                  </p>
+                ) : (
                 <div className="space-y-1">
                   <Label className="text-sm">Follow player</Label>
                   <p className="text-xs text-muted-foreground">
@@ -395,6 +415,7 @@ export function Players({ activeCouplingId = null }: { activeCouplingId?: string
                     <p className="text-xs text-destructive">{discoverError}</p>
                   )}
                 </div>
+                )}
 
                 {editingPlayer && (
                   <div className="space-y-1">

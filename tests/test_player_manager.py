@@ -916,3 +916,51 @@ def test_installed_producer_matches_ingress_abi(tmp_path):
             import pytest
             with pytest.raises(RuntimeError, match='install-huesync'):
                 manager._start_squeezelite(session, profile)
+
+
+@pytest.mark.parametrize("bars_source", ["cava", "pcm_pipeline"])
+def test_sync_group_activation_never_schedules_manual_unsync(tmp_path, bars_source):
+    from huesync.lms_follower import LmsSyncGroupObserver
+
+    async def run():
+        storage, coupling = _make_full_storage(tmp_path)
+        player = storage.get_virtual_player("player-1")
+        player.follow_mode = "sync_group"
+        player.follow_player_mac = "old-manual-target"
+        storage.save_virtual_player(player)
+        manager = PlayerManager(storage)
+        profile = Profile(player_mac=player.player_mac, bars_source=bars_source)
+        session = ActiveSession(profile, coupling=coupling)
+        manager._active = session
+        async def idle(_self):
+            await asyncio.Event().wait()
+
+        with patch.object(manager, "_start_squeezelite"), \
+             patch.object(manager, "_activate_lms_pcm", new=AsyncMock()), \
+             patch.object(manager, "_activate_lms_cava", new=AsyncMock()), \
+             patch.object(LmsSyncGroupObserver, "_run", idle), \
+             patch.object(manager, "_delayed_unsync_and_follow", new=AsyncMock()) as unsync, \
+             patch.object(manager, "_apply_probe_for_master", new=AsyncMock()) as probe, \
+             patch("huesync.player_manager.query_lms_status",
+                   return_value=LmsPlayerStatus(player_name="Room")) as status:
+            await manager._activate_lms(session, profile, player, None, None, [])
+            assert isinstance(session.follower, LmsSyncGroupObserver)
+            assert session.unsync_task is None
+            unsync.assert_not_awaited()
+            await manager._poll_sync_master(session)
+            status.assert_not_called()  # no stale manual-target probe
+            await session.follower._set_target("aa:bb:cc:dd:ee:ff")
+            probe.assert_awaited_with(session, "aa:bb:cc:dd:ee:ff")
+            assert manager.detected_sync_master_name == "Room"
+            assert manager.detected_sync_master == "aa:bb:cc:dd:ee:ff"
+            await session.follower._set_target(None)
+            assert manager.detected_sync_master is None
+            assert manager.detected_sync_master_name is None
+            task = session.follower_task
+            await manager._teardown_session(session)
+            assert task.done()
+            assert session.follower_task is None
+            # A repeated teardown does not resurrect observation or start mirroring.
+            await manager._teardown_session(session)
+            unsync.assert_not_awaited()
+    asyncio.run(run())

@@ -154,6 +154,7 @@ export interface VirtualPlayer {
   player_mac: string
   alsa_device: string
   follow_player_mac: string
+  follow_mode: 'manual' | 'sync_group'
 }
 
 export interface LmsPlayer {
