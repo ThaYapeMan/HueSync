@@ -26,9 +26,13 @@ from .models import (
     VirtualPlayer,
     Zone,
 )
-from .schema import empty_config, validate_current
+from .schema import REFERENCES, empty_config, validate_current
 
 _lock = threading.Lock()
+
+
+class ReferencedEntityError(ValueError):
+    """A delete would break a persisted relationship."""
 
 
 class Storage:
@@ -63,6 +67,22 @@ class Storage:
         """Exclude all in-process CRUD writes during an atomic full restore."""
         with _lock:
             yield
+
+    def _delete_entity(self, collection: str, identity: str) -> None:
+        # The reference check and write share the CRUD lock: no check/delete gap.
+        with _lock:
+            data = self._read()
+            blockers = [
+                f"{source}: {row.get('name', '(unnamed)')} ({row['id']}) via {field}"
+                for source, field, target in REFERENCES if target == collection
+                for row in data[source] if row.get(field) == identity
+            ]
+            if blockers:
+                raise ReferencedEntityError(
+                    "Cannot delete: referenced by " + "; ".join(blockers)
+                    + ". Reassign or remove these references first.")
+            data[collection] = [row for row in data[collection] if row['id'] != identity]
+            self._write(data)
 
     # -- Player latencies ---------------------------------------------------
 
@@ -110,10 +130,7 @@ class Storage:
             self._write(data)
 
     def delete_controller(self, controller_id: str) -> None:
-        with _lock:
-            data = self._read()
-            data["controllers"] = [c for c in data["controllers"] if c["id"] != controller_id]
-            self._write(data)
+        self._delete_entity("controllers", controller_id)
 
     # -- VirtualPlayers -----------------------------------------------------
 
@@ -132,10 +149,7 @@ class Storage:
             self._write(data)
 
     def delete_virtual_player(self, player_id: str) -> None:
-        with _lock:
-            data = self._read()
-            data["virtual_players"] = [p for p in data["virtual_players"] if p["id"] != player_id]
-            self._write(data)
+        self._delete_entity("virtual_players", player_id)
 
     # -- Zones --------------------------------------------------------------
 
@@ -154,10 +168,7 @@ class Storage:
             self._write(data)
 
     def delete_zone(self, zone_id: str) -> None:
-        with _lock:
-            data = self._read()
-            data["zones"] = [x for x in data["zones"] if x["id"] != zone_id]
-            self._write(data)
+        self._delete_entity("zones", zone_id)
 
     # -- Analysers ----------------------------------------------------
 
@@ -176,10 +187,7 @@ class Storage:
             self._write(data)
 
     def delete_analyser(self, ac_id: str) -> None:
-        with _lock:
-            data = self._read()
-            data["analysers"] = [x for x in data["analysers"] if x["id"] != ac_id]
-            self._write(data)
+        self._delete_entity("analysers", ac_id)
 
     # -- Effects ------------------------------------------------------------
 
@@ -198,10 +206,7 @@ class Storage:
             self._write(data)
 
     def delete_effect(self, effect_id: str) -> None:
-        with _lock:
-            data = self._read()
-            data["effects"] = [x for x in data["effects"] if x["id"] != effect_id]
-            self._write(data)
+        self._delete_entity("effects", effect_id)
 
     # -- EnergyProfiles ----------------------------------------------------
 
@@ -220,10 +225,7 @@ class Storage:
             self._write(data)
 
     def delete_energy_profile(self, ep_id: str) -> None:
-        with _lock:
-            data = self._read()
-            data["energy_profiles"] = [x for x in data["energy_profiles"] if x["id"] != ep_id]
-            self._write(data)
+        self._delete_entity("energy_profiles", ep_id)
 
     # -- Couplings ----------------------------------------------------------
 

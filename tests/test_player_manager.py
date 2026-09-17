@@ -6,6 +6,7 @@ uses, so there is no seam between test and production behaviour.
 """
 
 import asyncio
+import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -195,6 +196,13 @@ def test_cleanup_orphaned_shm_removes_multiple(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _remove_from_corrupt_fixture(storage: Storage, collection: str, identity: str) -> None:
+    """Simulate pre-guard persisted corruption, not a now-forbidden normal delete."""
+    data = storage.read_configuration()
+    data[collection] = [row for row in data[collection] if row['id'] != identity]
+    storage.path.write_text(json.dumps(data))
+
+
 def _make_full_storage(tmp_path: Path) -> tuple[Storage, Coupling]:
     """Create a Storage pre-populated with one complete set of linked entities."""
     storage = Storage(tmp_path / "config.json")
@@ -278,31 +286,31 @@ def test_build_profile_from_coupling_maps_all_fields(tmp_path: Path) -> None:
 
 def test_build_profile_from_coupling_returns_none_on_missing_player(tmp_path: Path) -> None:
     storage, coupling = _make_full_storage(tmp_path)
-    storage.delete_virtual_player("player-1")
+    _remove_from_corrupt_fixture(storage, "virtual_players", "player-1")
     assert _build_engine_profile(coupling, storage) is None
 
 
 def test_build_profile_from_coupling_returns_none_on_missing_zone(tmp_path: Path) -> None:
     storage, coupling = _make_full_storage(tmp_path)
-    storage.delete_zone("zone-1")
+    _remove_from_corrupt_fixture(storage, "zones", "zone-1")
     assert _build_engine_profile(coupling, storage) is None
 
 
 def test_build_profile_from_coupling_returns_none_on_missing_ac(tmp_path: Path) -> None:
     storage, coupling = _make_full_storage(tmp_path)
-    storage.delete_analyser("ac-1")
+    _remove_from_corrupt_fixture(storage, "analysers", "ac-1")
     assert _build_engine_profile(coupling, storage) is None
 
 
 def test_build_profile_from_coupling_returns_none_on_missing_energy_profile(tmp_path: Path) -> None:
     storage, coupling = _make_full_storage(tmp_path)
-    storage.delete_energy_profile("cf-1")
+    _remove_from_corrupt_fixture(storage, "energy_profiles", "cf-1")
     assert _build_engine_profile(coupling, storage) is None
 
 
 def test_build_profile_from_coupling_returns_none_on_missing_scene(tmp_path: Path) -> None:
     storage, coupling = _make_full_storage(tmp_path)
-    storage.delete_effect("scene-1")
+    _remove_from_corrupt_fixture(storage, "effects", "scene-1")
     assert _build_engine_profile(coupling, storage) is None
 
 
@@ -313,7 +321,7 @@ def test_build_profile_from_coupling_returns_none_on_missing_scene(tmp_path: Pat
 
 def test_activate_coupling_raises_on_missing_player(tmp_path: Path) -> None:
     storage, coupling = _make_full_storage(tmp_path)
-    storage.delete_virtual_player("player-1")
+    _remove_from_corrupt_fixture(storage, "virtual_players", "player-1")
     manager = PlayerManager(storage)
 
     with pytest.raises(ValueError, match="missing VirtualPlayer"):
@@ -322,7 +330,7 @@ def test_activate_coupling_raises_on_missing_player(tmp_path: Path) -> None:
 
 def test_activate_coupling_raises_on_missing_zone(tmp_path: Path) -> None:
     storage, coupling = _make_full_storage(tmp_path)
-    storage.delete_zone("zone-1")
+    _remove_from_corrupt_fixture(storage, "zones", "zone-1")
     manager = PlayerManager(storage)
 
     with pytest.raises(ValueError, match="missing Zone"):
@@ -331,7 +339,7 @@ def test_activate_coupling_raises_on_missing_zone(tmp_path: Path) -> None:
 
 def test_activate_coupling_raises_on_missing_analyser(tmp_path: Path) -> None:
     storage, coupling = _make_full_storage(tmp_path)
-    storage.delete_analyser("ac-1")
+    _remove_from_corrupt_fixture(storage, "analysers", "ac-1")
     manager = PlayerManager(storage)
 
     with pytest.raises(ValueError, match="missing Analyser"):
@@ -340,7 +348,7 @@ def test_activate_coupling_raises_on_missing_analyser(tmp_path: Path) -> None:
 
 def test_activate_coupling_raises_on_missing_energy_profile(tmp_path: Path) -> None:
     storage, coupling = _make_full_storage(tmp_path)
-    storage.delete_energy_profile("cf-1")
+    _remove_from_corrupt_fixture(storage, "energy_profiles", "cf-1")
     manager = PlayerManager(storage)
 
     with pytest.raises(ValueError, match="missing EnergyProfile"):
@@ -349,7 +357,7 @@ def test_activate_coupling_raises_on_missing_energy_profile(tmp_path: Path) -> N
 
 def test_activate_coupling_raises_on_missing_scene(tmp_path: Path) -> None:
     storage, coupling = _make_full_storage(tmp_path)
-    storage.delete_effect("scene-1")
+    _remove_from_corrupt_fixture(storage, "effects", "scene-1")
     manager = PlayerManager(storage)
 
     with pytest.raises(ValueError, match="missing Effect"):
@@ -358,7 +366,7 @@ def test_activate_coupling_raises_on_missing_scene(tmp_path: Path) -> None:
 
 def test_activate_coupling_raises_on_missing_controller(tmp_path: Path) -> None:
     storage, coupling = _make_full_storage(tmp_path)
-    storage.delete_controller("ctrl-1")
+    _remove_from_corrupt_fixture(storage, "controllers", "ctrl-1")
     manager = PlayerManager(storage)
 
     with pytest.raises(ValueError, match="missing Controller"):

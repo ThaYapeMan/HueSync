@@ -411,9 +411,11 @@ def test_lms_players_endpoint_returns_list(client: TestClient, monkeypatch):
 
 
 def test_create_and_get_zone(client: TestClient):
+    controller = client.post('/api/controllers', json={'name': 'Bridge', 'host': '192.0.2.1'})
+    assert controller.status_code == 201
     payload = {
         "name": "Living Room EA",
-        "controller_id": "ctrl-1",
+        "controller_id": controller.json()['id'],
         "entertainment_area_id": "ea-1",
         "entertainment_area_name": "Living Room",
         "light_count": 4,

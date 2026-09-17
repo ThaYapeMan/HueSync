@@ -19,19 +19,23 @@ interface Props {
 export function ConfirmDialog({ trigger, title, description, onConfirm }: Props) {
   const [open, setOpen] = useState(false)
   const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
 
   async function handleConfirm() {
+    setError(null)
     setBusy(true)
     try {
       await onConfirm()
       setOpen(false)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Delete failed')
     } finally {
       setBusy(false)
     }
   }
 
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
+    <Dialog open={open} onOpenChange={(value) => { setOpen(value); setError(null) }}>
       <span onClick={() => setOpen(true)} style={{ display: 'contents' }}>
         {trigger}
       </span>
@@ -40,6 +44,7 @@ export function ConfirmDialog({ trigger, title, description, onConfirm }: Props)
           <DialogTitle>{title}</DialogTitle>
           <DialogDescription>{description}</DialogDescription>
         </DialogHeader>
+        {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
         <DialogFooter>
           <Button variant="outline" onClick={() => setOpen(false)} disabled={busy}>
             Cancel

@@ -197,3 +197,48 @@ See the [effects catalog](effects.md) for every current `effect_type` and the se
 each renderer actually uses. Controller creation/pairing and Spectrum backend
 selection currently use the API; the UI lists existing Controllers for Zones and
 edits bars-source/onset settings but does not expose `spectrum_backend`.
+
+## Referenced entities and deletion
+
+Deleting a VirtualPlayer, Zone, Analyser or EnergyProfile referenced by a Coupling
+returns HTTP 409. Controllers referenced by Zones and Effects referenced by either
+EnergyProfile effect slot are protected too. The error identifies the blocking
+entities; reassign or remove their references first. Deletion never cascades.
+The UI displays the error in its confirmation dialog. API creates/patches also
+reject nonexistent reference targets; an empty selection remains permitted.
+
+### Repairing a previously dangling player reference
+
+Use the **current checkout's** migration tool, including when an older installation
+cannot finish migration. First identify the Coupling; inspection is read-only and
+prints only its name, IDs, available player names/types, and a SHA256 fingerprint:
+
+```sh
+sudo env PYTHONPATH="$PWD/src" /opt/huesync/.venv/bin/python -m huesync.migration \
+  /etc/huesync/config.json --inspect-coupling COUPLING_ID
+```
+
+Do not choose an action until that report identifies the intended binding. Stop
+HueSync before applying a repair. With the fingerprint from inspection, choose
+**one** explicit operation:
+
+```sh
+sudo systemctl stop huesync
+# Remove only the identified Coupling whose player is missing:
+sudo env PYTHONPATH="$PWD/src" /opt/huesync/.venv/bin/python -m huesync.migration \
+  /etc/huesync/config.json --remove-dangling-coupling COUPLING_ID --expect-sha256 SHA256
+# OR reassign that Coupling to an explicitly selected existing player:
+sudo env PYTHONPATH="$PWD/src" /opt/huesync/.venv/bin/python -m huesync.migration \
+  /etc/huesync/config.json --reassign-dangling-coupling COUPLING_ID \
+  --player-id EXISTING_PLAYER_ID --expect-sha256 SHA256
+```
+
+The command rejects changed fingerprints, non-dangling bindings and invalid target
+players. It validates the complete repaired configuration before creating an exact
+0600 `config.json.pre-v1.<sha256>.bak` safety copy and atomically replacing the file.
+For historical data, the explicitly superseded Profile snapshot is removed with
+that binding so it cannot resurrect it. All original bytes remain in the backup.
+An active repaired binding is deactivated; there is no automatic activation.
+The runtime lease prevents repair while the current HueSync process owns the file.
+After success, resume `sudo ./scripts/install-huesync.sh`, then select/activate the
+intended Coupling. Never edit the JSON manually to bypass validation.

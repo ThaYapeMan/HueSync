@@ -32,6 +32,16 @@ COLLECTIONS = {
 }
 
 
+REFERENCES = (
+    ("zones", "controller_id", "controllers"),
+    ("energy_profiles", "high_energy_effect_id", "effects"),
+    ("energy_profiles", "low_energy_effect_id", "effects"),
+    ("couplings", "player_id", "virtual_players"),
+    ("couplings", "zone_id", "zones"),
+    ("couplings", "analyser_id", "analysers"),
+    ("couplings", "energy_profile_id", "energy_profiles"),
+)
+
 _FIELD_TYPES = {key: get_type_hints(model) for key, model in COLLECTIONS.items()}
 
 def empty_config() -> dict:
@@ -86,15 +96,7 @@ def validate_current(data: dict, *, references: bool = False) -> None:
     if data["active_coupling_id"] is not None and not isinstance(data["active_coupling_id"], str):
         raise ValueError("active_coupling_id must be a string or null")
     if references:
-        for collection, field, target in (
-            ("zones", "controller_id", "controllers"),
-            ("energy_profiles", "high_energy_effect_id", "effects"),
-            ("energy_profiles", "low_energy_effect_id", "effects"),
-            ("couplings", "player_id", "virtual_players"),
-            ("couplings", "zone_id", "zones"),
-            ("couplings", "analyser_id", "analysers"),
-            ("couplings", "energy_profile_id", "energy_profiles"),
-        ):
+        for collection, field, target in REFERENCES:
             for row in data[collection]:
                 value = row.get(field, "")
                 if value and value not in ids[target]:

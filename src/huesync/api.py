@@ -43,7 +43,8 @@ from .models import (
     Zone,
 )
 from .player_manager import PlayerManager, _build_engine_profile, _build_mellow_profile
-from .storage import Storage
+from .schema import REFERENCES
+from .storage import ReferencedEntityError, Storage
 from .util import generate_locally_administered_mac
 
 _VERSION_STRING = f"{__version__}+{__git_hash__}"
@@ -55,7 +56,35 @@ async def configuration_mutation_guard(request: Request):
         if not hasattr(request.app.state, 'configuration_mutation_lock'):
             request.app.state.configuration_mutation_lock = asyncio.Lock()
         async with request.app.state.configuration_mutation_lock:
-            yield
+            try:
+                # A serialized create/PATCH must not reintroduce a reference to
+                # a target deleted just before this request. Empty means unbound.
+                parts = request.url.path.removeprefix('/api/').split('/')
+                collection = parts[0].replace('-', '_')
+                edges = [(field, target) for source, field, target in REFERENCES
+                         if source == collection]
+                clone = request.method == 'POST' and len(parts) == 3 and parts[2] == 'clone'
+                if edges and (clone or (request.method == 'POST' and len(parts) == 1)
+                              or (request.method == 'PATCH' and len(parts) == 2)):
+                    try:
+                        body = await request.json()
+                    except ValueError:
+                        body = None  # Normal request validation reports malformed JSON.
+                    data = _storage(request).read_configuration()
+                    if clone:
+                        body = next((row for row in data[collection]
+                                     if row['id'] == parts[1]), {})
+                    if isinstance(body, dict):
+                        for field, target in edges:
+                            if field in body:
+                                value = body[field]
+                                if not isinstance(value, str) or (value and not any(
+                                        row['id'] == value for row in data[target])):
+                                    raise HTTPException(409, f"Invalid {field}: select an existing "
+                                                        f"{target} entry or clear the reference")
+                yield
+            except ReferencedEntityError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from None
     else:
         yield
 

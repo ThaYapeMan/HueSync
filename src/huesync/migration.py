@@ -266,21 +266,72 @@ def convert(original: dict) -> dict:
     return data
 
 
-def migrate_file(path: Path, *, check: bool = False) -> bool:
+def inspect_coupling(path: Path, identity: str) -> dict:
+    """Read-only repair discovery: never print Controller credentials or raw JSON."""
+    raw = path.read_bytes()
+    data = json.loads(raw)
+    rows = [row for row in data['couplings'] if row['id'] == identity]
+    if len(rows) != 1:
+        raise ValueError("Coupling must exist exactly once")
+    row = rows[0]
+    return {
+        'sha256': hashlib.sha256(raw).hexdigest(),
+        'coupling': {key: row.get(key) for key in (
+            'id', 'name', 'enabled', 'player_id', 'zone_id', 'analyser_id', 'energy_profile_id')},
+        'missing_player': not any(p['id'] == row.get('player_id')
+                                  for p in data['virtual_players']),
+        'available_players': [{key: p.get(key) for key in ('id', 'player_name', 'type')}
+                              for p in data['virtual_players']],
+    }
+
+
+def _repair_dangling_player(data: dict, identity: str, replacement: str | None) -> dict:
+    data = copy.deepcopy(data)
+    rows = [row for row in data['couplings'] if row['id'] == identity]
+    if len(rows) != 1:
+        raise ValueError("Coupling must exist exactly once")
+    row = rows[0]
+    players = {p['id'] for p in data['virtual_players']}
+    if not row.get('player_id') or row['player_id'] in players:
+        raise ValueError("Repair requires a dangling nonempty player reference")
+    if replacement is None:
+        data['couplings'].remove(row)
+    elif replacement not in players:
+        raise ValueError("Replacement player does not exist")
+    else:
+        row['player_id'] = replacement
+    if data.get('active_coupling_id') == identity:
+        data['active_coupling_id'] = None
+    # Explicit repair supersedes this binding's old snapshot. Keeping it would
+    # recreate a deleted Coupling or undo the requested player reassignment.
+    # Retain its exact bytes in the mandatory pre-migration backup instead.
+    if 'profiles' in data:
+        data['profiles'] = [p for p in data['profiles'] if p['id'] != identity]
+    return data
+
+
+def migrate_file(path: Path, *, check: bool = False,
+                 repair: tuple[str, str | None] | None = None,
+                 expected_sha256: str | None = None) -> bool:
     """Validate first, backup exact bytes, atomically replace. Return migration-needed.
 
     Caller must stop the runtime. The installer lock serializes deployments;
     the source is rechecked before replace to detect concurrent external edits.
     """
     if not path.exists():
-        if check:
+        if check or repair is not None:
             raise ValueError(f"Missing configuration: {path}")
         data = empty_config()
         raw = None
     else:
         raw = path.read_bytes()
         original = json.loads(raw)
-        data = convert(original)
+        source = original
+        if repair is not None:
+            if expected_sha256 != hashlib.sha256(raw).hexdigest():
+                raise ValueError("Configuration changed or fingerprint missing; inspect again")
+            source = _repair_dangling_player(original, *repair)
+        data = convert(source)
         if data == original:
             return False
     if check:
@@ -329,9 +380,28 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('path', type=Path)
     parser.add_argument('--check', action='store_true')
+    actions = parser.add_mutually_exclusive_group()
+    actions.add_argument('--inspect-coupling')
+    actions.add_argument('--remove-dangling-coupling')
+    actions.add_argument('--reassign-dangling-coupling')
+    parser.add_argument('--player-id')
+    parser.add_argument('--expect-sha256')
     args = parser.parse_args()
     try:
-        needed = migrate_file(args.path, check=args.check)
+        if args.inspect_coupling:
+            print(json.dumps(inspect_coupling(args.path, args.inspect_coupling), indent=2))
+            return
+        identity = args.remove_dangling_coupling or args.reassign_dangling_coupling
+        if bool(args.reassign_dangling_coupling) != bool(args.player_id):
+            raise ValueError('--player-id is required only with --reassign-dangling-coupling')
+        if identity:
+            from .backup import configuration_lease
+            with configuration_lease(args.path):
+                needed = migrate_file(args.path, check=args.check,
+                                      repair=(identity, args.player_id),
+                                      expected_sha256=args.expect_sha256)
+        else:
+            needed = migrate_file(args.path, check=args.check)
     except (ValueError, TypeError, KeyError, OSError) as exc:
         parser.exit(1, f'Migration failed safely: {exc}\n')
     status = 'migration required' if args.check and needed else 'valid'

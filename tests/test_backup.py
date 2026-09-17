@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import os
 import subprocess
 import sys
@@ -147,7 +148,10 @@ def test_all_fields_credentials_and_round_trip(configured, tmp_path, caplog):
 
 
 def test_export_rejects_invalid_references(configured):
-    configured.delete_controller("bridge")
+    # Simulate an already-corrupt file; protected deletes now reject this.
+    data = configured.read_configuration()
+    data['controllers'] = []
+    configured.path.write_text(json.dumps(data))
     with pytest.raises(BackupError, match="Cannot export"):
         export_configuration(configured)
 
