@@ -1,6 +1,5 @@
 import { useEffect, useState } from 'react'
 import type { TrackPosition } from '@/hooks/usePreviewSocket'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 
 function clock(seconds: number | null): string {
   if (seconds == null) return '—'
@@ -29,28 +28,29 @@ export function TrackProgress({ track, connected }: {
   }, [track, connected])
   const duration = track?.duration_s ?? null
   return (
-    <Card>
-      <CardHeader className="pb-3">
-        <CardTitle className="text-xs text-muted-foreground uppercase tracking-wider">
-          Track
-        </CardTitle>
-      </CardHeader>
-      <CardContent className="space-y-2">
-        <div className="text-sm font-medium truncate">{track?.title || 'Track information unavailable'}</div>
-        {track?.artist && <div className="text-xs text-muted-foreground truncate">{track.artist}</div>}
-        {duration != null && duration > 0 && elapsed != null && (
-          <div role="progressbar" aria-label="Track position" aria-valuemin={0}
-            aria-valuemax={duration} aria-valuenow={elapsed}
-            className="h-1.5 overflow-hidden rounded-full bg-muted">
-            <div className="h-full bg-primary" style={{ width: `${100 * elapsed / duration}%` }} />
-          </div>
+    <div className="relative flex items-center gap-3 overflow-hidden rounded-md border border-border bg-card px-3 py-2">
+      <div className="min-w-0 flex-1 truncate text-sm"
+        title={[track?.title || 'Track information unavailable', track?.artist].filter(Boolean).join(' — ')}>
+        <span className="font-medium">{track?.title || 'Track information unavailable'}</span>
+        {track?.artist && (
+          <>
+            <span className="text-muted-foreground"> — </span>
+            <span className="text-muted-foreground">{track.artist}</span>
+          </>
         )}
-        <div className="text-xs text-muted-foreground font-mono">
-          {clock(elapsed)} / {clock(duration)}
-          {!connected && ' · Disconnected'}
-          {connected && track && !track.playing && ' · Paused / stopped'}
+      </div>
+      <div className="shrink-0 whitespace-nowrap text-xs text-muted-foreground font-mono">
+        {clock(elapsed)} / {clock(duration)}
+        {!connected && ' · Disconnected'}
+        {connected && track && !track.playing && ' · Paused / stopped'}
+      </div>
+      {duration != null && duration > 0 && elapsed != null && (
+        <div role="progressbar" aria-label="Track position" aria-valuemin={0}
+          aria-valuemax={duration} aria-valuenow={elapsed}
+          className="absolute inset-x-0 bottom-0 h-0.5 overflow-hidden bg-muted">
+          <div className="h-full bg-primary/60" style={{ width: `${100 * elapsed / duration}%` }} />
         </div>
-      </CardContent>
-    </Card>
+      )}
+    </div>
   )
 }
