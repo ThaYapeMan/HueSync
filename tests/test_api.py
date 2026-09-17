@@ -405,6 +405,49 @@ def test_lms_players_endpoint_returns_list(client: TestClient, monkeypatch):
     assert resp.json() == fake_players
 
 
+def test_lms_follow_targets_exclude_all_managed_players(client: TestClient, monkeypatch):
+    from huesync import api as api_module
+
+    for name, mac in [
+        ("HueSync", "AA:BB:CC:DD:EE:01"),
+        ("HueSync LMS", "aa:bb:cc:dd:ee:02"),
+    ]:
+        client._storage.save_virtual_player(VirtualPlayer(
+            player_name=name, player_mac=mac, lms_host="other-host",
+        ))
+    # An unset identity must not filter unrelated discoveries.
+    client._storage.save_virtual_player(VirtualPlayer(player_name="Unconfigured"))
+    discovered = [
+        {"playerid": "aa:bb:cc:dd:ee:01", "name": "HueSync"},
+        {"playerid": "AA:BB:CC:DD:EE:02", "name": "HueSync LMS"},
+        {"playerid": "11:22:33:44:55:66", "name": "Sonos Living Room"},
+        # Names are not identities: an external player may have the same name.
+        {"playerid": "11:22:33:44:55:77", "name": "HueSync"},
+    ]
+    cli = MagicMock(return_value=discovered)
+    monkeypatch.setattr(api_module, "list_lms_players", cli)
+    before = [p.to_dict() for p in client._storage.list_virtual_players()]
+
+    response = client.get("/api/lms/players?host=10.0.0.1")
+
+    assert response.status_code == 200
+    assert response.json() == discovered[2:]
+    cli.assert_called_once_with("10.0.0.1")
+    assert [p.to_dict() for p in client._storage.list_virtual_players()] == before
+
+
+def test_lms_follow_targets_all_managed_returns_empty(client: TestClient, monkeypatch):
+    from huesync import api as api_module
+
+    client._storage.save_virtual_player(VirtualPlayer(player_mac="aa:bb:cc:dd:ee:01"))
+    monkeypatch.setattr(api_module, "list_lms_players", lambda host: [
+        {"playerid": "aa:bb:cc:dd:ee:01", "name": "HueSync"},
+    ])
+    response = client.get("/api/lms/players?host=10.0.0.1")
+    assert response.status_code == 200
+    assert response.json() == []
+
+
 # ---------------------------------------------------------------------------
 # Zones
 # ---------------------------------------------------------------------------

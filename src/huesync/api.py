@@ -558,8 +558,10 @@ async def lms_discover():
 
 
 @router.get("/lms/players")
-async def lms_list_players(host: str):
-    """Return all LMS players on *host* as a list of {playerid, name} objects.
+async def lms_list_players(host: str, request: Request):
+    """Return external LMS players on *host* as {playerid, name} objects.
+
+    Exclude all registered HueSync player identities from follow targets.
 
     Used by the Virtual Player editor to populate the 'Follow player' dropdown.
     Raises 400 if host is empty, 502 if the LMS CLI is unreachable.
@@ -572,7 +574,15 @@ async def lms_list_players(host: str):
         raise HTTPException(
             status_code=502, detail=f"Cannot reach LMS at {host}: {exc}"
         ) from exc
-    return players
+    managed_macs = {
+        player.player_mac.strip().lower()
+        for player in _storage(request).list_virtual_players()
+        if player.player_mac.strip()
+    }
+    return [
+        player for player in players
+        if player["playerid"].strip().lower() not in managed_macs
+    ]
 
 
 # ---------------------------------------------------------------------------
