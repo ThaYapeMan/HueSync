@@ -72,8 +72,30 @@ stubbed test or historical benchmark substitutes for these checks.
 Start with [development setup](development.md#environment), including the shared
 native system prerequisites and `pip install -e '.[dev]'`. CI runs Ruff and the
 complete pytest suite on Python 3.11/3.12/3.13, and also builds a native wheel.
-The frontend job uses Node 22.22.0, `npm ci`, `npm test`, and `npm run build`
-(TypeScript plus Vite), then checks tracked and untracked bundle differences.
+The `build-frontend` job uses Node 22.22.0 and runs these commands in `web/`,
+in this order:
+
+```sh
+npm ci
+npm test
+npm run build
+npx playwright install --with-deps chromium
+npm run test:e2e
+```
+
+`npm test` runs Vitest with Testing Library for unit/component tests.
+`npm run build` runs TypeScript checking and Vite's production build. Playwright's
+`webServer` runs `npx vite preview` against `src/huesync/webui`, so the build must
+precede e2e execution. The current Playwright config has no browser projects or
+browser override; it uses Chromium. Browser installation includes its system
+dependencies and requires package-install privileges. The final CI step checks
+tracked and untracked bundle differences against the committed assets.
+
+Declared test dependencies in [web/package.json](../web/package.json) are
+Vitest `^5.0.0`, Testing Library React `^16.3.3`, jest-dom `^7.0.1`, user-event
+`^14.6.7`, and Playwright Test `^1.62.1`. These are version ranges;
+`npm ci` installs the exact resolutions in `web/package-lock.json`.
+
 Run these same commands before pushing; a pre-existing environment can hide missing
 dependencies. Optional/native skips are reported as skips, not runtime proof.
 

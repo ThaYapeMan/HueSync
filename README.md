@@ -11,6 +11,12 @@ HueSync has two architectural levels: a **product/domain model** describing what
 runs together, and an **audio-analysis subsystem** describing how audio becomes
 features. The frozen canonical pipeline is a subsystem within the broader model.
 
+The web frontend in `web/` uses React and TypeScript, built with Vite, with
+Tailwind CSS and Radix UI primitives in shadcn-style components. Vitest and
+Testing Library cover unit/component tests; Playwright covers end-to-end tests.
+See [package.json](web/package.json) for declared versions and
+[testing](docs/testing.md#clean-ci-bootstrap) for the CI sequence.
+
 ### Six core entities
 
 | Entity | Role |
