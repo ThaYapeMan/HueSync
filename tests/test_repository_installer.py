@@ -212,6 +212,7 @@ def test_conflicting_squeezelite_service_lifecycle(tmp_path, mode, stuck):
     init = tmp_path / 'init.d'
     init.mkdir()
     (init / 'room-receiver').write_text('DAEMON=/usr/bin/squeezelite\n')
+    (init / 'room-receiver').chmod(0o755)
     functions = functions.replace('/etc/init.d', str(init)).replace(
         '/proc/[0-9]*/exe', str(tmp_path / 'proc/[0-9]*/exe'))
     calls = tmp_path / 'calls'
@@ -222,9 +223,15 @@ fail() {{ echo "$*"; exit 1; }}
 systemctl() {{
  echo "$*" >> '{calls}'
  case "$1" in
- list-unit-files) printf 'squeezelite.service enabled\nhuesync-fifo.service enabled\n' ;;
- list-units) echo 'room-receiver.service loaded active running receiver' ;;
+ list-unit-files) printf 'autovt@.service alias\ngetty@.service enabled\n'
+ printf 'squeezelite.service enabled\nhuesync-fifo.service enabled\n' ;;
+ list-units) printf 'room-receiver.service loaded active running receiver\n'
+ echo 'getty@tty1.service loaded active running Getty' ;;
  show)
+  case "$2" in
+   *@.service) echo 'Bare template is not queryable' >&2; return 1 ;;
+   getty@tty1.service) echo '/sbin/agetty'; return 0 ;;
+  esac
   case "$3" in
    --property=ExecStart)
     case "$2" in
@@ -243,6 +250,8 @@ systemctl() {{
     result = subprocess.run(['bash', '-c', shell], capture_output=True, text=True)
     assert 'room-receiver.service (active)' in result.stdout
     commands = calls.read_text().splitlines()
+    assert not any('@.service' in c for c in commands)
+    assert 'show getty@tty1.service --property=ExecStart --value' in commands
     assert 'stop squeezelite.service' not in commands
     assert 'stop huesync-fifo.service' not in commands
     if mode == 'install':
@@ -271,3 +280,70 @@ def test_airplay_metadata_build_fifo_and_service_arguments(tmp_path):
                                                      str(destination))], check=True)
     assert 'p /run/huesync/airplay.metadata 0600 huesync huesync -' in destination.read_text()
     assert '--metadata-enable --metadata-pipename=/run/huesync/airplay.metadata' in text
+
+
+@pytest.mark.parametrize('name,expected', [
+    ('receiver.sh', 'receiver.service'),
+    ('receiver room', r'receiver\x20room.service'),
+    ('receiver@', None),  # mangles to a bare template, also excluded
+])
+def test_sysv_conflict_names_are_queryable(tmp_path, name, expected):
+    text = SCRIPT.read_text()
+    start = text.index('squeezelite_conflict_definition() {')
+    functions = text[start:text.index('verify_services() {')]
+    init = tmp_path / 'init.d'
+    init.mkdir()
+    script = init / name
+    script.write_text('DAEMON=/usr/bin/squeezelite\n')
+    script.chmod(0o755)
+    (init / 'not-executable').write_text('DAEMON=/usr/bin/squeezelite\n')
+    functions = functions.replace('/etc/init.d', str(init)).replace(
+        '/proc/[0-9]*/exe', str(tmp_path / 'proc/[0-9]*/exe'))
+    calls = tmp_path / 'calls'
+    shell = f'''set -Eeuo pipefail
+log() {{ echo "$*"; }}
+fail() {{ echo "$*"; exit 1; }}
+systemctl() {{
+ printf '%s\\n' "$*" >> '{calls}'
+ case "$1" in
+ list-unit-files|list-units) return 0 ;;
+ show)
+  case "$2" in *@.service|not-executable.service) return 99 ;; esac
+  case "$3" in
+   --property=ExecStart) echo /usr/bin/squeezelite ;;
+   --property=ActiveState) echo inactive ;;
+  esac ;;
+ *) return 98 ;; # check must never mutate the host
+ esac
+ return 0
+}}
+''' + functions + '\nsqueezelite_conflicts check\n'
+    result = subprocess.run(['bash', '-c', shell], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    queries = [line for line in calls.read_text().splitlines() if line.startswith('show ')]
+    if expected is None:
+        assert queries == []
+    else:
+        assert queries == [f'show {expected} --property={prop} --value'
+                           for prop in ('ExecStart', 'SourcePath', 'ActiveState')]
+
+
+def test_non_template_inspection_failure_remains_fatal(tmp_path):
+    text = SCRIPT.read_text()
+    start = text.index('squeezelite_conflict_definition() {')
+    functions = text[start:text.index('verify_services() {')].replace(
+        '/etc/init.d', str(tmp_path / 'empty-init'))
+    shell = '''set -Eeuo pipefail
+log() { echo "$*"; }
+fail() { echo "$*"; exit 1; }
+systemctl() {
+ case "$1" in
+ list-unit-files) echo 'real.service enabled' ;;
+ list-units) return 0 ;;
+ show) echo 'Real inspection failure' >&2; return 42 ;;
+ esac
+}
+''' + functions + '\nsqueezelite_conflicts check\n'
+    result = subprocess.run(['bash', '-c', shell], capture_output=True, text=True)
+    assert result.returncode == 42
+    assert 'Real inspection failure' in result.stderr

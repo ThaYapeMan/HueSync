@@ -78,13 +78,19 @@ squeezelite_conflicts() {
     units+=$'\n'"$loaded"
     # Include SysV services even when the generator has not loaded them yet.
     for script in /etc/init.d/*; do
-        [[ -f "$script" ]] || continue
+        [[ -f "$script" && -x "$script" ]] || continue
         if squeezelite_conflict_definition "$(cat "$script")"; then
-            units+=$'\n'"${script##*/}.service"
+            # Match systemd-sysv-generator: strip .sh and mangle the unit name.
+            # In particular, spaces must not become multiple awk fields below.
+            unit=${script##*/}
+            unit=$(systemd-escape --mangle "${unit%.sh}")
+            units+=$'\n'"$unit"
         fi
     done
     while read -r unit; do
         [[ -n "$unit" ]] || continue
+        # Templates are definitions, not queryable service instances.
+        [[ "$unit" != *@.service ]] || continue
         definition=$(systemctl show "$unit" --property=ExecStart --value)
         source=$(systemctl show "$unit" --property=SourcePath --value)
         if [[ "$source" == /etc/init.d/* && -f "$source" ]]; then
