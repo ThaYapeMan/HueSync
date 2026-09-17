@@ -6,7 +6,6 @@
 # Usage (on the LXC, as root):
 #   sudo ./scripts/install-huesync.sh (invokes this build helper)
 set -Eeuo pipefail
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export DEBIAN_FRONTEND=noninteractive
 DEFER_START="${HUESYNC_DEFER_START:-0}"
 # Upstream make install creates a sample config at the live path. Distinguish
@@ -32,17 +31,6 @@ checkout_pinned() {
     git -C "$SRC/$name" checkout --detach "$revision"
     [[ "$(git -C "$SRC/$name" rev-parse HEAD)" == "$revision" ]]
     git -C "$SRC/$name" submodule update --init --recursive
-}
-
-# Advertisement-only A/B experiment; safe on a previously patched build cache.
-apply_feature_mask_experiment() {
-    local source="$1" patch="$SCRIPT_DIR/patches/shairport-sync-sonos-features.patch"
-    if git -C "$source" apply --reverse --check "$patch" 2>/dev/null; then
-        echo "  Sonos Port feature-mask experiment already applied."
-    else
-        git -C "$source" apply --check "$patch"
-        git -C "$source" apply "$patch"
-    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -177,7 +165,6 @@ EOF
 # ---------------------------------------------------------------------------
 echo "==> [3/6] Building shairport-sync (AirPlay 2)..."
 checkout_pinned shairport-sync "$SHAIRPORT_COMMIT"
-apply_feature_mask_experiment "$SRC/shairport-sync"
 
 cd "$SRC/shairport-sync"
 autoreconf -fi
@@ -189,9 +176,6 @@ autoreconf -fi
     --with-pipe \
     --with-systemd-startup
 
-# Keep advertised fv unchanged: this A/B patch must not add Git's -dirty suffix.
-printf 'char git_version_string[] = "%s";\n' \
-    "$(git describe --tags "$SHAIRPORT_COMMIT")" > gitversion.h
 make -j"$(nproc)"
 make SHELL=/bin/bash install
 
