@@ -1,0 +1,18 @@
+diff --git a/rtsp.c b/rtsp.c
+index d83c7c1b..364bb1e8 100644
+--- a/rtsp.c
++++ b/rtsp.c
+@@ -262,10 +262,9 @@ void build_bonjour_strings(__attribute((unused)) rtsp_conn_info *conn) {
+     snprintf(firmware_version, sizeof(firmware_version), "fv=%s", PACKAGE_VERSION);
+ 
+ #ifdef CONFIG_AIRPLAY_2
+-  uint64_t features_hi = config.airplay_features;
+-  features_hi = (features_hi >> 32) & 0xffffffff;
+-  uint64_t features_lo = config.airplay_features;
+-  features_lo = features_lo & 0xffffffff;
++  // HueSync A/B experiment: Bonjour mask only, matching the observed Sonos Port.
++  uint64_t features_hi = 0x801C340;
++  uint64_t features_lo = 0x445F8A00;
+   snprintf(ap1_featuresString, sizeof(ap1_featuresString), "ft=0x%" PRIX64 ",0x%" PRIX64 "",
+            features_lo, features_hi);
+   snprintf(pkString, sizeof(pkString), "pk=");
