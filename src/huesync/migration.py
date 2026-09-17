@@ -15,7 +15,7 @@ import tempfile
 import uuid
 from pathlib import Path
 
-from .schema import SCHEMA_VERSION, empty_config, validate_current
+from .schema import COLLECTIONS, SCHEMA_VERSION, empty_config, validate_current
 
 
 def rename(row: dict, old: str, new: str) -> None:
@@ -23,6 +23,140 @@ def rename(row: dict, old: str, new: str) -> None:
         if new in row and row[new] != row[old]:
             raise ValueError(f"Conflicting historical/current fields: {old} and {new}")
         row[new] = row.pop(old)
+
+
+# Frozen defaults/ownership from a72893b Profile, not a runtime compatibility API.
+# 15e4b66 copied Bridge.id -> Controller.id and Profile.id -> Coupling.id;
+# 090e18a removed the old storage/API readers but left their JSON rows behind.
+_PROFILE_PARTS = {
+    "virtual_players": ("player_id", {
+        "lms_host": "127.0.0.1", "lms_port": 3483, "player_name": "HueSync",
+        "display_name": "", "player_mac": "", "alsa_device": "",
+    }),
+    "zones": ("zone_id", {
+        "controller_id": "", "entertainment_area_id": "",
+        "entertainment_area_name": "", "light_count": 0,
+    }),
+    "analysers": ("analyser_id", {
+        "bars": 30, "lower_cutoff_freq": 50, "higher_cutoff_freq": 12000,
+        "onset_delta": 0.1, "onset_alpha": 0.9, "onset_method": "combined",
+        "superflux_mu": 3, "superflux_lag": 2, "use_hpss_separation": False,
+        "bars_source": "cava", "spectrum_backend": "v2",
+    }),
+    "effects": ("high_energy_effect_id", {
+        "effect_type": "spectrum_rgb", "effect_speed": 1.0, "effect_decay": 0.3,
+        "sensitivity": 1.0, "brightness_floor": 0.15, "bass_hz": 250,
+        "mid_hz": 2000, "exertion_clip": 3.0, "onset_flash_intensity": 0.0,
+    }),
+    "energy_profiles": ("energy_profile_id", {
+        "blend_start": 0.3, "blend_end": 0.7, "blend_response": 0.1,
+    }),
+}
+
+
+def _historical_rows(data: dict, collection: str) -> list[dict]:
+    rows = data.pop(collection, [])
+    if not isinstance(rows, list):
+        raise ValueError(f"Malformed historical {collection}")
+    seen = set()
+    for row in rows:
+        if (not isinstance(row, dict) or not isinstance(row.get("id"), str)
+                or not row["id"] or row["id"] in seen):
+            raise ValueError(f"Missing/duplicate ID or malformed historical {collection}")
+        seen.add(row["id"])
+    return rows
+
+
+def _merge_entity(data: dict, collection: str, candidate: dict) -> None:
+    """Never overwrite a current entity, including credentials or generated IDs."""
+    existing = next((r for r in data[collection] if r["id"] == candidate["id"]), None)
+    if existing is None:
+        data[collection].append(candidate)
+    else:
+        current = COLLECTIONS[collection].from_dict(existing).to_dict()
+        conflicts = sorted(k for k in candidate if current[k] != candidate[k])
+        if conflicts:
+            # Field names only: a conflict can involve Hue credentials.
+            raise ValueError(f"Conflicting historical/current {collection} fields: "
+                             + ", ".join(conflicts))
+
+
+def _migrate_flat_residue(data: dict) -> None:
+    bridges = _historical_rows(data, "bridges")
+    profiles = _historical_rows(data, "profiles")
+    validate_current(data)  # Validate current rows before matching against them.
+    for bridge in bridges:
+        defaults = dict(name="Hue Bridge", host="", app_key="", client_key="")
+        if set(bridge) - {"id", *defaults}:
+            raise ValueError("Unknown historical bridges fields; refusing data loss")
+        candidate = dict(defaults, **bridge, type="hue")
+        probe = empty_config()
+        probe["controllers"] = [candidate]
+        validate_current(probe)
+        _merge_entity(data, "controllers", candidate)
+
+    allowed = {"id", "name", "enabled"} | {
+        key for _, defaults in _PROFILE_PARTS.values() for key in defaults}
+    for profile in profiles:
+        for old, new in (("bridge_id", "controller_id"), ("color_mode", "effect_type"),
+                         ("mix_low_threshold", "blend_start"),
+                         ("mix_high_threshold", "blend_end"),
+                         ("mix_ema_alpha", "blend_response")):
+            rename(profile, old, new)
+        if set(profile) - allowed:
+            raise ValueError("Unknown historical profiles fields; refusing data loss")
+        name = profile.get("name", "New profile")
+        if not isinstance(name, str):
+            raise ValueError("Invalid historical profiles name")
+        # Each unique old aggregate becomes current entities, deterministically.
+        # It is never automatically activated and never changes existing objects.
+        candidate = empty_config()
+        candidate["controllers"] = data["controllers"]
+        coupling = dict(id=profile["id"], name=name, enabled=profile.get("enabled", True))
+        for collection, (reference, defaults) in _PROFILE_PARTS.items():
+            identity = str(uuid.uuid5(uuid.NAMESPACE_URL,
+                                     f'huesync:profile:{profile["id"]}:{collection}'))
+            values = {key: profile.get(key, default) for key, default in defaults.items()}
+            if collection == "energy_profiles":
+                values["high_energy_effect_id"] = candidate["effects"][0]["id"]
+            if collection != "virtual_players":
+                values["name"] = name
+            entity = COLLECTIONS[collection](id=identity, **values)
+            candidate[collection] = [entity.to_dict()]
+            if collection != "effects":
+                coupling[reference] = identity
+        candidate["couplings"] = [coupling]
+        validate_current(candidate, references=True)
+
+        existing = next((c for c in data["couplings"] if c["id"] == profile["id"]), None)
+        if existing is not None:
+            # An ID is only a migration marker, not proof of content equivalence.
+            # Compare every old setting with its current linked owner. Additional
+            # current-only fields (e.g. low-energy Effect) remain untouched.
+            if any(existing.get(k, default) != coupling[k]
+                   for k, default in (("name", "New Coupling"), ("enabled", True))):
+                raise ValueError("Conflicting historical/current profiles coupling")
+            for collection, (reference, defaults) in _PROFILE_PARTS.items():
+                owner = existing
+                if collection == "effects":
+                    owner = next((e for e in data["energy_profiles"]
+                                  if e["id"] == existing.get("energy_profile_id")), {})
+                row = next((e for e in data[collection] if e["id"] == owner.get(reference)), None)
+                if row is None:
+                    raise ValueError("Incomplete historical profiles entity mapping")
+                current = COLLECTIONS[collection].from_dict(row).to_dict()
+                expected = candidate[collection][0]
+                conflicts = [k for k in defaults if current[k] != expected[k]]
+                if collection == "virtual_players" and current["type"] != "LMS":
+                    conflicts.append("type")
+                if conflicts:
+                    raise ValueError(
+                        f"Conflicting historical/current profiles {collection} fields: "
+                        + ", ".join(conflicts))
+        else:
+            for collection in _PROFILE_PARTS:
+                _merge_entity(data, collection, candidate[collection][0])
+            data["couplings"].append(coupling)
 
 
 def convert(original: dict) -> dict:
@@ -110,6 +244,7 @@ def convert(original: dict) -> dict:
         for key in historical:
             effect.pop(key)
     data["schema_version"] = SCHEMA_VERSION
+    _migrate_flat_residue(data)
     validate_current(data, references=True)
     return data
 

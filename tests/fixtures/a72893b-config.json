@@ -1,0 +1,376 @@
+{
+  "active_coupling_id": null,
+  "active_profile_id": null,
+  "analysers": [
+    {
+      "name": "Analysis 1",
+      "onset_method": "combined",
+      "onset_delta": 0.1,
+      "onset_alpha": 0.9,
+      "superflux_mu": 3,
+      "superflux_lag": 2,
+      "bars": 30,
+      "lower_cutoff_freq": 51,
+      "higher_cutoff_freq": 12000,
+      "use_hpss_separation": false,
+      "bars_source": "cava",
+      "spectrum_backend": "v2",
+      "id": "analyser-1"
+    },
+    {
+      "name": "Analysis 2",
+      "onset_method": "combined",
+      "onset_delta": 0.1,
+      "onset_alpha": 0.9,
+      "superflux_mu": 3,
+      "superflux_lag": 2,
+      "bars": 30,
+      "lower_cutoff_freq": 52,
+      "higher_cutoff_freq": 12000,
+      "use_hpss_separation": false,
+      "bars_source": "cava",
+      "spectrum_backend": "v2",
+      "id": "analyser-2"
+    },
+    {
+      "name": "Analysis 3",
+      "onset_method": "combined",
+      "onset_delta": 0.1,
+      "onset_alpha": 0.9,
+      "superflux_mu": 3,
+      "superflux_lag": 2,
+      "bars": 30,
+      "lower_cutoff_freq": 53,
+      "higher_cutoff_freq": 12000,
+      "use_hpss_separation": false,
+      "bars_source": "cava",
+      "spectrum_backend": "v2",
+      "id": "analyser-3"
+    },
+    {
+      "name": "Analysis 4",
+      "onset_method": "combined",
+      "onset_delta": 0.1,
+      "onset_alpha": 0.9,
+      "superflux_mu": 3,
+      "superflux_lag": 2,
+      "bars": 30,
+      "lower_cutoff_freq": 54,
+      "higher_cutoff_freq": 12000,
+      "use_hpss_separation": false,
+      "bars_source": "cava",
+      "spectrum_backend": "v2",
+      "id": "analyser-4"
+    },
+    {
+      "name": "Analysis 5",
+      "onset_method": "combined",
+      "onset_delta": 0.1,
+      "onset_alpha": 0.9,
+      "superflux_mu": 3,
+      "superflux_lag": 2,
+      "bars": 30,
+      "lower_cutoff_freq": 55,
+      "higher_cutoff_freq": 12000,
+      "use_hpss_separation": false,
+      "bars_source": "cava",
+      "spectrum_backend": "v2",
+      "id": "analyser-5"
+    }
+  ],
+  "bridges": [
+    {
+      "name": "Synthetic Hue",
+      "host": "192.0.2.10",
+      "app_key": "SYNTHETIC-APP-KEY",
+      "client_key": "SYNTHETIC-CLIENT-KEY",
+      "id": "bridge-1"
+    }
+  ],
+  "controllers": [
+    {
+      "name": "Synthetic Hue",
+      "host": "192.0.2.10",
+      "app_key": "SYNTHETIC-APP-KEY",
+      "client_key": "SYNTHETIC-CLIENT-KEY",
+      "id": "bridge-1",
+      "type": "hue"
+    }
+  ],
+  "couplings": [
+    {
+      "name": "Coupling 1",
+      "player_id": "player-1",
+      "analyser_id": "analyser-1",
+      "zone_id": "zone-1",
+      "energy_profile_id": "energy-1",
+      "enabled": true,
+      "id": "coupling-1"
+    },
+    {
+      "name": "Coupling 2",
+      "player_id": "player-1",
+      "analyser_id": "analyser-2",
+      "zone_id": "zone-1",
+      "energy_profile_id": "energy-2",
+      "enabled": true,
+      "id": "coupling-2"
+    },
+    {
+      "name": "Coupling 3",
+      "player_id": "player-1",
+      "analyser_id": "analyser-3",
+      "zone_id": "zone-1",
+      "energy_profile_id": "energy-3",
+      "enabled": true,
+      "id": "coupling-3"
+    },
+    {
+      "name": "Coupling 4",
+      "player_id": "player-1",
+      "analyser_id": "analyser-4",
+      "zone_id": "zone-1",
+      "energy_profile_id": "energy-1",
+      "enabled": true,
+      "id": "coupling-4"
+    },
+    {
+      "name": "Coupling 5",
+      "player_id": "player-1",
+      "analyser_id": "analyser-5",
+      "zone_id": "zone-1",
+      "energy_profile_id": "energy-2",
+      "enabled": true,
+      "id": "coupling-5"
+    },
+    {
+      "name": "Coupling 6",
+      "player_id": "player-1",
+      "analyser_id": "analyser-1",
+      "zone_id": "zone-1",
+      "energy_profile_id": "energy-3",
+      "enabled": true,
+      "id": "coupling-6"
+    },
+    {
+      "name": "Coupling 7",
+      "player_id": "player-2",
+      "analyser_id": "analyser-2",
+      "zone_id": "zone-1",
+      "energy_profile_id": "energy-1",
+      "enabled": true,
+      "id": "coupling-7"
+    }
+  ],
+  "crossfaders": [
+    {
+      "name": "Energy 1",
+      "high_energy_effect_id": "effect-1",
+      "low_energy_effect_id": "effect-4",
+      "blend_start": 0.3,
+      "blend_end": 0.7,
+      "blend_response": 0.1,
+      "id": "energy-1"
+    },
+    {
+      "name": "Energy 2",
+      "high_energy_effect_id": "effect-2",
+      "low_energy_effect_id": "effect-4",
+      "blend_start": 0.3,
+      "blend_end": 0.7,
+      "blend_response": 0.1,
+      "id": "energy-2"
+    },
+    {
+      "name": "Energy 3",
+      "high_energy_effect_id": "effect-3",
+      "low_energy_effect_id": "effect-4",
+      "blend_start": 0.3,
+      "blend_end": 0.7,
+      "blend_response": 0.1,
+      "id": "energy-3"
+    }
+  ],
+  "player_latencies": [
+    {
+      "player_mac": "02:00:00:00:00:03",
+      "name": "Listener",
+      "strategy": "fixed",
+      "fixed_delay_ms": 120,
+      "speaker_ip": null
+    },
+    {
+      "player_mac": "02:00:00:00:00:04",
+      "name": "Other",
+      "strategy": "none",
+      "fixed_delay_ms": 0,
+      "speaker_ip": null
+    }
+  ],
+  "profiles": [
+    {
+      "name": "Coupling 1",
+      "lms_host": "192.0.2.20",
+      "lms_port": 3483,
+      "player_name": "HueSync",
+      "display_name": "",
+      "player_mac": "02:00:00:00:00:01",
+      "alsa_device": "",
+      "bridge_id": "bridge-1",
+      "entertainment_area_id": "area-1",
+      "entertainment_area_name": "Synthetic Room",
+      "light_count": 4,
+      "effect_type": "spectrum_rgb",
+      "effect_speed": 1.0,
+      "effect_decay": 0.3,
+      "blend_start": 0.3,
+      "blend_end": 0.7,
+      "blend_response": 0.1,
+      "sensitivity": 1.0,
+      "brightness_floor": 0.15,
+      "bars": 30,
+      "lower_cutoff_freq": 51,
+      "higher_cutoff_freq": 12000,
+      "bass_hz": 250,
+      "mid_hz": 2000,
+      "onset_delta": 0.1,
+      "onset_alpha": 0.9,
+      "onset_method": "combined",
+      "superflux_mu": 3,
+      "superflux_lag": 2,
+      "use_hpss_separation": false,
+      "bars_source": "cava",
+      "spectrum_backend": "v2",
+      "exertion_clip": 3.0,
+      "onset_flash_intensity": 0.0,
+      "enabled": true,
+      "id": "coupling-1"
+    },
+    {
+      "name": "Coupling 2",
+      "lms_host": "192.0.2.20",
+      "lms_port": 3483,
+      "player_name": "HueSync",
+      "display_name": "",
+      "player_mac": "02:00:00:00:00:01",
+      "alsa_device": "",
+      "bridge_id": "bridge-1",
+      "entertainment_area_id": "area-1",
+      "entertainment_area_name": "Synthetic Room",
+      "light_count": 4,
+      "effect_type": "wave",
+      "effect_speed": 1.0,
+      "effect_decay": 0.3,
+      "blend_start": 0.3,
+      "blend_end": 0.7,
+      "blend_response": 0.1,
+      "sensitivity": 1.0,
+      "brightness_floor": 0.15,
+      "bars": 30,
+      "lower_cutoff_freq": 52,
+      "higher_cutoff_freq": 12000,
+      "bass_hz": 250,
+      "mid_hz": 2000,
+      "onset_delta": 0.1,
+      "onset_alpha": 0.9,
+      "onset_method": "combined",
+      "superflux_mu": 3,
+      "superflux_lag": 2,
+      "use_hpss_separation": false,
+      "bars_source": "cava",
+      "spectrum_backend": "v2",
+      "exertion_clip": 3.0,
+      "onset_flash_intensity": 0.0,
+      "enabled": true,
+      "id": "coupling-2"
+    }
+  ],
+  "scenes": [
+    {
+      "name": "Effect 1",
+      "effect_type": "spectrum_rgb",
+      "effect_speed": 1.0,
+      "effect_decay": 0.3,
+      "sensitivity": 1.0,
+      "brightness_floor": 0.15,
+      "bass_hz": 250,
+      "mid_hz": 2000,
+      "exertion_clip": 3.0,
+      "onset_flash_intensity": 0.0,
+      "id": "effect-1"
+    },
+    {
+      "name": "Effect 2",
+      "effect_type": "wave",
+      "effect_speed": 1.0,
+      "effect_decay": 0.3,
+      "sensitivity": 1.0,
+      "brightness_floor": 0.15,
+      "bass_hz": 250,
+      "mid_hz": 2000,
+      "exertion_clip": 3.0,
+      "onset_flash_intensity": 0.0,
+      "id": "effect-2"
+    },
+    {
+      "name": "Effect 3",
+      "effect_type": "swirl",
+      "effect_speed": 1.0,
+      "effect_decay": 0.3,
+      "sensitivity": 1.0,
+      "brightness_floor": 0.15,
+      "bass_hz": 250,
+      "mid_hz": 2000,
+      "exertion_clip": 3.0,
+      "onset_flash_intensity": 0.0,
+      "id": "effect-3"
+    },
+    {
+      "name": "Effect 4",
+      "effect_type": "pulses",
+      "effect_speed": 1.0,
+      "effect_decay": 0.3,
+      "sensitivity": 1.0,
+      "brightness_floor": 0.15,
+      "bass_hz": 250,
+      "mid_hz": 2000,
+      "exertion_clip": 3.0,
+      "onset_flash_intensity": 0.0,
+      "id": "effect-4"
+    }
+  ],
+  "virtual_players": [
+    {
+      "lms_host": "192.0.2.20",
+      "lms_port": 3483,
+      "player_name": "HueSync",
+      "display_name": "",
+      "player_mac": "02:00:00:00:00:01",
+      "alsa_device": "",
+      "follow_player_mac": "",
+      "id": "player-1",
+      "type": "LMS"
+    },
+    {
+      "lms_host": "127.0.0.1",
+      "lms_port": 3483,
+      "player_name": "HueSync",
+      "display_name": "Synthetic AirPlay",
+      "player_mac": "",
+      "alsa_device": "",
+      "follow_player_mac": "",
+      "id": "player-2",
+      "type": "AirPlay"
+    }
+  ],
+  "zones": [
+    {
+      "name": "Zone",
+      "controller_id": "bridge-1",
+      "entertainment_area_id": "area-1",
+      "entertainment_area_name": "Synthetic Room",
+      "light_count": 4,
+      "id": "zone-1"
+    }
+  ]
+}
