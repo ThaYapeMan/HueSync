@@ -51,6 +51,7 @@ vi.mock('../lib/api', async (importOriginal) => {
     }),
     updateEffect: vi.fn().mockResolvedValue(undefined),
     deleteEffect: vi.fn().mockResolvedValue(undefined),
+    getCouplings: vi.fn().mockResolvedValue([]),
     getEnergyProfiles: vi.fn().mockResolvedValue([]),
   }
 })

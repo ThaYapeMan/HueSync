@@ -28,6 +28,8 @@ import {
   updateEnergyProfile,
   deleteEnergyProfile,
   getEffects,
+  type Coupling,
+  getCouplings,
 } from '@/lib/api'
 
 // Semantic energy zone colors — purely for UI navigation, not actual effect/light colors.
@@ -296,7 +298,9 @@ function ModeToggle({ expertMode, onToggle }: { expertMode: boolean; onToggle: (
 
 // ── Main component ────────────────────────────────────────────────────────────
 
-export function EnergyProfiles() {
+export function EnergyProfiles({ activeCouplingId = null }: { activeCouplingId?: string | null }) {
+  const [couplings, setCouplings] = useState<Coupling[]>([])
+  const activeCoupling = couplings.find(c => c.id === activeCouplingId)
   const [energyProfiles, setEnergyProfiles] = useState<EnergyProfile[]>([])
   const [effects, setEffects] = useState<Effect[]>([])
   const [loading, setLoading] = useState(true)
@@ -340,7 +344,8 @@ export function EnergyProfiles() {
   // --- Load ---
   async function load() {
     try {
-      const [eps, effs] = await Promise.all([getEnergyProfiles(), getEffects()])
+      const [eps, effs, cs] = await Promise.all([getEnergyProfiles(), getEffects(), getCouplings()])
+      setCouplings(cs)
       setEnergyProfiles(eps)
       setEffects(effs)
       setError(null)
@@ -771,7 +776,12 @@ export function EnergyProfiles() {
             <TableBody>
               {energyProfiles.map((ep) => (
                 <TableRow key={ep.id}>
-                  <TableCell className="font-medium">{ep.name}</TableCell>
+                  <TableCell className="font-medium">
+                    <div className="flex items-center gap-2">
+                      <span>{ep.name}</span>
+                      {ep.id === activeCoupling?.energy_profile_id && <span aria-label="In use by active coupling" className="shrink-0 text-[10px] text-green-400">●</span>}
+                    </div>
+                  </TableCell>
                   <TableCell className="text-sm text-muted-foreground">
                     {effectName(ep.high_energy_effect_id)}
                   </TableCell>

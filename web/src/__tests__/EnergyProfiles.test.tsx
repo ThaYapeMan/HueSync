@@ -34,6 +34,7 @@ vi.mock('../lib/api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../lib/api')>()
   return {
     ...actual,
+    getCouplings: vi.fn().mockResolvedValue([]),
     getEnergyProfiles: vi.fn(),
     getEffects: vi.fn(),
     createEnergyProfile: vi.fn(),

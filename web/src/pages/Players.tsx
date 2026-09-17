@@ -34,6 +34,8 @@ import {
   updateVirtualPlayer,
   deleteVirtualPlayer,
   listLmsPlayers,
+  type Coupling,
+  getCouplings,
 } from '@/lib/api'
 
 interface FormState {
@@ -67,7 +69,9 @@ function FormRow({ label, children }: { label: string; children: React.ReactNode
   )
 }
 
-export function Players() {
+export function Players({ activeCouplingId = null }: { activeCouplingId?: string | null }) {
+  const [couplings, setCouplings] = useState<Coupling[]>([])
+  const activeCoupling = couplings.find(c => c.id === activeCouplingId)
   const [players, setPlayers] = useState<VirtualPlayer[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -83,7 +87,8 @@ export function Players() {
 
   async function load() {
     try {
-      const data = await getVirtualPlayers()
+      const [data, cs] = await Promise.all([getVirtualPlayers(), getCouplings()])
+      setCouplings(cs)
       setPlayers(data)
       setError(null)
     } catch (e) {
@@ -232,7 +237,12 @@ export function Players() {
               <TableRow key={p.id}>
                 <TableCell className="font-medium">{p.type}</TableCell>
                 <TableCell className="font-mono text-sm text-muted-foreground">{p.lms_host}</TableCell>
-                <TableCell className="text-sm">{p.player_name}</TableCell>
+                <TableCell className="text-sm">
+                  <div className="flex items-center gap-2">
+                    <span>{p.player_name}</span>
+                    {p.id === activeCoupling?.player_id && <span aria-label="In use by active coupling" className="shrink-0 text-[10px] text-green-400">●</span>}
+                  </div>
+                </TableCell>
                 <TableCell className="text-sm text-muted-foreground">{p.display_name || p.player_name}</TableCell>
                 <TableCell className="font-mono text-xs text-muted-foreground">{p.player_mac || '—'}</TableCell>
                 <TableCell className="text-right">

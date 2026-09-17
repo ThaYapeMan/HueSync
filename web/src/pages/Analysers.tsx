@@ -296,8 +296,9 @@ function FrequencyRangeSlider({
 
 // ── AnalyserListItem ──────────────────────────────────────────────────────────
 
-function AnalyserListItem({ analyser, isSelected, onSelect }: {
+function AnalyserListItem({ analyser, isActive, isSelected, onSelect }: {
   analyser: Analyser
+  isActive: boolean
   isSelected: boolean
   onSelect: () => void
 }) {
@@ -315,7 +316,10 @@ function AnalyserListItem({ analyser, isSelected, onSelect }: {
       )}
       onClick={onSelect}
     >
-      <p className="text-sm font-medium truncate">{analyser.name}</p>
+      <div className="flex items-center gap-2">
+        <p className="text-sm font-medium truncate flex-1">{analyser.name}</p>
+        {isActive && <span aria-label="In use by active coupling" className="shrink-0 text-[10px] text-green-400">●</span>}
+      </div>
       <p className="text-xs text-muted-foreground/60 truncate">
         {methodLabel} · {analyser.bars} bars · {sourceLabel}
       </p>
@@ -858,9 +862,10 @@ function AnalyserWorkspace({ analyser, couplings, onSaved, onDeleted, onCloned, 
 
 // ── Analysers (main) ──────────────────────────────────────────────────────────
 
-export function Analysers() {
+export function Analysers({ activeCouplingId = null }: { activeCouplingId?: string | null }) {
   const [analysers, setAnalysers] = useState<Analyser[]>([])
   const [couplings, setCouplings] = useState<Coupling[]>([])
+  const activeCoupling = couplings.find(c => c.id === activeCouplingId)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [selectedId, setSelectedId] = useState<string | null>(null)
@@ -954,6 +959,7 @@ export function Analysers() {
               <AnalyserListItem
                 key={a.id}
                 analyser={a}
+                isActive={a.id === activeCoupling?.analyser_id}
                 isSelected={!isCreating && a.id === selectedId}
                 onSelect={() => { setSelectedId(a.id); setIsCreating(false) }}
               />

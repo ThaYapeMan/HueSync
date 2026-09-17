@@ -36,6 +36,8 @@ import {
   deleteZone,
   getControllers,
   getControllerAreas,
+  type Coupling,
+  getCouplings,
 } from '@/lib/api'
 
 interface FormState {
@@ -56,7 +58,9 @@ function defaultForm(z?: Zone): FormState {
   }
 }
 
-export function Zones() {
+export function Zones({ activeCouplingId = null }: { activeCouplingId?: string | null }) {
+  const [couplings, setCouplings] = useState<Coupling[]>([])
+  const activeCoupling = couplings.find(c => c.id === activeCouplingId)
   const [zones, setZones] = useState<Zone[]>([])
   const [controllers, setControllers] = useState<Controller[]>([])
   const [areas, setAreas] = useState<EntertainmentArea[]>([])
@@ -71,7 +75,8 @@ export function Zones() {
 
   async function load() {
     try {
-      const [zs, cs] = await Promise.all([getZones(), getControllers()])
+      const [zs, cs, cps] = await Promise.all([getZones(), getControllers(), getCouplings()])
+      setCouplings(cps)
       setZones(zs)
       setControllers(cs)
       setError(null)
@@ -192,7 +197,12 @@ export function Zones() {
           <TableBody>
             {zones.map((z) => (
               <TableRow key={z.id}>
-                <TableCell className="font-medium">{z.name}</TableCell>
+                <TableCell className="font-medium">
+                  <div className="flex items-center gap-2">
+                    <span>{z.name}</span>
+                    {z.id === activeCoupling?.zone_id && <span aria-label="In use by active coupling" className="shrink-0 text-[10px] text-green-400">●</span>}
+                  </div>
+                </TableCell>
                 <TableCell className="text-sm text-muted-foreground">{controllerName(z.controller_id)}</TableCell>
                 <TableCell className="text-sm text-muted-foreground">{z.entertainment_area_name || z.entertainment_area_id}</TableCell>
                 <TableCell className="text-sm">{z.light_count}</TableCell>

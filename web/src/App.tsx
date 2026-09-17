@@ -76,9 +76,9 @@ export default function App() {
         <main className="flex-1 overflow-hidden flex flex-col">
           {/* Effects, Energy Profiles, Couplings, and Analysers manage their own full-page layout */}
           {activeTab === 'energy-profiles' ? (
-            <EnergyProfiles />
+            <EnergyProfiles activeCouplingId={status?.active_coupling_id ?? null} />
           ) : activeTab === 'effects' ? (
-            <Effects />
+            <Effects activeCouplingId={status?.active_coupling_id ?? null} />
           ) : activeTab === 'couplings' ? (
             <Couplings
               activeCouplingId={status?.active_coupling_id ?? null}
@@ -86,7 +86,7 @@ export default function App() {
               onNavigate={(tab) => setActiveTab(tab as Tab)}
             />
           ) : activeTab === 'analysers' ? (
-            <Analysers />
+            <Analysers activeCouplingId={status?.active_coupling_id ?? null} />
           ) : (
             <div className="flex-1 overflow-y-auto">
               <div className={cn('mx-auto px-6 py-6', activeTab === 'now-playing' ? 'max-w-5xl' : 'max-w-3xl')}>
@@ -94,8 +94,8 @@ export default function App() {
                   <NowPlaying colour={colour} channel_colours={channel_colours} onset={onset} onset_bass={onset_bass} onset_mid={onset_mid} onset_treble={onset_treble} mix={mix} bars={bars} status={status} />
                 )}
                 {activeTab === 'backup' && <Backup />}
-                {activeTab === 'players' && <Players />}
-                {activeTab === 'zones' && <Zones />}
+                {activeTab === 'players' && <Players activeCouplingId={status?.active_coupling_id ?? null} />}
+                {activeTab === 'zones' && <Zones activeCouplingId={status?.active_coupling_id ?? null} />}
                 {activeTab === 'latency' && (
                   <Latency
                     syncMaster={status?.sync_master ?? null}

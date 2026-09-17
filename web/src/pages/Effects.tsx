@@ -20,6 +20,8 @@ import {
   updateEffect,
   deleteEffect,
   getEnergyProfiles,
+  type Coupling,
+  getCouplings,
 } from '@/lib/api'
 
 // ── Effect defaults (from models.py) ─────────────────────────────────────────
@@ -216,12 +218,13 @@ function effectSummary(effect: Effect): string {
 }
 
 interface GalleryCardProps {
+  isActive: boolean
   effect: Effect
   onEdit: () => void
   onDelete: () => void
 }
 
-function GalleryCard({ effect, onEdit, onDelete }: GalleryCardProps) {
+function GalleryCard({ effect, isActive, onEdit, onDelete }: GalleryCardProps) {
   const meta = EFFECTS.find((e) => e.id === effect.effect_type)
   const swatchClass = getEffectSwatchClass(effect.effect_type)
 
@@ -236,7 +239,10 @@ function GalleryCard({ effect, onEdit, onDelete }: GalleryCardProps) {
       </div>
       <div className="p-4 flex flex-col gap-2 flex-1">
         <div>
-          <div className="font-semibold text-sm leading-tight">{effect.name}</div>
+          <div className="flex items-center gap-2">
+            <div className="font-semibold text-sm leading-tight">{effect.name}</div>
+            {isActive && <span aria-label="In use by active coupling" className="shrink-0 text-[10px] text-green-400">●</span>}
+          </div>
           <div className="text-xs text-muted-foreground mt-0.5">{meta?.label ?? effect.effect_type}</div>
         </div>
         <div className="text-xs text-muted-foreground/70 leading-snug flex-1">
@@ -265,9 +271,12 @@ function GalleryCard({ effect, onEdit, onDelete }: GalleryCardProps) {
 
 // ── Main component ────────────────────────────────────────────────────────────
 
-export function Effects() {
+export function Effects({ activeCouplingId = null }: { activeCouplingId?: string | null }) {
+  const [couplings, setCouplings] = useState<Coupling[]>([])
+  const activeCoupling = couplings.find(c => c.id === activeCouplingId)
   const [effects, setEffects] = useState<Effect[]>([])
   const [energyProfiles, setEnergyProfiles] = useState<EnergyProfile[]>([])
+  const inUseProfile = energyProfiles.find(ep => ep.id === activeCoupling?.energy_profile_id)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -319,7 +328,8 @@ export function Effects() {
   // ── load ──
   async function load() {
     try {
-      const [effs, eps] = await Promise.all([getEffects(), getEnergyProfiles()])
+      const [effs, eps, cs] = await Promise.all([getEffects(), getEnergyProfiles(), getCouplings()])
+      setCouplings(cs)
       setEffects(effs)
       setEnergyProfiles(eps)
       setError(null)
@@ -778,6 +788,7 @@ export function Effects() {
               <GalleryCard
                 key={e.id}
                 effect={e}
+                isActive={e.id === inUseProfile?.high_energy_effect_id || e.id === inUseProfile?.low_energy_effect_id}
                 onEdit={() => openEdit(e)}
                 onDelete={() => handleDelete(e.id)}
               />
