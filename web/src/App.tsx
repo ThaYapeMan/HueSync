@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { usePreviewSocket } from '@/hooks/usePreviewSocket'
 import { NowPlaying } from '@/pages/NowPlaying'
+import { Backup } from '@/pages/Backup'
 import { Latency } from '@/pages/Latency'
 import { Players } from '@/pages/Players'
 import { Analysers } from '@/pages/Analysers'
@@ -11,7 +12,7 @@ import { Couplings } from '@/pages/Couplings'
 import { Badge } from '@/components/ui/badge'
 import { cn } from '@/lib/utils'
 
-type Tab = 'now-playing' | 'players' | 'analysers' | 'effects' | 'energy-profiles' | 'zones' | 'couplings' | 'latency'
+type Tab = 'now-playing' | 'players' | 'analysers' | 'effects' | 'energy-profiles' | 'zones' | 'couplings' | 'latency' | 'backup'
 
 const NAV_ITEMS: { value: Tab; label: string }[] = [
   { value: 'now-playing',     label: 'Now Playing' },
@@ -22,6 +23,7 @@ const NAV_ITEMS: { value: Tab; label: string }[] = [
   { value: 'zones',           label: 'Zones' },
   { value: 'players',         label: 'Virtual Players' },
   { value: 'latency',         label: 'Latency' },
+  { value: 'backup',          label: 'Backup and restore' },
 ]
 
 function ConnectionBadge({ connected, attempt }: { connected: boolean; attempt: number }) {
@@ -91,6 +93,7 @@ export default function App() {
                 {activeTab === 'now-playing' && (
                   <NowPlaying colour={colour} channel_colours={channel_colours} onset={onset} onset_bass={onset_bass} onset_mid={onset_mid} onset_treble={onset_treble} mix={mix} bars={bars} status={status} />
                 )}
+                {activeTab === 'backup' && <Backup />}
                 {activeTab === 'players' && <Players />}
                 {activeTab === 'zones' && <Zones />}
                 {activeTab === 'latency' && (

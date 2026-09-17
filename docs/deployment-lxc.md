@@ -46,3 +46,19 @@ an in-process timed-out teardown successfully joined its worker.
 Archive results with commit, producer revision, dependencies, hardware/container limits,
 commands and raw artifacts. Old production benchmarks apply only to their original
 context and do not certify this implementation.
+
+## Disaster recovery
+
+1. Install from Git on a clean supported target using `scripts/install-huesync.sh`.
+2. Transfer the sensitive portable backup securely; keep file permissions private.
+3. Use **Backup and restore** in the UI, or stop HueSync and use the installed
+   `python -m huesync.backup import` CLI, then restart the service.
+4. Verify all entities, exact IDs, LMS/AirPlay settings, player latencies and references.
+5. Activate a restored Coupling and verify the original Hue Bridge works without
+   re-pairing. This depends on reachable, still-valid Bridge credentials.
+6. Verify both source paths on the target; do not run the old and new installations
+   simultaneously against the same virtual-player identity or Bridge session.
+
+Local round-trip tests are not evidence of completed LXC disaster recovery. Record
+live Hue/LMS/AirPlay recovery separately. See [configuration](configuration.md#backup-and-restore)
+for safety backups, offline runtime exclusion, API errors and format versions.

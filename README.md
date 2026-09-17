@@ -231,3 +231,20 @@ for their stated commits only.
 Historical prompts/specifications are labelled as historical or stored under
 `docs/archive/`. They do not override these references. `docs/future/` contains
 unimplemented proposals, not current capabilities.
+
+## Backup and restore
+
+Use **Backup and restore** in the UI to export all configured entities and player
+latencies, including Hue Bridge `app_key` and `client_key`. Restoring preserves
+pairing data, IDs and relationships; no configuration needs to be reconstructed.
+Keep the JSON file secure: it contains controller credentials. HueSync has no
+built-in authentication; expose its UI/API only on a trusted network.
+
+Restore accepts the current versioned backup format only. Deactivate the current
+Coupling and complete teardown first. Import validates everything, saves an exact-byte
+safety backup, and replaces configuration atomically. The application stays idle;
+activate a restored Coupling when ready. No service restart is needed for UI/API restore.
+CLI restore is offline and requires the service to be stopped.
+
+See [configuration backup/restore](docs/configuration.md#backup-and-restore) for the
+format, scope, API/CLI commands and failure policy, and [LXC recovery](docs/deployment-lxc.md#disaster-recovery).

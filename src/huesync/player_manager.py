@@ -241,6 +241,11 @@ class PlayerManager:
         _RUN_DIR.mkdir(parents=True, exist_ok=True)
 
     @property
+    def configuration_restore_ready(self) -> bool:
+        """Only a fully released session permits configuration replacement."""
+        return self._active is None
+
+    @property
     def detected_sync_master(self) -> str | None:
         return self._detected_sync_master
 

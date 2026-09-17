@@ -11,11 +11,19 @@ import asyncio
 import uuid
 from dataclasses import replace
 
-from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict
 
 from . import __git_hash__, __version__, hue_bridge
+from .backup import (
+    MAX_BACKUP_BYTES,
+    BackupError,
+    decode_backup,
+    encode_backup,
+    export_configuration,
+    restore_configuration,
+)
 from .hue_output import get_channel_infos
 from .lms_discovery import discover_lms
 from .lms_status import list_lms_players
@@ -40,7 +48,19 @@ from .util import generate_locally_administered_mac
 
 _VERSION_STRING = f"{__version__}+{__git_hash__}"
 
-router = APIRouter(prefix="/api")
+async def configuration_mutation_guard(request: Request):
+    """Serialize API writes/full exports so restore cannot cross an in-flight update."""
+    if (request.method in {'POST', 'PATCH', 'PUT', 'DELETE'}
+            or request.url.path == '/api/config/export'):
+        if not hasattr(request.app.state, 'configuration_mutation_lock'):
+            request.app.state.configuration_mutation_lock = asyncio.Lock()
+        async with request.app.state.configuration_mutation_lock:
+            yield
+    else:
+        yield
+
+
+router = APIRouter(prefix="/api", dependencies=[Depends(configuration_mutation_guard)])
 
 
 # ---------------------------------------------------------------------------
@@ -1450,3 +1470,56 @@ async def activate_coupling(coupling_id: str, request: Request):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     return {"active_id": coupling_id, "warnings": []}
+
+
+# Full backups deliberately include credentials, unlike ordinary entity responses.
+_BACKUP_HEADERS = {'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff'}
+
+
+@router.get('/config/export')
+async def export_config(request: Request):
+    try:
+        backup = export_configuration(_storage(request))
+        raw = encode_backup(backup)
+    except BackupError as exc:
+        return JSONResponse(status_code=422, headers=_BACKUP_HEADERS,
+                            content={'detail': {
+                                'code': 'invalid_configuration', 'message': str(exc)}})
+    stamp = backup['created_at'].replace(':', '')
+    return Response(raw, media_type='application/json', headers={
+        **_BACKUP_HEADERS,
+        'Content-Disposition': f'attachment; filename="huesync-backup-{stamp}.json"',
+    })
+
+
+@router.post('/config/import')
+async def import_config(request: Request):
+    def error(status: int, code: str, message: str):
+        return JSONResponse(status_code=status, headers=_BACKUP_HEADERS,
+                            content={'detail': {'code': code, 'message': message}})
+
+    if request.headers.get('content-type', '').split(';')[0].strip().lower() != 'application/json':
+        return error(415, 'json_required', 'Upload the JSON backup as application/json')
+    raw = bytearray()
+    async for chunk in request.stream():
+        if len(raw) + len(chunk) > MAX_BACKUP_BYTES:
+            return error(413, 'backup_too_large', 'Backup exceeds the 4 MiB limit')
+        raw.extend(chunk)
+    try:
+        backup = decode_backup(bytes(raw))
+    except BackupError as exc:
+        return error(422, 'invalid_backup', str(exc))
+    # No stop/reload transaction is needed: insist on successful teardown before
+    # any persistent change. This also excludes sessions with retiring readers.
+    if not _manager(request).configuration_restore_ready:
+        return error(409, 'runtime_active',
+                     'Deactivate the current Coupling and finish pending teardown before restore')
+    try:
+        restore_configuration(_storage(request), backup)
+    except BackupError as exc:
+        return error(409, 'restore_failed', str(exc))
+    return JSONResponse(headers=_BACKUP_HEADERS, content={
+        'status': 'restored', 'runtime': 'inactive', 'restart_required': False,
+        'safety_backup_created': True,
+        'message': 'Configuration restored. Activate a restored Coupling when ready.',
+    })

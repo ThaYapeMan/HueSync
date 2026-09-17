@@ -52,3 +52,12 @@ request schemas reject unknown fields rather than silently discarding them. The
 WebSocket status payload uses `effect_type` (the same field consumed by the current
 frontend). Publication records use `effective_spectrum_backend` for actual Spectrum
 identity. Persisted history is migrated by the installer, never by HTTP aliases.
+
+## Sensitive configuration transfer
+
+`GET /api/config/export` downloads a full credential-preserving JSON attachment.
+`POST /api/config/import` accepts that JSON as an application/json body (4 MiB limit),
+validates it and restores only while the runtime is fully inactive. Both use no-store.
+This is the explicit exception to ordinary Controller credential redaction. There is
+no authentication; use trusted-network access only. See the authoritative
+[backup/restore contract](configuration.md#backup-and-restore).

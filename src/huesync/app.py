@@ -14,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 
 from . import __git_hash__, __version__
 from .api import router as api_router
+from .backup import configuration_lease
 from .player_manager import PlayerManager
 from .storage import Storage
 
@@ -41,14 +42,28 @@ async def on_startup() -> None:
     # A previously "active" coupling from before a restart has no real
     # squeezelite/cava process behind it anymore — clear the stale state
     # rather than pretending it's still running.
-    storage.set_active_coupling_id(None)
-    # Remove any /dev/shm/squeezelite-* segments left by a previous crash.
-    player_manager.cleanup_orphaned_shm()
+    app.state.configuration_mutation_lock = asyncio.Lock()
+    lease = configuration_lease(app.state.storage.path)
+    lease.__enter__()
+    app.state.configuration_lease = lease
+    try:
+        app.state.storage.set_active_coupling_id(None)
+        # Remove owned segments left by a previous crash.
+        app.state.player_manager.cleanup_orphaned_shm()
+    except BaseException:
+        lease.__exit__(None, None, None)
+        app.state.configuration_lease = None
+        raise
 
 
 @app.on_event("shutdown")
 async def on_shutdown() -> None:
-    await player_manager.deactivate()
+    await app.state.player_manager.deactivate()
+    # Incomplete teardown retains the lease until shutdown succeeds or OS exit.
+    lease = getattr(app.state, 'configuration_lease', None)
+    if lease is not None:
+        lease.__exit__(None, None, None)
+        app.state.configuration_lease = None
 
 
 # -- Live preview ---------------------------------------------------------------

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import threading
+from contextlib import contextmanager
 from pathlib import Path
 
 from .models import (
@@ -50,6 +51,18 @@ class Storage:
         with tmp.open("w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, sort_keys=True)
         tmp.replace(self.path)
+
+    def read_configuration(self) -> dict:
+        """Read one complete persisted snapshot under the same lock as CRUD."""
+        with _lock:
+            return self._read()
+
+    @staticmethod
+    @contextmanager
+    def configuration_transaction():
+        """Exclude all in-process CRUD writes during an atomic full restore."""
+        with _lock:
+            yield
 
     # -- Player latencies ---------------------------------------------------
 

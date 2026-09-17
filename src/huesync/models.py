@@ -264,8 +264,8 @@ class Controller:
     def to_safe_dict(self) -> dict:
         """Public-API serialisation: credentials replaced by boolean presence flags.
 
-        Never expose app_key / client_key over HTTP — they grant full bridge
-        control to anyone who can reach the HueSync API port.
+        Ordinary entity responses hide app_key / client_key. The explicit sensitive
+        full-backup download preserves them for disaster recovery.
         """
         return {
             "id": self.id,

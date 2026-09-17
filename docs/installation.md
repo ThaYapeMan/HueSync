@@ -123,3 +123,11 @@ intentional external-FIFO feature without weakening canonical v1 requirements.
 For static/unit checks on development hosts, use [testing.md](testing.md).
 `bash scripts/validate.sh` provides supplementary target diagnostics and a synthetic
 canonical-analysis smoke test using the installed environment; it never consumes live PCM.
+
+## Preserve configuration before upgrades
+
+Use the UI's **Backup and restore** section or the installed
+`python -m huesync.backup export` command before an upgrade. Portable backups include
+controller credentials; choose a private destination. The installer does not export
+secrets automatically. Its migration backup remains a separate exact-byte schema
+rollback file. See [backup and restore](configuration.md#backup-and-restore).
