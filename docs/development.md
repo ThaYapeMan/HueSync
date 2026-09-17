@@ -17,7 +17,7 @@ sudo apt-get install -y python3-venv
 python3 -m venv .venv
 . .venv/bin/activate
 pip install -e '.[dev]'
-# Use Node 22.22.0, matching CI and the installer, before this step.
+# Use Node 22.22.2, matching CI and the installer, before this step.
 cd web
 npm ci
 ```
@@ -54,8 +54,10 @@ to run unit tests on a development host.
 
 When changing dependencies, check every bootstrap consumer: installer, CI, wheel
 build, development setup and documentation. The frontend uses `npm ci` and the
-committed lockfile, with Node 22.22.0 in CI/installer; Node 20 is insufficient for the
-current locked test dependencies. See [testing](testing.md).
+committed lockfile, with Node 22.22.2 in CI/installer; Node 20 is insufficient for the
+current locked test dependencies. In particular, jsdom 30.0.1 requires
+`^22.22.2 || ^24.15.0 || >=26.0.0`; installer and CI pin the same compatible
+patch release. See [testing](testing.md).
 
 ## Boundaries
 

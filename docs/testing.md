@@ -72,7 +72,7 @@ stubbed test or historical benchmark substitutes for these checks.
 Start with [development setup](development.md#environment), including the shared
 native system prerequisites and `pip install -e '.[dev]'`. CI runs Ruff and the
 complete pytest suite on Python 3.11/3.12/3.13, and also builds a native wheel.
-The `build-frontend` job uses Node 22.22.0 and runs these commands in `web/`,
+The `build-frontend` job uses Node 22.22.2 and runs these commands in `web/`,
 in this order:
 
 ```sh

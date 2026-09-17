@@ -45,7 +45,7 @@ jobs:
       - name: Set up Node 22 (matches installer)
         uses: actions/setup-node@v4
         with:
-          node-version: 22.22.0
+          node-version: 22.22.2
           cache: npm
           cache-dependency-path: web/package-lock.json
 

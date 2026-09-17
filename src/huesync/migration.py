@@ -133,9 +133,13 @@ def _migrate_flat_residue(data: dict) -> None:
             # An ID is only a migration marker, not proof of content equivalence.
             # Compare every old setting with its current linked owner. Additional
             # current-only fields (e.g. low-energy Effect) remain untouched.
-            if any(existing.get(k, default) != coupling[k]
-                   for k, default in (("name", "New Coupling"), ("enabled", True))):
-                raise ValueError("Conflicting historical/current profiles coupling")
+            # 15e4b66 retained the Profile after copying its ID to Coupling.
+            # At a72893b, PATCH /couplings/{id} changes name/enabled only on
+            # Coupling; _build_engine_profile reads that current metadata.
+            # These are editable labels/activation policy, not binding identity.
+            # Keep current name/enabled (including explicit False) unchanged.
+            # Still require equivalent linked settings below: metadata precedence
+            # must not silently resolve an incompatible player/zone/DSP binding.
             for collection, (reference, defaults) in _PROFILE_PARTS.items():
                 owner = existing
                 if collection == "effects":

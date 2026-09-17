@@ -1,6 +1,8 @@
 """Installer boundaries tested without pretending to run apt/systemd in mocks."""
 import importlib.util
+import json
 import os
+import re
 import subprocess
 import sys
 import types
@@ -167,3 +169,21 @@ def test_platform_gate_read_only(tmp_path, debian, arch, booted, success, messag
     assert (result.returncode == 0) == success
     assert message in result.stderr
     assert sorted(p.name for p in tmp_path.iterdir()) == before
+
+
+def test_node_bootstrap_pin_matches_ci_and_locked_jsdom_engine():
+    installer = SCRIPT.read_text()
+    pin = re.search(r'node-v(\d+\.\d+\.\d+)-linux-x64', installer).group(1)
+    workflow = (ROOT / '.github/workflows/ci.yml').read_text()
+    assert re.search(r'node-version: ([\d.]+)', workflow).group(1) == pin
+    lock = json.loads((ROOT / 'web/package-lock.json').read_text())
+    requirement = lock['packages']['node_modules/jsdom']['engines']['node']
+    # Installer deliberately stays on the locked dependency's Node 22 caret
+    # branch. A future major-branch change needs an explicit bootstrap review.
+    minimum = re.search(r'\^22\.(\d+)\.(\d+)', requirement)
+    assert minimum is not None
+    version = tuple(map(int, pin.split('.')))
+    assert version[0] == 22
+    assert version >= (22, *map(int, minimum.groups()))
+    for doc in ('development.md', 'testing.md', 'installation.md'):
+        assert f'Node {pin}' in (ROOT / 'docs' / doc).read_text()

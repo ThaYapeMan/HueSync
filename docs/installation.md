@@ -27,7 +27,7 @@ neither requires manual JSON edits.
 | Squeezelite default codecs | FLAC, Vorbis/Ogg, MAD, MPG123, FAAD development packages | Matching shared libraries: PCM/FLAC/Vorbis/MP3/AAC; no optional Opus/FFmpeg/ALAC/resampler flags |
 | External CAVA/FIFO | Debian CAVA + same pinned Squeezelite source | `cava` plus dedicated `huesync-squeezelite-fifo` producer; separate derived-bars route |
 | AirPlay 2 | Autotools, FFmpeg, crypto/plist/Avahi/soxr/systemd development packages | Pinned shairport-sync + nqptp source builds, Avahi, capabilities, managed FIFO |
-| Frontend | Private Node 22.22.0 archive, pinned SHA256; npm ci | Compiled assets in wheel; Node is not a runtime requirement |
+| Frontend | Private Node 22.22.2 archive, pinned SHA256; npm ci | Compiled assets in wheel; Node is not a runtime requirement |
 | Services | systemd, polkit | huesync user/audio group, repository unit, narrow receiver-restart authorization |
 
 The minimal CAVA build packages come from `scripts/native-build-packages.txt`,

@@ -115,8 +115,8 @@ WORK=$(mktemp -d /var/tmp/huesync-install.XXXXXX)
 cleanup() { rm -rf -- "$WORK"; }
 trap cleanup EXIT
 git -c safe.directory="$REPO_DIR" -C "$REPO_DIR" archive HEAD | tar -x -C "$WORK"
-curl --fail --location --retry 3 https://nodejs.org/dist/v22.22.0/node-v22.22.0-linux-x64.tar.xz -o "$WORK/node.tar.xz"
-printf '%s  %s\n' 9aa8e9d2298ab68c600bd6fb86a6c13bce11a4eca1ba9b39d79fa021755d7c37 "$WORK/node.tar.xz" | sha256sum --check
+curl --fail --location --retry 3 https://nodejs.org/dist/v22.22.2/node-v22.22.2-linux-x64.tar.xz -o "$WORK/node.tar.xz"
+printf '%s  %s\n' 88fd1ce767091fd8d4a99fdb2356e98c819f93f3b1f8663853a2dee9b438068a "$WORK/node.tar.xz" | sha256sum --check
 mkdir "$WORK/node"
 tar -xJf "$WORK/node.tar.xz" --strip-components=1 -C "$WORK/node"
 (

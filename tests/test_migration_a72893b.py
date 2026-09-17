@@ -93,7 +93,6 @@ def test_unique_bridge_and_profile_are_converted_not_discarded():
     ('bridges', 'client_key', 'CONFLICTING-SECRET'),
     ('bridges', 'host', '192.0.2.99'),
     ('profiles', 'lower_cutoff_freq', 999),
-    ('profiles', 'name', 'Different'),
 ])
 def test_conflicting_residue_fails_without_writing_or_secret_disclosure(
         tmp_path, capsys, collection, field, value):
@@ -182,7 +181,8 @@ def test_current_runtime_still_rejects_historical_keys(tmp_path, key):
         Storage(path)
 
 
-def test_installer_migration_command_in_isolated_environment(tmp_path):
+@pytest.mark.parametrize("edited_coupling", [False, True])
+def test_installer_migration_command_in_isolated_environment(tmp_path, edited_coupling):
     # Same isolated Python/module command as installer phase 4, without apt/services.
     installer = (ROOT / 'scripts/install-huesync.sh').read_text()
     assert '"$RELEASE/venv/bin/python" -I -B -m huesync.migration "$CONFIG"' in installer
@@ -199,14 +199,19 @@ def test_installer_migration_command_in_isolated_environment(tmp_path):
     shutil.copytree(ROOT / 'src/huesync', Path(site) / 'huesync',
                     ignore=shutil.ignore_patterns('__pycache__', 'webui'))
     config = tmp_path / 'config.json'
-    config.write_bytes(FIXTURE.read_bytes())
+    data = historical()
+    if edited_coupling:
+        data['couplings'][0].update(name='Renamed in current UI', enabled=False)
+    original = json.dumps(data).encode()
+    config.write_bytes(original)
     env = dict(os.environ, PYTHONDONTWRITEBYTECODE='1')
     command = [str(python), '-I', '-B', '-m', 'huesync.migration', str(config)]
     result = subprocess.run(command, capture_output=True, text=True, env=env)
     assert result.returncode == 0, result.stderr
     assert 'Schema 1: valid' in result.stdout
     assert subprocess.run(command + ['--check'], capture_output=True).returncode == 0
-    assert next(tmp_path.glob('*.bak')).read_bytes() == FIXTURE.read_bytes()
+    assert next(tmp_path.glob('*.bak')).read_bytes() == original
+    assert json.loads(config.read_bytes())['couplings'] == data['couplings']
     assert Storage(config).get_controller('bridge-1').app_key == 'SYNTHETIC-APP-KEY'
 
 
@@ -234,3 +239,47 @@ def test_generated_identity_collision_does_not_overwrite_current_entities():
     with pytest.raises(ValueError, match='Conflicting historical/current analysers'):
         convert(data)
     assert data == before
+
+
+@pytest.mark.parametrize('metadata', [
+    {'name': 'Renamed via Coupling API'}, {'enabled': False},
+    {'name': 'Renamed via Coupling API', 'enabled': False},
+])
+def test_retained_profile_does_not_override_current_coupling_metadata(tmp_path, metadata):
+    # a72893b PATCH saves Coupling metadata, never updates retained profiles.
+    data = historical()
+    data['couplings'][0].update(metadata)
+    path = tmp_path / 'config.json'
+    original = json.dumps(data).encode()
+    path.write_bytes(original)
+    assert migrate_file(path)
+    result = json.loads(path.read_bytes())
+    for key in ('controllers', 'virtual_players', 'zones', 'analysers',
+                'couplings', 'player_latencies', 'active_coupling_id'):
+        assert result[key] == data[key]
+    assert result['effects'] == data['scenes']
+    assert result['energy_profiles'] == data['crossfaders']
+    assert set(result) == set(empty_config())
+    validate_current(result, references=True)
+    assert next(tmp_path.glob('*.bak')).read_bytes() == original
+    assert not migrate_file(path)
+
+
+@pytest.mark.parametrize('collection,field,value', [
+    ('virtual_players', 'lms_host', '192.0.2.99'),
+    ('zones', 'entertainment_area_id', 'another-area'),
+    ('analysers', 'onset_delta', .99),
+    ('scenes', 'effect_type', 'wave'),
+    ('crossfaders', 'blend_start', .1),
+])
+def test_metadata_precedence_does_not_hide_binding_conflicts(tmp_path, collection, field, value):
+    data = historical()
+    data['couplings'][0].update(name='Renamed', enabled=False)
+    data[collection][0][field] = value
+    path = tmp_path / 'config.json'
+    original = json.dumps(data).encode()
+    path.write_bytes(original)
+    with pytest.raises(ValueError, match='Conflicting historical/current profiles'):
+        migrate_file(path)
+    assert path.read_bytes() == original
+    assert not list(tmp_path.glob('*.bak'))
