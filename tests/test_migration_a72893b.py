@@ -89,10 +89,8 @@ def test_unique_bridge_and_profile_are_converted_not_discarded():
 
 
 @pytest.mark.parametrize('collection,field,value', [
-    ('bridges', 'app_key', 'CONFLICTING-SECRET'),
-    ('bridges', 'client_key', 'CONFLICTING-SECRET'),
-    ('bridges', 'host', '192.0.2.99'),
-    ('profiles', 'lower_cutoff_freq', 999),
+    ('profiles', 'player_mac', '02:00:00:00:00:ff'),
+    ('profiles', 'entertainment_area_id', 'another-area'),
 ])
 def test_conflicting_residue_fails_without_writing_or_secret_disclosure(
         tmp_path, capsys, collection, field, value):
@@ -201,7 +199,7 @@ def test_installer_migration_command_in_isolated_environment(tmp_path, edited_co
     config = tmp_path / 'config.json'
     data = historical()
     if edited_coupling:
-        data['couplings'][0].update(name='Renamed in current UI', enabled=False)
+        data = stale_snapshots()
     original = json.dumps(data).encode()
     config.write_bytes(original)
     env = dict(os.environ, PYTHONDONTWRITEBYTECODE='1')
@@ -212,7 +210,7 @@ def test_installer_migration_command_in_isolated_environment(tmp_path, edited_co
     assert subprocess.run(command + ['--check'], capture_output=True).returncode == 0
     assert next(tmp_path.glob('*.bak')).read_bytes() == original
     assert json.loads(config.read_bytes())['couplings'] == data['couplings']
-    assert Storage(config).get_controller('bridge-1').app_key == 'SYNTHETIC-APP-KEY'
+    assert Storage(config).get_controller('bridge-1').app_key == data['controllers'][0]['app_key']
 
 
 def test_unique_profile_with_dangling_bridge_fails(tmp_path):
@@ -265,21 +263,111 @@ def test_retained_profile_does_not_override_current_coupling_metadata(tmp_path, 
     assert not migrate_file(path)
 
 
-@pytest.mark.parametrize('collection,field,value', [
-    ('virtual_players', 'lms_host', '192.0.2.99'),
-    ('zones', 'entertainment_area_id', 'another-area'),
-    ('analysers', 'onset_delta', .99),
-    ('scenes', 'effect_type', 'wave'),
-    ('crossfaders', 'blend_start', .1),
-])
-def test_metadata_precedence_does_not_hide_binding_conflicts(tmp_path, collection, field, value):
+# Independently editable fields from a72893b api.py request models and
+# _build_engine_profile. Values deliberately differ from the retained snapshots.
+MUTATIONS = {
+    'controllers': dict(name='Current bridge', host='192.0.2.99',
+                        app_key='NEW-SYNTHETIC-KEY', client_key='NEW-SYNTHETIC-CLIENT'),
+    'virtual_players': dict(type='AirPlay', lms_host='192.0.2.99', lms_port=9000,
+                           player_name='Renamed player', display_name='Advertised name',
+                           alsa_device='hw:2', follow_player_mac='02:00:00:00:00:ff'),
+    'zones': dict(name='Current zone', entertainment_area_name='Renamed room', light_count=6),
+    'analysers': dict(name='Current analysis', bars=40, lower_cutoff_freq=60,
+                     higher_cutoff_freq=14000, onset_method='multiband', onset_delta=.2,
+                     onset_alpha=.8, superflux_mu=4, superflux_lag=3,
+                     use_hpss_separation=True, bars_source='pcm_pipeline',
+                     spectrum_backend='cavacore'),
+    'scenes': dict(name='Current effect', effect_type='wave', effect_speed=2., effect_decay=.5,
+                  sensitivity=2., brightness_floor=.2, bass_hz=300, mid_hz=2500,
+                  exertion_clip=4., onset_flash_intensity=.2),
+    'crossfaders': dict(name='Current energy', blend_start=.2, blend_end=.8,
+                       blend_response=.2, high_energy_effect_id='effect-2',
+                       low_energy_effect_id='effect-3'),
+    'couplings': dict(name='Current coupling', enabled=False, analyser_id='analyser-3',
+                      energy_profile_id='energy-3'),
+}
+
+
+def stale_snapshots():
     data = historical()
-    data['couplings'][0].update(name='Renamed', enabled=False)
+    for collection, updates in MUTATIONS.items():
+        data[collection][0].update(updates)
+    return data
+
+
+@pytest.mark.parametrize('collection,field,value', [
+    (collection, field, value) for collection, values in MUTATIONS.items()
+    for field, value in values.items()
+])
+def test_independently_mutated_entity_wins_over_snapshot(collection, field, value):
+    data = historical()
     data[collection][0][field] = value
+    if field == 'spectrum_backend':
+        data['analysers'][0]['bars_source'] = 'pcm_pipeline'
+    expected = copy.deepcopy(data)
+    result = convert(data)
+    for key in ('controllers', 'virtual_players', 'zones', 'analysers',
+                'couplings', 'player_latencies', 'active_coupling_id'):
+        assert result[key] == expected[key]
+    assert result['effects'] == expected['scenes']
+    assert result['energy_profiles'] == expected['crossfaders']
+    validate_current(result, references=True)
+    assert convert(result) == result
+
+
+@pytest.mark.parametrize('collection,field,value', [
+    ('virtual_players', 'player_mac', '02:00:00:00:00:ff'),
+    ('virtual_players', 'player_mac', ''),
+    ('zones', 'entertainment_area_id', 'another-area'),
+    ('zones', 'controller_id', 'another-controller'),
+    ('controllers', 'type', 'wled'),
+    ('couplings', 'analyser_id', 'missing'),
+    ('couplings', 'energy_profile_id', 'missing'),
+    ('crossfaders', 'high_energy_effect_id', 'missing'),
+])
+def test_stale_snapshot_identity_and_reference_conflicts_fail_closed(
+        tmp_path, collection, field, value):
+    data = historical()
+    data[collection][0][field] = value
+    if field == 'controller_id':
+        data['controllers'].append(dict(data['controllers'][0], id='another-controller'))
     path = tmp_path / 'config.json'
     original = json.dumps(data).encode()
     path.write_bytes(original)
-    with pytest.raises(ValueError, match='Conflicting historical/current profiles'):
+    with pytest.raises(ValueError):
         migrate_file(path)
     assert path.read_bytes() == original
     assert not list(tmp_path.glob('*.bak'))
+
+
+def test_missing_old_mac_can_be_generated_and_mac_case_is_not_identity_change():
+    data = historical()
+    for profile in data['profiles']:
+        profile['player_mac'] = ''
+    assert convert(data)['virtual_players'] == data['virtual_players']
+    data = historical()
+    data['virtual_players'][0]['player_mac'] = '02:AA:BB:CC:DD:01'
+    for profile in data['profiles']:
+        profile['player_mac'] = '02:aa:bb:cc:dd:01'
+    assert convert(data)['virtual_players'] == data['virtual_players']
+
+
+def test_profile_field_policy_is_exhaustive():
+    snapshot = historical()['profiles'][0]
+    mutable = {field for fields in MUTATIONS.values() for field in fields}
+    identities = {'id', 'player_mac', 'bridge_id', 'entertainment_area_id'}
+    assert set(snapshot) <= mutable | identities
+
+
+@pytest.mark.parametrize('collection,reference', [
+    ('virtual_players', 'player_id'), ('zones', 'zone_id'),
+])
+def test_reference_rewiring_with_same_physical_identity_is_preserved(collection, reference):
+    data = historical()
+    replacement = dict(data[collection][0], id='rewired-entity')
+    data[collection].append(replacement)
+    data['couplings'][0][reference] = replacement['id']
+    result = convert(data)
+    assert result[collection] == data[collection]
+    assert result['couplings'] == data['couplings']
+    validate_current(result, references=True)

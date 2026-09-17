@@ -93,7 +93,15 @@ def _migrate_flat_residue(data: dict) -> None:
         probe = empty_config()
         probe["controllers"] = [candidate]
         validate_current(probe)
-        _merge_entity(data, "controllers", candidate)
+        current = next((c for c in data["controllers"] if c["id"] == bridge["id"]), None)
+        if current is None:
+            _merge_entity(data, "controllers", candidate)
+        elif COLLECTIONS["controllers"].from_dict(current).type != "hue":
+            raise ValueError("Conflicting historical/current Controller identity type")
+        # Same-ID Bridge was copied to Controller by 15e4b66. a72893b's
+        # Controller PATCH/pairing writes only Controller: name, address and
+        # credentials can all have changed. Keep current values, never restore
+        # obsolete credentials. Exact original bytes remain in the safety backup.
 
     allowed = {"id", "name", "enabled"} | {
         key for _, defaults in _PROFILE_PARTS.values() for key in defaults}
@@ -130,17 +138,12 @@ def _migrate_flat_residue(data: dict) -> None:
 
         existing = next((c for c in data["couplings"] if c["id"] == profile["id"]), None)
         if existing is not None:
-            # An ID is only a migration marker, not proof of content equivalence.
-            # Compare every old setting with its current linked owner. Additional
-            # current-only fields (e.g. low-energy Effect) remain untouched.
-            # 15e4b66 retained the Profile after copying its ID to Coupling.
-            # At a72893b, PATCH /couplings/{id} changes name/enabled only on
-            # Coupling; _build_engine_profile reads that current metadata.
-            # These are editable labels/activation policy, not binding identity.
-            # Keep current name/enabled (including explicit False) unchanged.
-            # Still require equivalent linked settings below: metadata precedence
-            # must not silently resolve an incompatible player/zone/DSP binding.
-            for collection, (reference, defaults) in _PROFILE_PARTS.items():
+            # Profile.id == Coupling.id is the historical migration marker.
+            # At a72893b, runtime Profile is rebuilt from linked current entities;
+            # their PATCH endpoints never refresh persisted Profile snapshots.
+            # Resolve the entire current binding, but compare only identities
+            # actually captured in Profile, not mutable copied configuration.
+            for collection, (reference, _) in _PROFILE_PARTS.items():
                 owner = existing
                 if collection == "effects":
                     owner = next((e for e in data["energy_profiles"]
@@ -149,14 +152,24 @@ def _migrate_flat_residue(data: dict) -> None:
                 if row is None:
                     raise ValueError("Incomplete historical profiles entity mapping")
                 current = COLLECTIONS[collection].from_dict(row).to_dict()
-                expected = candidate[collection][0]
-                conflicts = [k for k in defaults if current[k] != expected[k]]
-                if collection == "virtual_players" and current["type"] != "LMS":
-                    conflicts.append("type")
-                if conflicts:
-                    raise ValueError(
-                        f"Conflicting historical/current profiles {collection} fields: "
-                        + ", ".join(conflicts))
+                # No Analyser/Effect/EnergyProfile IDs existed inside Profile.
+                # Current references may be rewired; validation checks existence.
+                identity_fields = {
+                    "virtual_players": ("player_mac",),
+                    "zones": ("controller_id", "entertainment_area_id"),
+                }.get(collection, ())
+                for field in identity_fields:
+                    previous = profile.get(field, "")
+                    present = current[field]
+                    if field == "player_mac":
+                        previous, present = previous.strip().lower(), present.strip().lower()
+                    # Empty historical MAC can precede runtime MAC generation;
+                    # an unknown old identity supplies no contradictory evidence.
+                    if previous and previous != present:
+                        raise ValueError(
+                            f"Conflicting historical/current profiles {collection} identity: "
+                            f"{field}")
+
         else:
             for collection in _PROFILE_PARTS:
                 _merge_entity(data, collection, candidate[collection][0])
