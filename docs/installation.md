@@ -13,8 +13,9 @@ sudo ./scripts/install-huesync.sh
 
 The initial clone requires Git and access to GitHub. The installer owns all further
 package/build knowledge. Use a dedicated HueSync container with outbound HTTPS and
-Debian apt repositories. Pairing a Hue Bridge and selecting a player/Zone/Coupling
-remain application configuration through `http://<host>:8420`, not manual JSON edits.
+Debian apt repositories. Pairing a Hue Bridge uses the API; player/Zone/Coupling configuration is available
+in the UI at `http://<host>:8420`. See [API operations](api.md#controller-setup);
+neither requires manual JSON edits.
 
 ## What it installs
 
@@ -29,7 +30,9 @@ remain application configuration through `http://<host>:8420`, not manual JSON e
 | Frontend | Private Node 22.22.0 archive, pinned SHA256; npm ci | Compiled assets in wheel; Node is not a runtime requirement |
 | Services | systemd, polkit | huesync user/audio group, repository unit, narrow receiver-restart authorization |
 
-Exact apt package arrays are in `scripts/install-huesync.sh`. Build headers remain
+The minimal CAVA build packages come from `scripts/native-build-packages.txt`,
+shared with CI and development/wheel builds. The additional deployment package
+arrays are in `scripts/install-huesync.sh`. Build headers remain
 installed for subsequent updates and `--check`; the installer does not purge packages
 that another application might need. No curl-to-shell bootstrap or global pip install
 is used. Python package versions follow pyproject constraints (not a fully locked

@@ -8,8 +8,9 @@ REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 PREFIX=/opt/huesync
 CONFIG=/etc/huesync/config.json
 # Build tools/headers; -dev packages pull the matching runtime shared libraries.
-BUILD_PACKAGES=(git ca-certificates build-essential pkg-config patch python3-dev python3-venv
-    curl xz-utils libfftw3-dev libasound2-dev libflac-dev libmad0-dev libmpg123-dev
+mapfile -t NATIVE_BUILD_PACKAGES < "$SCRIPT_DIR/native-build-packages.txt"
+BUILD_PACKAGES=(git ca-certificates "${NATIVE_BUILD_PACKAGES[@]}" pkg-config patch python3-dev python3-venv
+    curl xz-utils libasound2-dev libflac-dev libmad0-dev libmpg123-dev
     libvorbis-dev libfaad-dev libssl-dev autoconf automake libtool libpopt-dev
     libconfig-dev systemd-dev libsystemd-dev libavahi-client-dev libavahi-common-dev
     libsoxr-dev libsodium-dev libgcrypt20-dev libplist-dev libplist-utils uuid-dev

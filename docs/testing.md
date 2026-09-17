@@ -66,3 +66,17 @@ outputs explicitly recorded with their commands.
 **REQUIRES LXC VALIDATION:** native CAVA/FFTW stress, full target producer link, live
 SHM continuity, clean wheel installation, realtime backlog and visual A/B. No local
 stubbed test or historical benchmark substitutes for these checks.
+
+## Clean CI bootstrap
+
+Start with [development setup](development.md#environment), including the shared
+native system prerequisites and `pip install -e '.[dev]'`. CI runs Ruff and the
+complete pytest suite on Python 3.11/3.12/3.13, and also builds a native wheel.
+The frontend job uses Node 22.22.0, `npm ci`, `npm test`, and `npm run build`
+(TypeScript plus Vite), then checks tracked and untracked bundle differences.
+Run these same commands before pushing; a pre-existing environment can hide missing
+dependencies. Optional/native skips are reported as skips, not runtime proof.
+
+The package list in `scripts/native-build-packages.txt` is intentionally smaller
+than the target installer stack. `--check` remains a booted Debian 13/systemd
+installation check, not a generic CI bootstrap.

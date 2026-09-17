@@ -1,0 +1,2 @@
+build-essential
+libfftw3-dev

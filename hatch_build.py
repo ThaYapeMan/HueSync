@@ -9,8 +9,10 @@ cavacore: compiles src/huesync/cavacore/cavacore.c + _bridge.c into
 _libcavacore.so using gcc and libfftw3.  The standard HueSync installer
 (scripts/install-huesync.sh) installs the required system packages automatically before
 calling pip install:
-    build-essential   (gcc + C headers)
-    libfftw3-dev      (FFTW3 development headers + runtime shared library)
+    scripts/native-build-packages.txt
+This shared Debian/Ubuntu package list also drives CI and the development/wheel
+build instructions in docs/development.md. Python test dependencies are in the
+dev extra, not in the production installer or wheel runtime dependencies.
 libfftw3-dev pulls in the runtime FFTW3 shared library as a transitive
 dependency, so no additional runtime package needs to be listed separately.
 If those packages are absent a RuntimeError is raised immediately so that pip

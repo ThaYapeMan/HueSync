@@ -4,6 +4,15 @@ HueSync serves the web application/API on port 8420. The running application exp
 FastAPI's `/docs` and `/openapi.json`; use those generated schemas for complete bodies
 and routes. This document describes lifecycle semantics rather than duplicating schemas.
 
+## Controller setup
+
+Controller creation/pairing is currently API-only; the Zones page selects existing
+Controllers. Use `POST /api/controllers/pair` with the bridge host and name after
+pressing its link button, or `POST /api/controllers` with existing pairing data.
+See `/docs` for the exact current request fields. `GET /api/controllers` redacts
+credentials; `GET /api/controllers/{controller_id}/areas` lists Entertainment Areas
+for Zone selection. Pairing is still application configuration, not an installer step.
+
 ## Analysis configuration
 
 Analyser create/PATCH supports spectrum_backend and bars_source. Model/API validation

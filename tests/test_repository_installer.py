@@ -42,10 +42,11 @@ def test_shell_syntax():
 
 def test_dependency_and_phase_contract():
     text = SCRIPT.read_text()
+    packages = (ROOT / "scripts/native-build-packages.txt").read_text()
     for package in ('libasound2-dev', 'libfftw3-dev', 'libflac-dev', 'libmad0-dev',
                     'libmpg123-dev', 'libvorbis-dev', 'libfaad-dev', 'libcap2-bin',
                     'python3-venv', 'pkg-config', 'polkitd', 'avahi-daemon', 'cava'):
-        assert package in text
+        assert package in text + packages
     assert 'npm ci' in text
     assert 'sha256sum --check' in text
     assert 'git archive' not in text  # invocation includes explicit repo/safety options

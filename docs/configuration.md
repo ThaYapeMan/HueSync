@@ -190,3 +190,10 @@ Migration backups (`pre-v1...bak`) and restore-safety backups are raw rollback f
 Portable `huesync-config-backup` JSON is the user-created transfer/disaster-recovery
 format. They are not interchangeable, and the installer does not automatically export
 secret portable backups.
+
+## Effect selection and UI scope
+
+See the [effects catalog](effects.md) for every current `effect_type` and the settings
+each renderer actually uses. Controller creation/pairing and Spectrum backend
+selection currently use the API; the UI lists existing Controllers for Zones and
+edits bars-source/onset settings but does not expose `spectrum_backend`.

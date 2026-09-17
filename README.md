@@ -184,6 +184,42 @@ embedded-engine request either activates that engine or fails; it never silently
 selects V2 or FIFO. See [analyzers](docs/analyzers.md) and the
 [frozen architecture](docs/ANALYSIS_ARCHITECTURE.md).
 
+## Effects
+
+Choose an Effect for each EnergyProfile layer; the same catalog works downstream
+of LMS or AirPlay and either canonical Spectrum engine.
+
+| Family | Current `effect_type` choices |
+|---|---|
+| Spectrum and energy | `spectrum_rgb`, `spectrum_rgb_spatial`, `mono_pulse` |
+| Onset reactions | `pulses`, `flashes`, `splotches`, `fireworks` |
+| Moving or steady color | `swirl`, `wave`, `solid` |
+| Disabled layer | `none` |
+
+See the [complete effects reference](docs/effects.md) for visual behavior, parameters,
+feature inputs and current limitations. EnergyProfile blends high- and low-energy
+Effects; spatial patterns use the Zone's light positions.
+
+## Web UI
+
+Open **`http://<host>:8420`** after installation. The current UI provides:
+
+- **Now Playing:** live color/bar/onset preview, blend and connection status.
+- **Couplings:** configure entity bindings and activate/deactivate sessions.
+- **Virtual Players / Zones:** configure LMS and AirPlay players, and select existing
+  Controllers and Hue Entertainment Areas for Zones.
+- **Analysers / Effects / Energy Profiles:** edit analysis settings, visual algorithms
+  and high/low-energy blends.
+- **Latency:** manage listening-player timing settings.
+- **Backup and restore:** download or restore sensitive configuration with confirmation.
+
+Some settings are API-only: Controller creation/pairing and `spectrum_backend`
+selection are not exposed by the current pages. The Analyser page offers the bars
+source and onset controls, but no CAVA Core engine selector. Loudness/Chroma have no
+shipped configuration UI. Use [API operations](docs/api.md) and
+[configuration](docs/configuration.md) for these boundaries. There is no built-in
+authentication; restrict UI/API access to a trusted network.
+
 ## Quick start
 
 The repository installer is the authoritative standard deployment path.
@@ -200,8 +236,8 @@ AirPlay 2 receiver, builds the frontend/native wheel, migrates saved configurati
 verifies the installed artifacts, and starts the repository service. No manual
 package installation, producer patching or JSON migration is part of that workflow.
 
-Open `http://<host>:8420` and configure the controller, Zone, player, Analyser,
-Effects/EnergyProfile and Coupling. Host audio-device passthrough remains an LXC
+Create/pair a Controller through the API, then open `http://<host>:8420` to configure
+the Zone, player, Analyser, Effects/EnergyProfile and Coupling. Host audio-device passthrough remains an LXC
 prerequisite for paced LMS playback; a guest script cannot provision host devices.
 See [installation](docs/installation.md) and [LXC deployment](docs/deployment-lxc.md).
 For read-only diagnosis, run `sudo ./scripts/install-huesync.sh --check`.
@@ -225,7 +261,7 @@ for their stated commits only.
 - [Configuration](docs/configuration.md) · [API operations](docs/api.md)
 - [Installation](docs/installation.md) · [LXC deployment](docs/deployment-lxc.md)
 - [Development](docs/development.md) · [Testing and acceptance](docs/testing.md)
-- [Effects and output boundaries](docs/EFFECT_ENGINE.md)
+- [Effects catalog](docs/effects.md) · [Effects and output boundaries](docs/EFFECT_ENGINE.md)
 - [Squeezelite build and SHM ABI](squeezelite/README.md)
 
 Historical prompts/specifications are labelled as historical or stored under

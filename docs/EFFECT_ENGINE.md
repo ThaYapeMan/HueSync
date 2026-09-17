@@ -30,3 +30,6 @@ schema for available Effect/settings fields and [configuration.md](configuration
 for entity ownership.
 
 Visual quality, target render backlog and realtime behavior **REQUIRE LXC VALIDATION**.
+
+For every selectable algorithm, parameters and feature inputs, see the
+[current effects catalog](effects.md). This document defines the output boundary.
