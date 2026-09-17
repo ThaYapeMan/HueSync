@@ -253,3 +253,21 @@ systemctl() {{
     else:
         assert not any(c.startswith(('stop ', 'disable ')) for c in commands)
         assert not stopped.exists()
+
+
+def test_airplay_metadata_build_fifo_and_service_arguments(tmp_path):
+    text = (ROOT / 'scripts/setup-airplay.sh').read_text()
+    # Execute the production configure argument block using a local capture executable.
+    start = text.index('./configure \\\n')
+    configure = text[start:text.index('\n\nmake -j', start)]
+    (tmp_path / 'configure').write_text('#!/bin/sh\nprintf "%s\\n" "$@" > arguments\n')
+    (tmp_path / 'configure').chmod(0o755)
+    subprocess.run(['bash', '-c', configure], cwd=tmp_path, check=True)
+    assert '--with-metadata' in (tmp_path / 'arguments').read_text().splitlines()
+    # Execute the actual tmpfiles declaration with only its destination redirected.
+    declaration = text[text.index("printf 'd /run/huesync"):text.index('\nsystemd-tmpfiles')]
+    destination = tmp_path / 'tmpfiles.conf'
+    subprocess.run(['bash', '-c', declaration.replace('/etc/tmpfiles.d/huesync-run.conf',
+                                                     str(destination))], check=True)
+    assert 'p /run/huesync/airplay.metadata 0600 huesync huesync -' in destination.read_text()
+    assert '--metadata-enable --metadata-pipename=/run/huesync/airplay.metadata' in text

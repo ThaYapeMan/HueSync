@@ -34,6 +34,12 @@ from .pcm_source import (
 from .spectrum_engine import make_spectrum_engine as _make_spectrum_engine
 from .storage import Storage
 from .sync_engine import CanonicalAnalysisPipeline, SyncEngine
+from .track_position import (
+    AirPlayTrackPositionSource,
+    LmsTrackPositionSource,
+    TrackPosition,
+    TrackPositionSource,
+)
 from .types import Colour, LatencyProbe
 from .util import generate_locally_administered_mac
 
@@ -229,6 +235,7 @@ class ActiveSession:
         self.follower: LmsFollower | None = None
         self.follower_task: asyncio.Task | None = None
         self.unsync_task: asyncio.Task | None = None
+        self.track_source: TrackPositionSource | None = None
 
 
 class PlayerManager:
@@ -239,6 +246,13 @@ class PlayerManager:
         self._detected_sync_master: str | None = None
         self._detected_sync_master_name: str | None = None
         _RUN_DIR.mkdir(parents=True, exist_ok=True)
+
+    @property
+    def track_position(self) -> TrackPosition | None:
+        session = self._active
+        if session and not session.stopping and session.track_source:
+            return session.track_source.read()
+        return None
 
     @property
     def configuration_restore_ready(self) -> bool:
@@ -580,6 +594,15 @@ class PlayerManager:
         else:
             await self._activate_lms_cava(session, profile, mellow_profile, output_config, channels)
 
+        # Adapter selection is ingress/session responsibility. Downstream sees only
+        # TrackPositionSource. Resolve the follower's actual selected MAC dynamically.
+        session.track_source = LmsTrackPositionSource(
+            player.lms_host,
+            lambda: (session.follower.target_mac if session.follower else
+                     (None if player.follow_mode == "sync_group" else profile.player_mac)),
+        )
+        session.track_source.open()
+
         if player.follow_mode == "sync_group":
             async def target_changed(mac: str | None) -> None:
                 if session.stopping:
@@ -735,6 +758,8 @@ class PlayerManager:
         No squeezelite, no cava, no FIFO, no LMS follower.  Exactly one ingress
         reader owns the production AirPlay FIFO — AirPlayPipeStereoSource.
         """
+        session.track_source = AirPlayTrackPositionSource()
+        session.track_source.open()
         self._configure_shairport_name(profile.display_name or profile.player_name)
 
         pipe_source = AirPlayPipeStereoSource()
@@ -779,6 +804,9 @@ class PlayerManager:
 
     async def _teardown_session(self, session: ActiveSession) -> None:
         session.stopping = True
+        if session.track_source is not None:
+            await session.track_source.close()
+            session.track_source = None
         if session.unsync_task:
             session.unsync_task.cancel()
         if session.follower:
@@ -1243,6 +1271,12 @@ class PlayerManager:
             '  output_rate = 44100;\n'
             '  output_format = "S16_LE";\n'
             '  output_channels = 2;\n'
+            '}\n'
+            'metadata = {\n'
+            '  enabled = "yes";\n'
+            '  include_cover_art = "no";\n'
+            '  pipe_name = "/run/huesync/airplay.metadata";\n'
+            '  progress_interval = 10.0;\n'
             '}\n'
         )
         try:

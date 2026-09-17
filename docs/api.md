@@ -83,6 +83,7 @@ unbound references can also be empty strings.
 | `bridge_connected` | boolean | Whether the session has a Hue output driver; not an independent network-health probe |
 | `effect_type` | string or null | Selected runtime visual algorithm ID |
 | `follower_warning` | string or null | LMS follower warning, when present |
+| `track` | object or null | Generic title/artist/position anchor; see [track metadata](#track-metadata-in-websocket-status) |
 | `onset_method` | string or null | Active runtime onset method |
 | `lower_cutoff_freq` | integer or null | Active lower analysis cutoff in Hz |
 | `higher_cutoff_freq` | integer or null | Active upper analysis cutoff in Hz |
@@ -225,3 +226,21 @@ POST /api/couplings/{coupling_id}/activate
 GET /api/config/export
 POST /api/config/import
 ```
+
+### Track metadata in WebSocket status
+
+`status.track` is `null` when unavailable, or an object with:
+
+| Field | Meaning |
+|---|---|
+| `title` | String or `null` |
+| `artist` | String or `null` |
+| `position_s` | Nonnegative elapsed seconds at message delivery, or `null` |
+| `duration_s` | Positive total seconds, or `null` for unknown/live duration |
+| `playing` | Whether the client should interpolate elapsed time |
+
+There is no player-specific shape. As with other status fields, messages are
+sent on change, not every preview tick. Metadata anchors update on player events
+and periodic corrections; browsers interpolate between them. On disconnect,
+freeze the display. Pause stops interpolation; a seek replaces the anchor.
+See [metadata ownership and adapters](audio-pipeline.md#independent-track-metadata-channel).

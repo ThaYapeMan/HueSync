@@ -102,6 +102,11 @@ class LmsFollower:
         self._connected: bool = False
 
     @property
+    def target_mac(self) -> str | None:
+        """Current manual or sync-group target; None while auto mode is unsynced."""
+        return self._follow_mac or None
+
+    @property
     def connected(self) -> bool:
         """True while the listen-1 TCP connection is established."""
         return self._connected

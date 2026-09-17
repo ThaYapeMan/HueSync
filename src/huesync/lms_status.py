@@ -10,6 +10,7 @@ Standalone usage: python -m huesync.lms_status <host> <mac>
 from __future__ import annotations
 
 import logging
+import math
 import socket
 from dataclasses import dataclass, field
 from urllib.parse import unquote
@@ -24,6 +25,11 @@ log = logging.getLogger(__name__)
 class LmsPlayerStatus:
     """Parsed subset of the LMS CLI status response for one player."""
 
+    title: str | None = None
+    artist: str | None = None
+    duration: float | None = None
+    mode: str | None = None
+    waiting_to_play: bool = False
     time: float | None = None
     player_name: str | None = None      # display name of the queried player
     sync_master: str | None = None      # MAC of the sync-group master, None if standalone
@@ -59,7 +65,7 @@ def query_lms_status(host: str, mac: str, port: int = DEFAULT_PORT) -> LmsPlayer
             "LMS host is not configured in this profile. "
             "Open the profile editor and enter the LMS server IP or hostname."
         )
-    command = f"{mac} status - 1 tags:\n"
+    command = f"{mac} status - 1 tags:ad\n"
     log.debug("LMS query: %s:%d player=%s", host, port, mac)
     with socket.create_connection((host, port), timeout=_SOCKET_TIMEOUT_S) as sock:
         sock.sendall(command.encode("utf-8"))
@@ -111,23 +117,41 @@ def _parse_status(text: str) -> LmsPlayerStatus:
       4. Unquote key and value independently.
     """
     result = LmsPlayerStatus()
+    current_title = None
     for token in text.split():
         key_raw, sep, value_raw = token.replace("%3a", "%3A").partition("%3A")
+        if not sep:
+            key_raw, sep, value_raw = token.partition(":")
         if not sep:
             continue
         key = unquote(key_raw)
         value = unquote(value_raw)
         if key == "time":
             try:
-                result.time = float(value)
+                number = float(value)
+                result.time = number if math.isfinite(number) and number >= 0 else None
             except ValueError:
                 pass
+        elif key == "current_title":
+            current_title = value or None
+        elif key in ("title", "artist", "mode"):
+            setattr(result, key, value or None)
+        elif key == "duration":
+            try:
+                number = float(value)
+                result.duration = number if math.isfinite(number) and number > 0 else None
+            except ValueError:
+                pass
+        elif key == "waitingToPlay":
+            result.waiting_to_play = value == "1"
         elif key == "player_name":
             result.player_name = value or None
         elif key == "sync_master":
             result.sync_master = value or None
         elif key == "sync_slaves":
             result.sync_slaves = [s for s in value.split(",") if s]
+    if current_title:
+        result.title = current_title
     return result
 
 

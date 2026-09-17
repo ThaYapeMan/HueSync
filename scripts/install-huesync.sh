@@ -54,6 +54,9 @@ verify() {
        -x /usr/local/bin/shairport-sync && -x /usr/local/sbin/nqptp ]] || fail 'AirPlay binaries missing'
     /usr/local/bin/shairport-sync --version | grep -i 'AirPlay2' >/dev/null || fail 'AirPlay 2 not built'
     [[ -p /run/huesync/airplay.pcm ]] || fail 'AirPlay FIFO missing'
+    [[ -p /run/huesync/airplay.metadata ]] || fail 'AirPlay metadata FIFO missing'
+    /usr/local/bin/shairport-sync --version | grep -i metadata >/dev/null ||
+        fail 'AirPlay metadata support not built'
     [[ -f /etc/polkit-1/rules.d/49-huesync-airplay.rules ]] || fail 'AirPlay service permission missing'
     "$environment/bin/python" -I -B "$SCRIPT_DIR/verify-install.py" "$COMMIT" "$SHORT" "$CONFIG"
     "$environment/bin/python" -I -B -m pip check

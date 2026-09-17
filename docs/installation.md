@@ -148,3 +148,10 @@ competing ALSA consumer. HueSync's `/usr/local/bin/squeezelite` and
 stopping or disabling anything. Active conflicts fail the check; an inactive
 packaged unit is reported for visibility. Detached unmanaged Squeezelite
 processes also fail verification and are never killed speculatively.
+
+AirPlay builds include Shairport's metadata support. The installer provisions
+`/run/huesync/airplay.metadata` alongside the audio FIFO (both `0600`, owned by
+`huesync`). The service explicitly selects that metadata pipe even during an
+upgrade with an existing receiver configuration. Activation writes the managed
+metadata settings, including ten-second progress corrections. `--check` verifies
+the compiled metadata capability and the metadata FIFO without consuming it.

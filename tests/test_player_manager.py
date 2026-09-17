@@ -752,6 +752,9 @@ def test_configure_shairport_name_includes_explicit_format(tmp_path: Path) -> No
     assert "output_rate = 44100" in text
     assert 'output_format = "S16_LE"' in text
     assert "output_channels = 2" in text
+    assert 'pipe_name = "/run/huesync/airplay.metadata"' in text
+    assert 'enabled = "yes"' in text
+    assert "progress_interval = 10.0" in text
 
 
 # ---------------------------------------------------------------------------

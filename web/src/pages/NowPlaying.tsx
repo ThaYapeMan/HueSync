@@ -1,3 +1,4 @@
+import { TrackProgress } from '@/components/TrackProgress'
 import { useEffect, useRef, useState } from 'react'
 import { ColourSwatch } from '@/components/ColourSwatch'
 import { FloorplanPreview } from '@/components/FloorplanPreview'
@@ -252,9 +253,10 @@ type Props = Pick<PreviewState, 'colour' | 'channel_colours' | 'onset' | 'bars' 
   onset_mid?: boolean
   onset_treble?: boolean
   mix?: number
+  connected?: boolean
 }
 
-export function NowPlaying({ colour, channel_colours, onset, onset_bass = false, onset_mid = false, onset_treble = false, mix = 0, bars, status }: Props) {
+export function NowPlaying({ colour, channel_colours, onset, onset_bass = false, onset_mid = false, onset_treble = false, mix = 0, bars, status, connected = true }: Props) {
   const couplingId = status?.active_coupling_id ?? null
   const zoneId = status?.active_zone_id ?? null
 
@@ -403,6 +405,8 @@ export function NowPlaying({ colour, channel_colours, onset, onset_bass = false,
         status={status}
         onChanged={() => setReloadKey((k) => k + 1)}
       />
+
+      <TrackProgress track={status?.track ?? null} connected={connected} />
 
       <Card>
         <CardHeader className="pb-3">

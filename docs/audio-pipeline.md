@@ -103,3 +103,42 @@ Follower teardown is separately owned: stop the follower once, cancel and await 
 task (including connection cleanup), then clear its references. Analysis retirement
 retries do not repeat follower cleanup. Errors other than the expected task
 cancellation propagate; they are not converted into successful cleanup.
+
+## Independent track metadata channel
+
+Track metadata does not enter PCM, analysis processors, or `AudioFeatures`.
+`ActiveSession` owns a separate `TrackPositionSource` (`open`, asynchronous
+`close`, nonblocking `read`, and `running`). `PlayerManager` selects the adapter;
+WebSocket delivery and the track/progress UI consume the same immutable
+`TrackPosition` regardless of player type. Session teardown awaits the metadata
+reader before releasing it, including failed activation and retried teardown.
+
+- **LMS:** a dedicated read-only `status - 1 tags:ad subscribe:10` connection
+  receives changes and ten-second corrections. `a` requests artist, `d` duration,
+  and title is a standard field ([CLI tags](https://lyrion.org/reference/cli/database/#songinfo),
+  [subscriptions](https://lyrion.org/reference/cli/compoundqueries/#status)).
+  The target comes from the existing follower's `target_mac`: pinned manual
+  target or dynamically selected sync-group peer. With no manual follower,
+  it queries HueSync's own player. Unsynced auto mode returns no track. The
+  adapter checks the local target each second without querying LMS again and
+  discards old-target snapshots immediately. It sends no playback/group commands.
+- **AirPlay:** the pinned Shairport build enables metadata and writes a separate
+  `/run/huesync/airplay.metadata` FIFO, owned by `huesync` with mode `0600`.
+  `core/minm` and `core/asar` supply title and artist. `ssnc/prgr` gives
+  start/current/end RTP timestamps; differences use unsigned 32-bit wraparound
+  and 44,100 frames/second. Configured ten-second `phbt` updates correct position;
+  pause/resume/end events control interpolation. See the upstream
+  [metadata protocol](https://github.com/mikebrady/shairport-sync-metadata-reader).
+
+Snapshots retain a monotonic position anchor. WebSocket delivery rebases the
+position when sending a changed status, so browsers do not need a synchronized
+server clock. The UI interpolates locally only while playing and connected,
+clamps at known duration, and shows unknown values as `—`. This is track progress,
+not a measurement of lighting/audio latency. Metadata availability depends on
+what the sender provides; live streams may have no duration. Activating midway
+through an AirPlay track may require a subsequent sender metadata update.
+
+Local tests cover CLI subscriptions, dynamic targets, real FIFO reads, RTP wrap,
+pause/seek/end, bounded parsing, teardown, and generic UI rendering. Live LMS,
+iOS sender behavior, and the rebuilt target Shairport service still require LXC
+validation.

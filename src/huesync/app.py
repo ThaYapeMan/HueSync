@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import json
 import logging
 import os
@@ -110,8 +111,10 @@ async def ws_preview(websocket: WebSocket):
                     "bars": player_manager.last_bars,
                 })
 
+            track = player_manager.track_position
             status_dict = {
                 "type": "status",
+                "track": dataclasses.asdict(track) if track is not None else None,
                 "version": f"{__version__}+{__git_hash__}",
                 "active_coupling_id": player_manager.active_coupling_id,
                 "active_coupling_name": player_manager.active_coupling_name,
@@ -133,6 +136,9 @@ async def ws_preview(websocket: WebSocket):
             }
             status_json = json.dumps(status_dict, sort_keys=True)
             if status_json != last_status_json:
+                # Rebase only when delivering a changed status, including first connect.
+                # The comparison uses the stable source anchor, not a ticking clock.
+                status_dict["track"] = track.for_delivery() if track is not None else None
                 await websocket.send_json(status_dict)
                 last_status_json = status_json
 

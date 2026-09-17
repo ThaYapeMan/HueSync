@@ -60,6 +60,7 @@ def _make_mock_manager() -> MagicMock:
     type(manager).detected_sync_master_name = PropertyMock(return_value=None)
     type(manager).active_effect = PropertyMock(return_value=None)
     type(manager).follower_warning = PropertyMock(return_value=None)
+    type(manager).track_position = PropertyMock(return_value=None)
     type(manager).active_bass_hz = PropertyMock(return_value=None)
     type(manager).active_mid_hz = PropertyMock(return_value=None)
     type(manager).active_onset_method = PropertyMock(return_value=None)
@@ -1558,3 +1559,18 @@ def test_persisted_follow_mode_validation_and_missing_default():
     data["virtual_players"][0]["follow_mode"] = "invalid"
     with pytest.raises(ValueError, match="follow_mode"):
         validate_current(data)
+
+
+def test_ws_track_is_generic_and_rebased_for_new_client(client: TestClient):
+    import time
+
+    from huesync.track_position import TrackPosition
+
+    snapshot = TrackPosition('Title', 'Artist', 83, 225, True, time.monotonic() - 2)
+    type(client._manager).track_position = PropertyMock(return_value=snapshot)
+    track = _read_ws_status(client)['track']
+    assert track['title'] == 'Title' and track['artist'] == 'Artist'
+    assert 85 <= track['position_s'] < 90
+    assert track['duration_s'] == 225 and track['playing']
+    assert 'observed_at' not in track  # no dependency on the server's clock domain
+    assert set(track) == {'title', 'artist', 'position_s', 'duration_s', 'playing'}

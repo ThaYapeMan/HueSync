@@ -174,6 +174,7 @@ autoreconf -fi
     --with-ssl=openssl \
     --with-soxr \
     --with-pipe \
+    --with-metadata \
     --with-systemd-startup
 
 make -j"$(nproc)"
@@ -201,7 +202,7 @@ make SHELL=/bin/bash install
 # /run/huesync is solely for the AirPlay pipe.
 # ---------------------------------------------------------------------------
 echo "==> [4/6] Configuring runtime directory and AirPlay FIFO..."
-printf 'd /run/huesync             0755 huesync huesync -\np /run/huesync/airplay.pcm 0600 huesync huesync -\n' \
+printf 'd /run/huesync             0755 huesync huesync -\np /run/huesync/airplay.pcm 0600 huesync huesync -\np /run/huesync/airplay.metadata 0600 huesync huesync -\n' \
     > /etc/tmpfiles.d/huesync-run.conf
 systemd-tmpfiles --create /etc/tmpfiles.d/huesync-run.conf
 
@@ -224,6 +225,12 @@ pipe = {
   output_format = "S16_LE";
   output_channels = 2;
 }
+metadata = {
+  enabled = "yes";
+  include_cover_art = "no";
+  pipe_name = "/run/huesync/airplay.metadata";
+  progress_interval = 10.0;
+}
 EOF
 fi
 # Allow the huesync service to overwrite the name field at activation time.
@@ -243,12 +250,13 @@ cat > /etc/systemd/system/shairport-sync.service.d/run-as-huesync.conf << 'EOF'
 User=huesync
 Group=huesync
 ExecStart=
-ExecStart=/usr/local/bin/shairport-sync --configfile=/usr/local/etc/shairport-sync.conf
+ExecStart=/usr/local/bin/shairport-sync --configfile=/usr/local/etc/shairport-sync.conf --metadata-enable --metadata-pipename=/run/huesync/airplay.metadata
 EOF
 
 # Standard installer starts services only after artifact/schema verification.
 /usr/local/bin/shairport-sync --version
-[[ -p /run/huesync/airplay.pcm ]]
+[[ -p /run/huesync/airplay.pcm && -p /run/huesync/airplay.metadata ]]
+/usr/local/bin/shairport-sync --version | grep -i metadata >/dev/null
 if [[ "$DEFER_START" != 1 ]]; then
     systemctl daemon-reload
     systemctl enable --now avahi-daemon nqptp shairport-sync

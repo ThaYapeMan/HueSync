@@ -1,6 +1,15 @@
 import { useEffect, useRef, useState } from 'react'
 
+export interface TrackPosition {
+  title: string | null
+  artist: string | null
+  position_s: number | null
+  duration_s: number | null
+  playing: boolean
+}
+
 export interface SocketStatus {
+  track?: TrackPosition | null
   version: string | null
   active_coupling_id: string | null
   active_coupling_name: string | null
