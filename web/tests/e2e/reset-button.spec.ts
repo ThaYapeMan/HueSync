@@ -2,8 +2,8 @@
  * E2e tests for the Reset / Restore defaults buttons on Now Playing.
  *
  * Covers:
- *  1. "Reset to saved" restores the applied profile value (not factory default).
- *  2. "Restore defaults" restores factory defaults (not the applied profile value).
+ *  1. "Reset to saved" restores the applied coupling value (not factory default).
+ *  2. "Restore defaults" restores factory defaults (not the applied coupling value).
  *  3. Both buttons are disabled when the pending value matches their target.
  *  4. After Apply, applied == pending → "Reset to saved" becomes disabled.
  *
@@ -18,7 +18,7 @@ const DEFAULT_HIGH = 12000
 const DEFAULT_BASS = 250
 const DEFAULT_MID  = 2000
 
-// Applied (saved profile) values sent by WebSocket — all non-default.
+// Applied (saved coupling configuration) values sent by WebSocket — all non-default.
 const APPLIED_LOW  = 80    // ≠ DEFAULT_LOW
 const APPLIED_HIGH = 10000 // ≠ DEFAULT_HIGH
 const APPLIED_BASS = 320   // ≠ DEFAULT_BASS
@@ -33,22 +33,21 @@ const PENDING_MID  = 5000
 const STATUS_BASE = {
   type: 'status',
   version: '0.0.0+test',
-  active_profile_id: 'test-profile-1',
-  active_profile_name: 'Test Profile',
+  active_coupling_id: 'test-coupling-1',
+  active_coupling_name: 'Test Coupling',
   sync_master: null,
   sync_master_name: null,
   applied_delay_ms: 0,
   latency_warning: null,
   processes: { squeezelite: true, cava: true },
   bridge_connected: false,
-  color_mode: 'spectrum_rgb',
+  effect_type: 'spectrum_rgb',
 }
 
 // ── helpers ─────────────────────────────────────────────────────────────────
 
 async function mockApiRoutes(page: Page) {
-  await page.route('/api/profiles', (r) => r.fulfill({ json: [] }))
-  await page.route('/api/bridges', (r) => r.fulfill({ json: [] }))
+  await page.route('/api/couplings', (r) => r.fulfill({ json: [] }))
   await page.route('/api/player-latencies', (r) => r.fulfill({ json: [] }))
 }
 
@@ -100,7 +99,7 @@ async function typeAndCommit(page: Page, testId: string, value: number) {
 
 // ── Suite 1: "Reset to saved" ────────────────────────────────────────────────
 
-test.describe('NowPlaying — "Reset to saved" restores applied profile value', () => {
+test.describe('NowPlaying — "Reset to saved" restores applied coupling value', () => {
   test.beforeEach(async ({ page }) => {
     await mockApiRoutes(page)
     await setupStaticWebSocket(page)
@@ -170,7 +169,7 @@ test.describe('NowPlaying — "Restore defaults" restores factory defaults', () 
     await page.goto('/')
   })
 
-  test('Low cut: Restore defaults → DEFAULT value, not applied profile value', async ({ page }) => {
+  test('Low cut: Restore defaults → DEFAULT value, not applied coupling value', async ({ page }) => {
     await waitForValue(page, 'low-cut-hz', APPLIED_LOW)
     // Button enabled because APPLIED_LOW ≠ DEFAULT_LOW.
     await expect(page.locator('[data-testid="restore-defaults-cutoffs"]')).toBeEnabled()
@@ -180,7 +179,7 @@ test.describe('NowPlaying — "Restore defaults" restores factory defaults', () 
     await expect(page.locator('[data-testid="low-cut-hz"]')).not.toHaveValue(String(APPLIED_LOW))
   })
 
-  test('High cut: Restore defaults → DEFAULT value, not applied profile value', async ({ page }) => {
+  test('High cut: Restore defaults → DEFAULT value, not applied coupling value', async ({ page }) => {
     await waitForValue(page, 'high-cut-hz', APPLIED_HIGH)
 
     await page.locator('[data-testid="restore-defaults-cutoffs"]').click()
@@ -188,7 +187,7 @@ test.describe('NowPlaying — "Restore defaults" restores factory defaults', () 
     await expect(page.locator('[data-testid="high-cut-hz"]')).not.toHaveValue(String(APPLIED_HIGH))
   })
 
-  test('Bass/mid: Restore defaults → DEFAULT value, not applied profile value', async ({ page }) => {
+  test('Bass/mid: Restore defaults → DEFAULT value, not applied coupling value', async ({ page }) => {
     await waitForValue(page, 'bass-hz', APPLIED_BASS)
 
     await page.locator('[data-testid="restore-defaults-bands"]').click()
@@ -196,7 +195,7 @@ test.describe('NowPlaying — "Restore defaults" restores factory defaults', () 
     await expect(page.locator('[data-testid="bass-hz"]')).not.toHaveValue(String(APPLIED_BASS))
   })
 
-  test('Mid/treble: Restore defaults → DEFAULT value, not applied profile value', async ({ page }) => {
+  test('Mid/treble: Restore defaults → DEFAULT value, not applied coupling value', async ({ page }) => {
     await waitForValue(page, 'mid-hz', APPLIED_MID)
 
     await page.locator('[data-testid="restore-defaults-bands"]').click()
@@ -230,7 +229,7 @@ test.describe('NowPlaying — Apply makes "Reset to saved" disabled', () => {
       mid_hz: APPLIED_MID,
     }
 
-    await page.route('**/api/profiles/*/restart-cava', async (route) => {
+    await page.route('**/api/couplings/*/restart-cava', async (route) => {
       const body = route.request().postDataJSON() as Record<string, number | undefined>
       if (body.lower_cutoff_freq  != null) applied.lower_cutoff_freq  = body.lower_cutoff_freq
       if (body.higher_cutoff_freq != null) applied.higher_cutoff_freq = body.higher_cutoff_freq
