@@ -187,3 +187,69 @@ def test_node_bootstrap_pin_matches_ci_and_locked_jsdom_engine():
     assert version >= (22, *map(int, minimum.groups()))
     for doc in ('development.md', 'testing.md', 'installation.md'):
         assert f'Node {pin}' in (ROOT / 'docs' / doc).read_text()
+
+
+@pytest.mark.parametrize('definition,conflict', [
+    ('{ path=/usr/bin/squeezelite ; argv[]=/usr/bin/squeezelite -o default ; }', True),
+    ('DAEMON=/usr/bin/squeezelite\nNAME=receiver', True),
+    ('DAEMON="/usr/bin/squeezelite"', True),
+    ('{ path=/usr/local/bin/squeezelite ; }', False),
+    ('{ path=/usr/local/bin/huesync-squeezelite-fifo ; }', False),
+    ('/opt/huesync/.venv/bin/huesync', False),
+])
+def test_conflicting_squeezelite_definition(definition, conflict):
+    body = SCRIPT.read_text().split('squeezelite_conflict_definition() {', 1)[1].split('\n}', 1)[0]
+    result = subprocess.run(['bash', '-c', 'squeezelite_conflict_definition() {' + body +
+                             '\n}\nsqueezelite_conflict_definition "$1"', '-', definition])
+    assert (result.returncode == 0) == conflict
+
+
+@pytest.mark.parametrize('mode,stuck', [('install', False), ('install', True), ('check', False)])
+def test_conflicting_squeezelite_service_lifecycle(tmp_path, mode, stuck):
+    text = SCRIPT.read_text()
+    start = text.index('squeezelite_conflict_definition() {')
+    functions = text[start:text.index('verify_services() {')]
+    init = tmp_path / 'init.d'
+    init.mkdir()
+    (init / 'room-receiver').write_text('DAEMON=/usr/bin/squeezelite\n')
+    functions = functions.replace('/etc/init.d', str(init)).replace(
+        '/proc/[0-9]*/exe', str(tmp_path / 'proc/[0-9]*/exe'))
+    calls = tmp_path / 'calls'
+    stopped = tmp_path / 'stopped'
+    shell = f'''set -Eeuo pipefail
+log() {{ echo "$*"; }}
+fail() {{ echo "$*"; exit 1; }}
+systemctl() {{
+ echo "$*" >> '{calls}'
+ case "$1" in
+ list-unit-files) printf 'squeezelite.service enabled\nhuesync-fifo.service enabled\n' ;;
+ list-units) echo 'room-receiver.service loaded active running receiver' ;;
+ show)
+  case "$3" in
+   --property=ExecStart)
+    case "$2" in
+     squeezelite.service) echo '/usr/local/bin/squeezelite' ;;
+     huesync-fifo.service) echo '/usr/local/bin/huesync-squeezelite-fifo' ;;
+     *) echo '{init}/room-receiver start' ;;
+    esac ;;
+   --property=SourcePath) [[ "$2" != room-receiver.service ]] || echo '{init}/room-receiver' ;;
+   --property=ActiveState) if [[ -f '{stopped}' ]]; then echo inactive; else echo active; fi ;;
+  esac ;;
+ stop) {'true' if stuck else f"touch '{stopped}'"} ;;
+ esac
+ return 0
+}}
+''' + functions + f'\nsqueezelite_conflicts {mode}\n'
+    result = subprocess.run(['bash', '-c', shell], capture_output=True, text=True)
+    assert 'room-receiver.service (active)' in result.stdout
+    commands = calls.read_text().splitlines()
+    assert 'stop squeezelite.service' not in commands
+    assert 'stop huesync-fifo.service' not in commands
+    if mode == 'install':
+        assert commands.index('disable room-receiver.service') < commands.index(
+            'stop room-receiver.service')
+        assert (result.returncode != 0) == stuck
+        assert ('did not stop' if stuck else 'disabled and stopped') in result.stdout
+    else:
+        assert not any(c.startswith(('stop ', 'disable ')) for c in commands)
+        assert not stopped.exists()

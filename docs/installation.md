@@ -134,3 +134,17 @@ Use the UI's **Backup and restore** section or the installed
 controller credentials; choose a private destination. The installer does not export
 secrets automatically. Its migration backup remains a separate exact-byte schema
 rollback file. See [backup and restore](configuration.md#backup-and-restore).
+
+### Conflicting packaged Squeezelite
+
+Before replacing audio binaries, the installer inspects native systemd and
+SysV-generated services for non-HueSync Squeezelite executables. It logs each
+conflicting unit, disables it, explicitly stops it, and checks for remaining
+processes. An ineffective stop aborts installation rather than starting a
+competing ALSA consumer. HueSync's `/usr/local/bin/squeezelite` and
+`/usr/local/bin/huesync-squeezelite-fifo` are excluded.
+
+`--check` reports discovered units and their active/inactive state without
+stopping or disabling anything. Active conflicts fail the check; an inactive
+packaged unit is reported for visibility. Detached unmanaged Squeezelite
+processes also fail verification and are never killed speculatively.
