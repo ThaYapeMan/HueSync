@@ -440,9 +440,9 @@ async def _apply_coupling_action(
       * cava sessions:          spectrum / band changes are handled by
                                 ``restart_cava`` (external CAVA / FIFO path).
 
-    Cross-mode ``analyser_id`` swap (canonical ↔ FIFO):
-      A change of ``analyser_id`` where the new Analyser has a different
-      ``bars_source`` than the currently active session cannot be hot-swapped
+    Cross-mode analyser change (canonical ↔ FIFO):
+      A swapped or edited Analyser with a different ``bars_source`` than
+      the currently active session cannot be hot-swapped
       — SyncEngine initialisation differs between the two paths.  Such a
       change triggers a full deactivate + reactivate cycle.
     """
@@ -455,18 +455,16 @@ async def _apply_coupling_action(
         await manager.deactivate()
         return
 
-    # Cross-mode analyser swap: the currently active session runs on
-    # bars_source X, and the new analyser has bars_source Y ≠ X.  Neither
+    # Cross-mode analyser edit or swap: the currently active session runs on
+    # bars_source X, and the updated analyser has bars_source Y ≠ X.  Neither
     # replace_pcm_analyser (needs an existing pcm_pipeline session) nor
     # restart_cava (needs a running cava/FIFO) can bridge that boundary.
     # A full deactivate + reactivate is required.
-    if "analyser_id" in changed:
-        old_bars_source = manager.active_bars_source
-        new_bars_source = profile.bars_source
-        if old_bars_source is not None and old_bars_source != new_bars_source:
-            await manager.deactivate()
-            await manager.activate_coupling(coupling)
-            return
+    old_bars_source = manager.active_bars_source
+    if old_bars_source is not None and old_bars_source != profile.bars_source:
+        await manager.deactivate()
+        await manager.activate_coupling(coupling)
+        return
 
     # A new SpectrumEngine (spectrum_backend swap) or any change to the bar
     # geometry (bars / cutoffs) or the Analyser identity (analyser_id) needs
@@ -970,19 +968,14 @@ async def patch_analyser(ac_id: str, request: Request, body: AnalyserPatchBody):
     if active_fields and active_id:
         coupling = storage.get_coupling(active_id)
         if coupling and coupling.analyser_id == ac_id:
-            if "bars_source" in active_fields:
-                await manager.deactivate()
-            else:
-                try:
-                    await _apply_coupling_action(coupling, storage, manager, active_fields)
-                except (RuntimeError, OSError) as exc:
-                    # Runtime activation failed; roll back persisted config so
-                    # the saved state matches what is actually running.
-                    storage.save_analyser(old_ac)
-                    raise HTTPException(
-                        status_code=409,
-                        detail=f"Engine activation failed (config rolled back): {exc}",
-                    ) from exc
+            try:
+                await _apply_coupling_action(coupling, storage, manager, active_fields)
+            except (RuntimeError, OSError) as exc:
+                storage.save_analyser(old_ac)
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Engine activation failed (config rolled back): {exc}",
+                ) from exc
     return ac.to_dict()
 
 

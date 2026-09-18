@@ -242,6 +242,9 @@ class PlayerManager:
     def __init__(self, storage: Storage):
         self.storage = storage
         self._active: ActiveSession | None = None
+        # Shairport's FIFO is an event stream, not a replayable snapshot. Keep
+        # one reader across Stop/Go so events during inactive sessions aren't lost.
+        self._airplay_tracks: AirPlayTrackPositionSource | None = None
         self.latency_warning: str | None = None
         self._detected_sync_master: str | None = None
         self._detected_sync_master_name: str | None = None
@@ -618,8 +621,11 @@ class PlayerManager:
                 self._detected_sync_master_name = None
                 if mac:
                     try:
+                        observed_at = time.monotonic()
                         status = await asyncio.to_thread(query_lms_status, player.lms_host, mac)
                         self._detected_sync_master_name = status.player_name
+                        if isinstance(session.track_source, LmsTrackPositionSource):
+                            session.track_source.seed(mac, status, observed_at)
                     except OSError:
                         pass  # MAC remains a usable display identity.
 
@@ -764,9 +770,12 @@ class PlayerManager:
         No squeezelite, no cava, no FIFO, no LMS follower.  Exactly one ingress
         reader owns the production AirPlay FIFO — AirPlayPipeStereoSource.
         """
-        session.track_source = AirPlayTrackPositionSource()
+        if self._airplay_tracks is None:
+            self._airplay_tracks = AirPlayTrackPositionSource()
+        session.track_source = self._airplay_tracks
         session.track_source.open()
-        self._configure_shairport_name(profile.display_name or profile.player_name)
+        if self._configure_shairport_name(profile.display_name or profile.player_name):
+            self._airplay_tracks.invalidate()
 
         pipe_source = AirPlayPipeStereoSource()
         pipe_source.open()
@@ -793,6 +802,15 @@ class PlayerManager:
             profile.spectrum_backend,
         )
 
+    async def close(self) -> None:
+        """Application shutdown, including the persistent receiver metadata reader."""
+        try:
+            await self.deactivate()
+        finally:
+            if self._airplay_tracks is not None:
+                await self._airplay_tracks.close()
+                self._airplay_tracks = None
+
     async def deactivate(self) -> None:
         if not self._active:
             return
@@ -811,7 +829,8 @@ class PlayerManager:
     async def _teardown_session(self, session: ActiveSession) -> None:
         session.stopping = True
         if session.track_source is not None:
-            await session.track_source.close()
+            if session.track_source is not self._airplay_tracks:
+                await session.track_source.close()
             session.track_source = None
         if session.unsync_task:
             session.unsync_task.cancel()
@@ -1155,14 +1174,24 @@ class PlayerManager:
             )
             self._detected_sync_master = None
             await self._apply_probe_for_master(session, None)
+            if isinstance(session.track_source, LmsTrackPositionSource):
+                try:
+                    observed_at = time.monotonic()
+                    status = await asyncio.to_thread(query_lms_status, lms_host, profile.player_mac)
+                    session.track_source.seed(profile.player_mac, status, observed_at)
+                except (OSError, ValueError):
+                    pass  # subscription reconnects independently of initial availability
             return
 
         self._detected_sync_master = follow_mac
         try:
+            observed_at = time.monotonic()
             master_status = await asyncio.to_thread(
                 query_lms_status, lms_host, follow_mac
             )
             self._detected_sync_master_name = master_status.player_name
+            if isinstance(session.track_source, LmsTrackPositionSource):
+                session.track_source.seed(follow_mac, master_status, observed_at)
         except Exception as exc:
             log.debug("Could not fetch name for follow player %s: %s", follow_mac, exc)
             self._detected_sync_master_name = None
@@ -1248,8 +1277,10 @@ class PlayerManager:
     DEFAULT_ALSA_DEVICE = "hw:CARD=Dummy,DEV=0"
     _SHAIRPORT_CONF = Path("/usr/local/etc/shairport-sync.conf")
 
-    def _configure_shairport_name(self, name: str) -> None:
+    def _configure_shairport_name(self, name: str) -> bool:
         """Ensure shairport-sync is configured with the given advertised name.
+
+        Return True if a receiver restart was attempted, invalidating metadata.
 
         Computes the desired managed config deterministically and compares it to
         the existing file.  If identical, returns immediately — no write, no
@@ -1293,12 +1324,12 @@ class PlayerManager:
             existing = None
         if existing == conf:
             log.debug("shairport-sync config unchanged for name %r — skipping restart", name)
-            return
+            return False
         try:
             self._SHAIRPORT_CONF.write_text(conf)
         except OSError as exc:
             log.warning("Could not write shairport-sync config: %s", exc)
-            return
+            return False
         try:
             subprocess.run(
                 ["systemctl", "restart", "shairport-sync"],
@@ -1307,6 +1338,7 @@ class PlayerManager:
             log.info("shairport-sync restarted with name %r", name)
         except Exception as exc:  # noqa: BLE001
             log.warning("Could not restart shairport-sync: %s", exc)
+        return True
 
     def _start_squeezelite(self, session: ActiveSession, profile: Profile) -> None:
         # External CAVA consumes upstream SHM ABI v0; canonical analysis requires

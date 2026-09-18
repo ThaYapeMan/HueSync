@@ -76,6 +76,7 @@ def _make_mock_manager() -> MagicMock:
     # Async methods
     manager.activate_coupling = AsyncMock()
     manager.deactivate = AsyncMock()
+    manager.close = AsyncMock()
     manager.restart_cava = AsyncMock()
     manager.refresh_probe = AsyncMock()
     # Sync live-update methods
@@ -967,20 +968,38 @@ def test_restart_cava_effect_rollback_on_pcm_runtime_failure(client: TestClient)
     assert effect_after.mid_hz == original_mid
 
 
-def test_bars_source_change_deactivates_session(client: TestClient):
-    """Changing bars_source on an Analyser used by the active Coupling must
-    trigger a full deactivate (SyncEngine initialisation differs between the
-    cava/FIFO path and PcmAudioPipeline — no live-switch possible).
-    """
+@pytest.mark.parametrize("old_mode,new_mode", [
+    ("cava", "pcm_pipeline"), ("pcm_pipeline", "cava"),
+])
+def test_active_analyser_bars_source_change_reactivates(client: TestClient, old_mode, new_mode):
+    """In-place mode edits must perform the same full restart as analyser swaps."""
     coupling = _make_full_coupling(client._storage)
     ac_id = client._storage.get_coupling(coupling.id).analyser_id
+    analyser = client._storage.get_analyser(ac_id)
+    analyser.bars_source = old_mode
+    client._storage.save_analyser(analyser)
     client._storage.set_active_coupling_id(coupling.id)
+    state = {"mode": old_mode, "active": coupling.id}
+    type(client._manager).active_bars_source = PropertyMock(side_effect=lambda: state["mode"])
 
-    resp = client.patch(f"/api/analysers/{ac_id}", json={"bars_source": "pcm_pipeline"})
+    async def deactivate():
+        state.update(mode=None, active=None)
+
+    async def activate(selected):
+        assert state["active"] is None
+        state.update(mode=client._storage.get_analyser(selected.analyser_id).bars_source,
+                     active=selected.id)
+
+    client._manager.deactivate.side_effect = deactivate
+    client._manager.activate_coupling.side_effect = activate
+
+    resp = client.patch(f"/api/analysers/{ac_id}", json={"bars_source": new_mode})
     assert resp.status_code == 200
 
     # Must have been deactivated.
     client._manager.deactivate.assert_awaited_once()
+    client._manager.activate_coupling.assert_awaited_once_with(coupling)
+    assert state == {"mode": new_mode, "active": coupling.id}
 
     # Live-update paths must NOT have been called.
     client._manager.restart_cava.assert_not_awaited()

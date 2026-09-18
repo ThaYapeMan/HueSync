@@ -201,3 +201,151 @@ def test_manager_selects_metadata_target_for_each_lms_mode(tmp_path):
                     assert source._target() == 'aa:bb:cc:00:00:02'
                 await manager._teardown_session(session)
     asyncio.run(run())
+
+
+def test_lms_activation_seeds_current_track_without_newsong(tmp_path):
+    from huesync.lms_status import LmsPlayerStatus
+    from huesync.models import Coupling, VirtualPlayer
+
+    async def run():
+        storage = Storage(tmp_path / 'config.json')
+        player = VirtualPlayer(lms_host='host', follow_player_mac='aa:bb:cc:00:00:01')
+        storage.save_virtual_player(player)
+        manager = PlayerManager(storage)
+        session = ActiveSession(Profile(lms_host='host', player_mac=player.player_mac),
+                                coupling=Coupling(player_id=player.id))
+        current = LmsPlayerStatus(title='Already playing', artist='Artist', time=83,
+                                  duration=225, mode='play', player_name='Room')
+
+        async def activate_audio(*args):
+            session.poller_task = asyncio.create_task(manager._poll_sync_master(session))
+
+        with patch.object(manager, '_start_squeezelite'), \
+             patch.object(manager, '_activate_lms_cava', side_effect=activate_audio), \
+             patch.object(manager, '_apply_probe_for_master', new_callable=AsyncMock), \
+             patch.object(LmsTrackPositionSource, 'open'), \
+             patch('huesync.player_manager.query_lms_status', return_value=current) as query:
+            await manager._activate_lms(session, session.profile, player, None, None, [])
+            manager._active = session
+            await session.poller_task
+            query.assert_called_once_with('host', player.follow_player_mac)
+            snapshot = manager.track_position
+            assert snapshot.title == 'Already playing'
+            assert snapshot.artist == 'Artist'
+            assert snapshot.position_s == 83 and snapshot.duration_s == 225
+            assert snapshot.playing
+            await manager.close()
+    asyncio.run(run())
+
+
+def test_airplay_stop_go_keeps_current_metadata_and_shutdown_closes_reader(tmp_path):
+    from unittest.mock import MagicMock
+
+    async def run():
+        path = tmp_path / 'metadata'
+        os.mkfifo(path, 0o600)
+        source = AirPlayTrackPositionSource(str(path))
+        manager = PlayerManager(Storage(tmp_path / 'config.json'))
+        driver = MagicMock()
+        driver.start = AsyncMock()
+        driver.stop = AsyncMock()
+        driver.aclose = AsyncMock()
+        engine = MagicMock()
+        engine.run = AsyncMock()
+        with patch('huesync.player_manager.AirPlayTrackPositionSource', return_value=source), \
+             patch('huesync.player_manager.AirPlayPipeStereoSource'), \
+             patch('huesync.player_manager._make_canonical_pipeline'), \
+             patch('huesync.player_manager.SyncEngine', return_value=engine), \
+             patch('huesync.player_manager.HueDriver', return_value=driver), \
+             patch.object(manager, '_configure_shairport_name', return_value=False):
+            session = ActiveSession(Profile())
+            await manager._activate_airplay(session, session.profile, None, None, [])
+            manager._active = session
+            await asyncio.sleep(0.01)
+            writer = os.open(path, os.O_WRONLY | os.O_NONBLOCK)
+            try:
+                os.write(writer, item('minm', 'Current song', 'core') +
+                         item('asar', 'Artist', 'core') + item('pbeg') +
+                         item('prgr', '0/44100/441000'))
+                await until(lambda: source.read() and source.read().duration_s == 10)
+                await manager.deactivate()
+                assert source.running and manager.track_position is None
+                # Keep consuming events while stopped, without requiring a new title.
+                os.write(writer, item('phbt', '88200/999'))
+                await until(lambda: source.read().position_s == 2)
+                next_session = ActiveSession(Profile())
+                await manager._activate_airplay(next_session, next_session.profile, None, None, [])
+                manager._active = next_session
+                assert next_session.track_source is source
+                assert manager.track_position.title == 'Current song'
+                assert manager.track_position.artist == 'Artist'
+                assert manager.track_position.position_s == 2
+                os.write(writer, item('pend'))
+                await until(lambda: source.read() is None)
+                await manager.close()
+                assert not source.running
+                await manager.close()
+            finally:
+                await source.close()
+                os.close(writer)
+    asyncio.run(run())
+
+
+def test_sync_group_target_query_seeds_track_on_activation(tmp_path):
+    from huesync.lms_status import LmsPlayerStatus
+    from huesync.models import VirtualPlayer
+
+    async def run():
+        manager = PlayerManager(Storage(tmp_path / 'config.json'))
+        player = VirtualPlayer(lms_host='host', follow_mode='sync_group')
+        session = ActiveSession(Profile(player_mac=player.player_mac))
+        current = LmsPlayerStatus(title='Playing in group', artist='Artist', time=12,
+                                  duration=90, mode='play')
+        with patch.object(manager, '_start_squeezelite'), \
+             patch.object(manager, '_activate_lms_cava', new_callable=AsyncMock), \
+             patch.object(manager, '_apply_probe_for_master', new_callable=AsyncMock), \
+             patch.object(LmsTrackPositionSource, 'open'), \
+             patch.object(LmsSyncGroupObserver, 'start',
+                          side_effect=lambda: asyncio.create_task(asyncio.sleep(100))), \
+             patch('huesync.player_manager.query_lms_status', return_value=current) as query:
+            await manager._activate_lms(session, session.profile, player, None, None, [])
+            manager._active = session
+            await session.follower._set_target('aa:bb:cc:00:00:01')
+            query.assert_called_once_with('host', 'aa:bb:cc:00:00:01')
+            assert manager.track_position.title == 'Playing in group'
+            assert manager.track_position.position_s == 12
+            await session.follower._set_target(None)
+            assert manager.track_position is None
+            await manager.close()
+    asyncio.run(run())
+
+
+def test_initial_lms_snapshot_survives_subscription_start():
+    from huesync.lms_status import LmsPlayerStatus
+
+    async def run():
+        reader = asyncio.StreamReader()
+        from unittest.mock import MagicMock
+        writer = MagicMock()
+        writer.drain = AsyncMock()
+        writer.wait_closed = AsyncMock()
+        source = LmsTrackPositionSource('host', lambda: 'room')
+        source.seed('room', LmsPlayerStatus(title='Current', mode='pause', time=3), 1.0)
+        with patch('asyncio.open_connection', new_callable=AsyncMock,
+                   return_value=(reader, writer)):
+            source.open()
+            await until(lambda: writer.write.called)
+            assert source.read().title == 'Current'
+            assert source.read().position_s == 3
+            await source.close()
+    asyncio.run(run())
+
+
+def test_airplay_receiver_invalidation_discards_previous_track():
+    source = AirPlayTrackPositionSource()
+    source.feed(item('minm', 'Old receiver', 'core') + item('pbeg'))
+    assert source.read().title == 'Old receiver'
+    source.invalidate()
+    assert source.read() is None
+    source.feed(item('phbt', '44100/999'))
+    assert source.read() is None

@@ -60,7 +60,7 @@ async def on_startup() -> None:
 
 @app.on_event("shutdown")
 async def on_shutdown() -> None:
-    await app.state.player_manager.deactivate()
+    await app.state.player_manager.close()
     # Incomplete teardown retains the lease until shutdown succeeds or OS exit.
     lease = getattr(app.state, 'configuration_lease', None)
     if lease is not None:

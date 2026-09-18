@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Protocol
 from urllib.parse import unquote
 
-from .lms_status import _parse_status
+from .lms_status import LmsPlayerStatus, _parse_status
 
 
 @dataclass(frozen=True)
@@ -45,10 +45,11 @@ class TrackPosition:
 
 
 class TrackPositionSource(Protocol):
-    """Session-owned, nonblocking metadata reader. Unknown data is None.
+    """Nonblocking metadata reader. Unknown data is None.
 
     open starts acquisition; close awaits its completion and releases descriptors.
     read returns a stable immutable anchor, not a continuously ticking clock.
+    LMS readers are session-owned; the shared AirPlay receiver reader is manager-owned.
     """
     def open(self) -> None: ...
     async def close(self) -> None: ...
@@ -82,6 +83,17 @@ class LmsTrackPositionSource:
         # Never expose the old room while the asynchronous connection switches.
         return self._snapshot if self._selected == self._target() else None
 
+    def seed(self, target: str, status: LmsPlayerStatus, observed_at: float) -> None:
+        """Reuse the session's initial status query, without another CLI request."""
+        if (self._selected == target and self._snapshot
+                and self._snapshot.observed_at > observed_at):
+            return  # a subscription update arrived while the query was in flight
+        self._selected = target
+        self._snapshot = (TrackPosition(
+            status.title, status.artist, status.time, status.duration,
+            status.mode == 'play' and not status.waiting_to_play, observed_at,
+        ) if status.mode in ('play', 'pause', 'stop') else None)
+
     async def close(self) -> None:
         if self._task is not None:
             self._task.cancel()
@@ -95,8 +107,10 @@ class LmsTrackPositionSource:
 
     async def _run(self) -> None:
         while True:
-            self._selected = target = self._target()
-            self._snapshot = None
+            target = self._target()
+            if self._selected != target:
+                self._snapshot = None
+            self._selected = target
             writer = None
             try:
                 if target:
@@ -169,6 +183,10 @@ class AirPlayTrackPositionSource:
 
     def _clear(self) -> None:
         self._snapshot, self._start, self._batch, self._buffer = None, None, None, b''
+
+    def invalidate(self) -> None:
+        """Discard cached metadata when the owning manager restarts the receiver."""
+        self._clear()
 
     async def close(self) -> None:
         if self._task is not None:
