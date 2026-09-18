@@ -23,7 +23,6 @@ Adding engine #3
 
 from __future__ import annotations
 
-import logging
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -31,9 +30,7 @@ from typing import Protocol
 
 import numpy as np
 
-from .pcm_source import WINDOW_SIZE
-
-log = logging.getLogger(__name__)
+from .v2_bars_pink import bar_edges, derive_pink_compensation, mag_to_bars_raw
 
 # ---------------------------------------------------------------------------
 # V2 engine constants — defined locally to avoid importing from sync_engine.py.
@@ -259,9 +256,10 @@ class V2SpectrumEngine:
     Receives pre-computed StereoMagStft magnitude frames from SharedAnalysis
     and applies the V2 AGC chain:
       1. Per-bar squelch gate (_V2_NOISE_FLOOR).
-      2. Global peak EMA: fast attack (_V2_ATTACK_TAU_S) / slow release
+      2. Layout-derived per-band pink-noise compensation.
+      3. Global peak EMA: fast attack (_V2_ATTACK_TAU_S) / slow release
          (_V2_RELEASE_TAU_S) — WLED-style adaptive reference.
-      3. Per-bar fast-attack / slow-release falloff (_V2_BAR_FALL_TAU_S).
+      4. Per-bar fast-attack / slow-release falloff (_V2_BAR_FALL_TAU_S).
 
     No second FFT: mag_frames were computed once by StereoMagStft in
     CanonicalAnalysisPipeline and shared here directly.  This preserves the
@@ -279,7 +277,7 @@ class V2SpectrumEngine:
         self._upper_hz = upper_hz
         self._v2_peak_ema: float | None = None
         self._bar_smooth: list[float] | None = None
-        self._diag_frame: int = 0
+        self._pink_compensation = derive_pink_compensation(n_bars, lower_hz, upper_hz)
 
     @property
     def engine_id(self) -> str:
@@ -302,25 +300,15 @@ class V2SpectrumEngine:
         AudioReactive.  np.mean would introduce systematic n_bins× attenuation
         for high-frequency bars where a single tonal bin dominates.
         """
-        sr = _SAMPLE_RATE
-        n_bins = len(mag)
-        log_lo = math.log10(max(self._lower_hz, 1.0))
-        log_hi = math.log10(max(self._upper_hz, self._lower_hz + 1.0))
-        result: list[float] = []
-        for i in range(self._n_bars):
-            f_lo = 10.0 ** (log_lo + i / self._n_bars * (log_hi - log_lo))
-            f_hi = 10.0 ** (log_lo + (i + 1) / self._n_bars * (log_hi - log_lo))
-            bin_lo = max(0, round(f_lo * WINDOW_SIZE / sr))
-            bin_hi = min(n_bins, max(bin_lo + 1, round(f_hi * WINDOW_SIZE / sr)))
-            val = float(np.max(mag[bin_lo:bin_hi])) if bin_hi > bin_lo else 0.0
-            result.append(val if val > _V2_NOISE_FLOOR else 0.0)
-        return result
+        edges = bar_edges(self._n_bars, self._lower_hz, self._upper_hz, n_bins=len(mag))
+        return mag_to_bars_raw(mag, edges).tolist()
 
     def feed(self, pcm: np.ndarray, shared: SharedAnalysis) -> list[SpectrumUpdate]:
         updates: list[SpectrumUpdate] = []
         dt = _STFT_HOP / _SAMPLE_RATE
         for i, mag_frame in enumerate(shared.mag_frames):
             bar_mags = self._mag_to_bar_floats(mag_frame)
+            bar_mags = (np.asarray(bar_mags) * self._pink_compensation).tolist()
             peak = max(bar_mags) if bar_mags else 0.0
             if self._v2_peak_ema is None:
                 self._v2_peak_ema = max(peak, _V2_NOISE_FLOOR)
@@ -340,21 +328,6 @@ class V2SpectrumEngine:
                     for s, b in zip(self._bar_smooth, bars, strict=True)
                 ]
             bars = self._bar_smooth
-
-            # TEMPORARY DIAGNOSTIC: log every 50 V2 frames.
-            # Remove once mushy-output defect is confirmed fixed on LXC.
-            self._diag_frame += 1
-            if self._diag_frame % 50 == 0:
-                raw_mag_mean = float(np.mean(mag_frame))
-                bar_float_max = max(bar_mags) if bar_mags else 0.0
-                bars_mean_v = sum(bars) / len(bars) if bars else 0.0
-                bars_max_v = max(bars) if bars else 0.0
-                log.info(
-                    "[v2-engine diag] frame=%d raw_mag_mean=%.4f bar_float_max=%.4f "
-                    "peak_ema=%.4f bars_smooth_mean=%.3f bars_smooth_max=%.3f",
-                    self._diag_frame, raw_mag_mean, bar_float_max,
-                    self._v2_peak_ema, bars_mean_v, bars_max_v,
-                )
 
             updates.append(SpectrumUpdate(
                 engine_id="v2",
