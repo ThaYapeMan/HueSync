@@ -20,8 +20,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import socket
+import time
 from collections.abc import Awaitable, Callable, Iterable
 from urllib.parse import quote, unquote
+
+from .lms_status import query_lms_status
 
 log = logging.getLogger(__name__)
 
@@ -224,6 +227,12 @@ class LmsFollower:
                     player_id, sub[:40], self._follow_mac,
                 )
 
+        if command in {"pause", "stop", "play"} or (
+                command == "playlist" and sub.split()[:1] in (["pause"], ["stop"])):
+            log.debug("LMS transport %s: player=%s command=%s sub=%r watching=%s",
+                      "MATCH" if player_id == self._follow_mac else "IGNORE",
+                      player_id, command, sub[:80], self._follow_mac)
+
         if player_id != self._follow_mac:
             return  # event from a different player — ignore
 
@@ -234,30 +243,31 @@ class LmsFollower:
             sub[:80],
         )
 
-        if command == "playlist":
-            if sub.startswith("newsong"):
-                await asyncio.to_thread(self._mirror_track)
-            elif sub == "stop":
-                log.info(
-                    "DIAG master STOPPED (%s) -> sending stop to HueSync (%s)",
-                    self._follow_mac, self._huesync_mac,
-                )
-                await asyncio.to_thread(self._send_stop)
-            elif sub.startswith("pause"):
-                # "pause 1" = paused, "pause 0" = resumed/unpaused.
-                pause_state = sub.split()[-1] if " " in sub else "1"
-                if pause_state == "1":
-                    log.info(
-                        "DIAG master PAUSED (%s) -> sending pause to HueSync (%s)",
-                        self._follow_mac, self._huesync_mac,
-                    )
-                    await asyncio.to_thread(self._send_pause, 1)
-                else:
-                    log.info(
-                        "DIAG master RESUMED (%s) -> sending resume to HueSync (%s)",
-                        self._follow_mac, self._huesync_mac,
-                    )
-                    await asyncio.to_thread(self._send_pause, 0)
+        if not self._MIRRORS_PLAYBACK:
+            return
+        if command == "playlist" and sub.startswith("newsong"):
+            await asyncio.to_thread(self._mirror_track)
+            return
+
+        # listen 1 carries both commands and playlist state notifications.
+        # Explicit pause values are idempotent when both forms arrive.
+        event = sub.split() if command == "playlist" else [command, *sub.split()]
+        if not event or event[0] not in {"pause", "stop", "play"}:
+            return
+        log.info("LMS follower transport: player=%s event=%s", player_id, " ".join(event))
+        if event[0] == "stop":
+            await asyncio.to_thread(self._send_stop)
+        elif event[0] == "play":
+            await asyncio.to_thread(self._send_pause, 0)
+        elif len(event) > 1 and event[1] in {"0", "1"}:
+            # Additional fade/suppressShowBriefly parameters are not the state.
+            await asyncio.to_thread(self._send_pause, int(event[1]))
+        elif len(event) == 1:
+            # Bare pause toggles the source, not necessarily our independent
+            # player. Resolve its resulting state; never blindly toggle ours.
+            mode = await asyncio.to_thread(self._query_mode, self._follow_mac)
+            if mode in {"play", "pause"}:
+                await asyncio.to_thread(self._send_pause, int(mode == "pause"))
 
     # ------------------------------------------------------------------
     # Blocking helpers (run in a thread via asyncio.to_thread)
@@ -275,21 +285,53 @@ class LmsFollower:
         """Start an already-playing track on each manual connect/reconnect."""
         try:
             if self._query_mode(self._follow_mac) == "play" and not self._stop_event.is_set():
-                self._mirror_track(only_if_needed=True)
+                if url := self._mirror_track(only_if_needed=True):
+                    self._align_seed_position(url)
         except OSError:
-            log.warning("LMS follower: initial playback query failed; waiting for events")
+            log.warning("LMS follower: startup playback/alignment query failed; waiting for events")
 
-    def _mirror_track(self, *, only_if_needed: bool = False) -> None:
+    def _mirror_track(self, *, only_if_needed: bool = False) -> str | None:
         """Query the followed player's current URL and play it on HueSync."""
         url = self._get_current_url()
         if url:
             if only_if_needed:
                 if (self._query_mode(self._huesync_mac) == "play"
                         and self._get_current_url(self._huesync_mac) == url):
-                    return
+                    return None
                 if self._stop_event.is_set():
+                    return None
+            return url if self._send_play(url) else None
+
+        return None
+
+    def _align_seed_position(self, seeded_url: str) -> None:
+        """Seek only a newly seeded stream, once LMS reports it playing.
+
+        Poll readiness rather than assuming a fixed decoder startup delay. The
+        CLI cannot prove audible output or seekability; target verification is
+        still needed for remote streams. Never add analysis-side latency here.
+        """
+        deadline = time.monotonic() + 3.0
+        while not self._stop_event.is_set() and time.monotonic() < deadline:
+            own = query_lms_status(self._host, self._huesync_mac, self._port)
+            if own.mode == "play" and not own.waiting_to_play:
+                observed_at = time.monotonic()
+                source = query_lms_status(self._host, self._follow_mac, self._port)
+                if (source.mode != "play" or source.waiting_to_play
+                        or source.time is None or self._stop_event.is_set()):
                     return
-            self._send_play(url)
+                if self._get_current_url() != seeded_url or self._stop_event.is_set():
+                    return  # source changed tracks during startup
+                target = source.time + max(0.0, time.monotonic() - observed_at)
+                if source.duration is not None and target >= source.duration:
+                    return  # track ended during startup; let newsong handle it
+                _cli_exchange(self._host, self._port,
+                              f"{self._huesync_mac} time {target:.3f}\n")
+                log.info("LMS follower seed alignment: source=%.3fs seek=%.3fs",
+                         source.time, target)
+                return
+            time.sleep(0.1)
+        log.warning("LMS follower: seeded stream not ready; position alignment skipped")
 
     def _get_current_url(self, mac: str | None = None) -> str | None:
         """Return the current URL for *mac* (defaults to the followed player)."""
@@ -367,7 +409,7 @@ class LmsFollower:
                     ts, self._play_count, label, mac, exc,
                 )
 
-    def _send_play(self, url: str) -> None:
+    def _send_play(self, url: str) -> bool:
         """Tell HueSync's player to start playing *url*."""
         import time as _time
         self._play_count += 1
@@ -386,8 +428,10 @@ class LmsFollower:
             )
             self._post_play_unsync()
             self._diag_sync_after_unsync()
+            return True
         except Exception as exc:
             log.warning("LMS follower: failed to send play command: %s", exc)
+            return False
 
     def _send_stop(self) -> None:
         """Tell HueSync's player to stop."""
