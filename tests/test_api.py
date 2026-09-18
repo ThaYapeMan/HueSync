@@ -1614,3 +1614,9 @@ def test_ws_loudness_is_valid_json(client, values, expected):
     assert frame["type"] == "frame"
     assert frame["loudness_momentary_lufs"] == expected[0]
     assert frame["loudness_short_term_lufs"] == expected[1]
+
+
+@pytest.mark.parametrize("bars_source", [None, "cava", "pcm_pipeline"])
+def test_ws_preview_reports_active_bars_source(client, bars_source):
+    type(client._manager).active_bars_source = PropertyMock(return_value=bars_source)
+    assert _read_ws_status(client)["active_bars_source"] == bars_source

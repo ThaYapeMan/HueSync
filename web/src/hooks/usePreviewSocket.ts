@@ -15,6 +15,7 @@ export interface SocketStatus {
   active_coupling_name: string | null
   active_player_type: string | null
   active_zone_id: string | null
+  active_bars_source?: string | null
   active_energy_profile_id: string | null
   sync_master: string | null
   sync_master_name: string | null

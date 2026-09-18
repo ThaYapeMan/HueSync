@@ -54,6 +54,10 @@ const MOCK_STATUS: SocketStatus = {
 vi.mock('../lib/api', () => ({
   restartCouplingCava: vi.fn().mockResolvedValue({ ok: true }),
   getCouplings: vi.fn().mockResolvedValue([]),
+  getAnalysers: vi.fn().mockResolvedValue([]),
+  getEnergyProfiles: vi.fn().mockResolvedValue([]),
+  getVirtualPlayers: vi.fn().mockResolvedValue([]),
+  getZoneChannels: vi.fn().mockResolvedValue([]),
   activateCoupling: vi.fn().mockResolvedValue({ active_id: 'test', warnings: [] }),
   deactivateCoupling: vi.fn().mockResolvedValue({ active_id: null }),
 }))

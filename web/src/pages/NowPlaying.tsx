@@ -10,6 +10,12 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Separator } from '@/components/ui/separator'
 import type { PreviewState, SocketStatus } from '@/hooks/usePreviewSocket'
 import {
+  type Analyser,
+  type EnergyProfile,
+  type VirtualPlayer,
+  getAnalysers,
+  getEnergyProfiles,
+  getVirtualPlayers,
   type ChannelPosition,
   type Coupling,
   activateCoupling,
@@ -52,106 +58,81 @@ function StatusRow({ label, children }: { label: string; children: React.ReactNo
   )
 }
 
-function StatusGrid({ status }: { status: SocketStatus | null }) {
-  if (!status) {
-    return <p className="text-sm text-muted-foreground">Waiting for data…</p>
-  }
+function StatusGrid({ status, analyserName, energyProfileName }: {
+  status: SocketStatus | null
+  analyserName?: string
+  energyProfileName?: string
+}) {
+  const unknown = <span className="text-muted-foreground">—</span>
   return (
-    <dl className="grid grid-cols-[auto_1fr] gap-x-8 gap-y-2 text-sm items-start">
-      <StatusRow label="Active">
-        {status.active_coupling_name ? (
-          <span className="font-medium">{status.active_coupling_name}</span>
-        ) : (
-          <span className="text-muted-foreground">None</span>
-        )}
+    <dl aria-label="Session status" className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-sm items-start [&_dd]:min-w-0 [&_dd]:break-words">
+      <StatusRow label="Analyser">{analyserName ?? unknown}</StatusRow>
+      <StatusRow label="Effect">
+        {status?.effect_type ? <code className="text-xs font-mono">{status.effect_type}</code> : unknown}
       </StatusRow>
-
-      {status.follower_warning && (
-        <StatusRow label="Follower">
-          <span className="text-destructive text-xs">{status.follower_warning}</span>
-        </StatusRow>
-      )}
-
-      {status.effect_type && (
-        <StatusRow label="Effect">
-          <code className="text-xs font-mono">{status.effect_type}</code>
-        </StatusRow>
-      )}
-
-      {status.onset_method && (
-        <StatusRow label="Onset method">
-          <code className="text-xs font-mono">{status.onset_method}</code>
-        </StatusRow>
-      )}
-
+      <StatusRow label="Energy Profile">{energyProfileName ?? unknown}</StatusRow>
       <StatusRow label="Sync master">
-        {status.sync_master ? (
+        {status?.sync_master ? (
           <div>
-            {status.sync_master_name && (
-              <div className="font-medium">{status.sync_master_name}</div>
-            )}
-            <code className="text-xs font-mono text-muted-foreground">
-              {status.sync_master}
-            </code>
+            {status.sync_master_name && <div className="font-medium">{status.sync_master_name}</div>}
+            <code className="text-xs font-mono text-muted-foreground">{status.sync_master}</code>
           </div>
-        ) : (
-          <span className="text-muted-foreground">—</span>
-        )}
+        ) : unknown}
       </StatusRow>
-
-      <StatusRow label="Delay">
-        {status.applied_delay_ms} ms
-      </StatusRow>
-
-      <StatusRow label="Bridge">
-        <Badge variant={status.bridge_connected ? 'default' : 'secondary'} className="text-xs">
-          {status.bridge_connected ? 'Connected' : 'Disconnected'}
-        </Badge>
-      </StatusRow>
-
-      {status.active_player_type === 'AirPlay' ? (
-        <StatusRow label="AirPlay">
-          {status.airplay_receiving === true ? (
-            <Badge variant="default" className="text-xs">Receiving audio</Badge>
-          ) : (
-            <Badge variant="secondary" className="text-xs">Waiting for AirPlay connection…</Badge>
-          )}
-        </StatusRow>
-      ) : (
-        <>
-          <StatusRow label="squeezelite">
-            <ProcessBadge running={status.processes.squeezelite} />
-          </StatusRow>
-          <StatusRow label="cava">
-            <ProcessBadge running={status.processes.cava} />
-          </StatusRow>
-        </>
-      )}
-
-      {status.latency_warning && (
-        <StatusRow label="Warning">
-          <span className="text-destructive text-xs">{status.latency_warning}</span>
-        </StatusRow>
-      )}
+      <StatusRow label="Delay">{status ? `${status.applied_delay_ms} ms` : unknown}</StatusRow>
     </dl>
   )
 }
 
+function SessionDiagnostics({ status, playerType }: {
+  status: SocketStatus | null
+  playerType?: string | null
+}) {
+  if (!status) return null
+  return (
+    <div className="mt-3 border-t pt-3 space-y-2">
+      <div className="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
+        <span className="uppercase tracking-wider">Session</span>
+        <dl className="flex flex-wrap items-center gap-x-3 gap-y-2">
+          <StatusRow label="Bridge API">
+            <Badge variant={status.bridge_connected ? 'default' : 'secondary'} className="text-xs">
+              {status.bridge_connected ? 'Connected' : 'Disconnected'}
+            </Badge>
+          </StatusRow>
+          {playerType === 'LMS' && <>
+            <StatusRow label="squeezelite"><ProcessBadge running={status.processes.squeezelite} /></StatusRow>
+            {status.active_bars_source === 'cava' && (
+              <StatusRow label="cava"><ProcessBadge running={status.processes.cava} /></StatusRow>
+            )}
+          </>}
+          {playerType === 'AirPlay' && (
+            <StatusRow label="AirPlay">
+              <Badge variant={status.airplay_receiving ? 'default' : 'secondary'} className="text-xs">
+                {status.airplay_receiving === true ? 'Receiving audio'
+                  : status.airplay_receiving === false ? 'Waiting for AirPlay connection…' : '—'}
+              </Badge>
+            </StatusRow>
+          )}
+        </dl>
+      </div>
+      {status.follower_warning && <p className="text-destructive text-xs">{status.follower_warning}</p>}
+      {status.latency_warning && <p className="text-destructive text-xs">{status.latency_warning}</p>}
+    </div>
+  )
+}
+
 function CouplingSelector({
+  couplings,
   status,
   onChanged,
 }: {
   status: SocketStatus | null
+  couplings: Coupling[]
   onChanged: () => void
 }) {
-  const [couplings, setCouplings] = useState<Coupling[]>([])
   const [selected, setSelected] = useState<string>('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
-
-  useEffect(() => {
-    getCouplings().then(setCouplings).catch(() => {})
-  }, [])
 
   // When couplings load and one is already active, pre-select it.
   useEffect(() => {
@@ -287,6 +268,23 @@ export function NowPlaying({ colour, channel_colours, onset, onset_bass = false,
 
   // Reload coupling selector when activation changes.
   const [reloadKey, setReloadKey] = useState(0)
+  const [couplings, setCouplings] = useState<Coupling[]>([])
+  const [analysers, setAnalysers] = useState<Analyser[]>([])
+  const [energyProfiles, setEnergyProfiles] = useState<EnergyProfile[]>([])
+  const [players, setPlayers] = useState<VirtualPlayer[]>([])
+  useEffect(() => {
+    let cancelled = false
+    getCouplings().then((items) => { if (!cancelled) setCouplings(items) }).catch(() => {})
+    getAnalysers().then((items) => { if (!cancelled) setAnalysers(items) }).catch(() => {})
+    getEnergyProfiles().then((items) => { if (!cancelled) setEnergyProfiles(items) }).catch(() => {})
+    getVirtualPlayers().then((items) => { if (!cancelled) setPlayers(items) }).catch(() => {})
+    return () => { cancelled = true }
+  }, [reloadKey, couplingId, status?.active_energy_profile_id])
+  const activeCoupling = couplings.find((item) => item.id === couplingId)
+  const analyserName = analysers.find((item) => item.id === activeCoupling?.analyser_id)?.name
+  const energyProfileName = energyProfiles.find((item) => item.id === status?.active_energy_profile_id)?.name
+  const playerType = status?.active_player_type ?? players.find((item) => item.id === activeCoupling?.player_id)?.type
+
 
   useEffect(() => {
     if (!couplingId || couplingId === initializedForRef.current) return
@@ -403,6 +401,7 @@ export function NowPlaying({ colour, channel_colours, onset, onset_bass = false,
     <div className="space-y-4">
       <CouplingSelector
         key={reloadKey}
+        couplings={couplings}
         status={status}
         onChanged={() => setReloadKey((k) => k + 1)}
       />
@@ -416,18 +415,26 @@ export function NowPlaying({ colour, channel_colours, onset, onset_bass = false,
           </CardTitle>
         </CardHeader>
         <CardContent>
-          <div className="flex justify-center gap-6 items-stretch">
-            <div className="w-96 shrink-0 flex flex-col">
-              <ColourSwatch r={colour.r} g={colour.g} b={colour.b} onset={onset} />
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-start" data-testid="live-preview-grid">
+            <div className="min-w-0">
+              <div className="aspect-square w-full flex" data-testid="colour-preview-size">
+                <ColourSwatch r={colour.r} g={colour.g} b={colour.b} onset={onset} />
+              </div>
               <p className="text-xs text-muted-foreground mt-2">
                 First channel colour. White outline&nbsp;= onset detected.
               </p>
             </div>
-            {channels.length > 0 && (
-              <div className="w-96 shrink-0">
-                <FloorplanPreview channels={channels} colours={channel_colours} onset={onset} />
+            <div className="min-w-0">
+              <div className="aspect-square w-full" data-testid="floorplan-preview-size">
+                {channels.length > 0 ? (
+                  <FloorplanPreview channels={channels} colours={channel_colours} onset={onset} />
+                ) : <p className="text-sm text-muted-foreground">No floorplan available</p>}
               </div>
-            )}
+            </div>
+            <div className="min-w-0 lg:aspect-square">
+              <h3 className="text-xs text-muted-foreground uppercase tracking-wider mb-3">Status</h3>
+              <StatusGrid status={status} analyserName={analyserName} energyProfileName={energyProfileName} />
+            </div>
           </div>
           <div className="mt-3">
             <div className="flex items-center justify-between mb-1">
@@ -453,6 +460,7 @@ export function NowPlaying({ colour, channel_colours, onset, onset_bass = false,
               <span className="text-[10px] text-muted-foreground">High energy</span>
             </div>
           </div>
+          <SessionDiagnostics status={status} playerType={playerType} />
         </CardContent>
       </Card>
 
@@ -622,16 +630,6 @@ export function NowPlaying({ colour, channel_colours, onset, onset_bass = false,
         </Card>
       )}
 
-      <Card>
-        <CardHeader className="pb-3">
-          <CardTitle className="text-xs text-muted-foreground uppercase tracking-wider">
-            Status
-          </CardTitle>
-        </CardHeader>
-        <CardContent>
-          <StatusGrid status={status} />
-        </CardContent>
-      </Card>
     </div>
   )
 }

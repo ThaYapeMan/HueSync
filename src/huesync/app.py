@@ -129,6 +129,7 @@ async def ws_preview(websocket: WebSocket):
                 "active_coupling_name": player_manager.active_coupling_name,
                 "active_zone_id": player_manager.active_zone_id,
                 "active_energy_profile_id": player_manager.active_energy_profile_id,
+                "active_bars_source": player_manager.active_bars_source,
                 "sync_master": player_manager.detected_sync_master,
                 "sync_master_name": player_manager.detected_sync_master_name,
                 "applied_delay_ms": player_manager.applied_delay_ms,
