@@ -2,10 +2,11 @@ import { cleanup, render, screen, waitFor, within } from '@testing-library/react
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { NowPlaying } from '../pages/NowPlaying'
 import type { SocketStatus } from '../hooks/usePreviewSocket'
-import { getAnalysers, getCouplings, getEnergyProfiles, getVirtualPlayers } from '../lib/api'
+import { getAnalysers, getCouplings, getVirtualPlayers } from '../lib/api'
 
-vi.mock('../lib/api', () => ({
-  getCouplings: vi.fn(), getAnalysers: vi.fn(), getEnergyProfiles: vi.fn(), getVirtualPlayers: vi.fn(),
+vi.mock('../lib/api', async importOriginal => ({
+  ...await importOriginal<typeof import('../lib/api')>(),
+  getCouplings: vi.fn(), getAnalysers: vi.fn(), getVirtualPlayers: vi.fn(),
   getZoneChannels: vi.fn().mockResolvedValue([{ channel_id: 1, x: .5, y: 0, z: .5 }]),
   activateCoupling: vi.fn(), deactivateCoupling: vi.fn(), restartCouplingCava: vi.fn(),
 }))
@@ -22,18 +23,21 @@ const props = { colour: { r: 1, g: 0, b: 0 }, channel_colours: [], onset: false,
 afterEach(cleanup)
 beforeEach(() => {
   vi.mocked(getCouplings).mockResolvedValue([{ id: 'c', name: 'Room', analyser_id: 'a', player_id: 'p' }] as never)
-  vi.mocked(getAnalysers).mockResolvedValue([{ id: 'a', name: 'Canonical analyser' }] as never)
-  vi.mocked(getEnergyProfiles).mockResolvedValue([{ id: 'e', name: 'Club energy' }] as never)
+  vi.mocked(getAnalysers).mockResolvedValue([{ id: 'a', name: 'Canonical analyser', bars_source: 'pcm_pipeline', spectrum_backend: 'cavacore', onset_method: 'combined' }] as never)
   vi.mocked(getVirtualPlayers).mockResolvedValue([{ id: 'p', type: 'LMS' }] as never)
 })
 
-it('resolves the five status rows in order, with equal square previews and stacked mobile grid', async () => {
+it('resolves the six technical status rows in order, preserving the preview layout', async () => {
   render(<NowPlaying {...props} status={status} />)
   const dl = screen.getByLabelText('Session status')
-  await within(dl).findByText('Canonical analyser')
-  expect(within(dl).getByText('Club energy')).toBeInTheDocument()
+  await within(dl).findByText('PCM Pipeline')
+  expect(within(dl).getByText('CAVA Core')).toBeInTheDocument()
+  expect(within(dl).getByText('Combined')).toBeInTheDocument()
+  expect(within(dl).queryByText('Analyser')).not.toBeInTheDocument()
+  expect(within(dl).queryByText('Energy Profile')).not.toBeInTheDocument()
+  expect(within(dl).queryByText('Canonical analyser')).not.toBeInTheDocument()
   expect([...dl.querySelectorAll('dt')].map(el => el.textContent)).toEqual([
-    'Analyser', 'Effect', 'Energy Profile', 'Sync master', 'Delay',
+    'Audio source', 'Spectrum engine', 'Beat detection', 'Effect', 'Sync master', 'Delay',
   ])
   expect(within(dl).getByText('Living room')).toBeInTheDocument()
   expect(within(dl).getByText('aa:bb:cc:dd:ee:ff')).toBeInTheDocument()
@@ -52,13 +56,12 @@ it('resolves the five status rows in order, with equal square previews and stack
     & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
 })
 
-it('shows muted placeholders while entity names are unavailable', async () => {
+it('shows muted placeholders while the analyser is unavailable', async () => {
   vi.mocked(getAnalysers).mockReturnValue(new Promise(() => {}))
-  vi.mocked(getEnergyProfiles).mockReturnValue(new Promise(() => {}))
   render(<NowPlaying {...props} status={status} />)
   await screen.findByText('squeezelite')
   const names = screen.getByLabelText('Session status').querySelectorAll('dd')
-  for (const index of [0, 2]) {
+  for (const index of [0, 1, 2]) {
     expect(names[index]).toHaveTextContent('—')
     expect(names[index].firstElementChild).toHaveClass('text-muted-foreground')
   }
@@ -84,9 +87,23 @@ it('resolves an AirPlay player from configuration when the websocket omits its t
   expect(screen.queryByText('cava', { exact: true })).not.toBeInTheDocument()
 })
 
-it('keeps follower and latency warnings visible outside the five status rows', async () => {
+it('keeps follower and latency warnings visible outside the six status rows', async () => {
   render(<NowPlaying {...props} status={{ ...status, follower_warning: 'Not synced', latency_warning: 'No latency data' }} />)
   await waitFor(() => expect(screen.getByText('Not synced')).toBeInTheDocument())
   expect(screen.getByText('No latency data')).toBeInTheDocument()
-  expect(screen.getByLabelText('Session status').querySelectorAll('dt')).toHaveLength(5)
+  expect(screen.getByLabelText('Session status').querySelectorAll('dt')).toHaveLength(6)
+})
+
+
+it('shows the external cava engine and takes beat detection from the analyser, not status', async () => {
+  vi.mocked(getAnalysers).mockResolvedValue([{
+    id: 'a', name: 'Custom label', bars_source: 'cava', spectrum_backend: 'v2', onset_method: 'superflux',
+  }] as never)
+  render(<NowPlaying {...props} status={status} />)
+  const dl = screen.getByLabelText('Session status')
+  await within(dl).findByText('cava (external)')
+  expect(within(dl).getByText('Cava')).toBeInTheDocument()
+  expect(within(dl).getByText('SuperFlux')).toBeInTheDocument()
+  expect(within(dl).queryByText('Combined')).not.toBeInTheDocument()
+  expect(within(dl).queryByText('V2')).not.toBeInTheDocument()
 })

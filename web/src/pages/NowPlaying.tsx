@@ -11,10 +11,11 @@ import { Separator } from '@/components/ui/separator'
 import type { PreviewState, SocketStatus } from '@/hooks/usePreviewSocket'
 import {
   type Analyser,
-  type EnergyProfile,
+  BARS_SOURCE_OPTIONS,
+  SPECTRUM_BACKEND_OPTIONS,
+  ONSET_METHODS,
   type VirtualPlayer,
   getAnalysers,
-  getEnergyProfiles,
   getVirtualPlayers,
   type ChannelPosition,
   type Coupling,
@@ -58,19 +59,26 @@ function StatusRow({ label, children }: { label: string; children: React.ReactNo
   )
 }
 
-function StatusGrid({ status, analyserName, energyProfileName }: {
+function StatusGrid({ status, analyser }: {
   status: SocketStatus | null
-  analyserName?: string
-  energyProfileName?: string
+  analyser?: Analyser
 }) {
   const unknown = <span className="text-muted-foreground">—</span>
   return (
     <dl aria-label="Session status" className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-sm items-start [&_dd]:min-w-0 [&_dd]:break-words">
-      <StatusRow label="Analyser">{analyserName ?? unknown}</StatusRow>
+      <StatusRow label="Audio source">
+        {BARS_SOURCE_OPTIONS.find(option => option.value === analyser?.bars_source)?.label ?? unknown}
+      </StatusRow>
+      <StatusRow label="Spectrum engine">
+        {analyser?.bars_source === 'cava' ? 'cava (external)'
+          : SPECTRUM_BACKEND_OPTIONS.find(option => option.value === analyser?.spectrum_backend)?.label ?? unknown}
+      </StatusRow>
+      <StatusRow label="Beat detection">
+        {ONSET_METHODS.find(option => option.value === analyser?.onset_method)?.label ?? unknown}
+      </StatusRow>
       <StatusRow label="Effect">
         {status?.effect_type ? <code className="text-xs font-mono">{status.effect_type}</code> : unknown}
       </StatusRow>
-      <StatusRow label="Energy Profile">{energyProfileName ?? unknown}</StatusRow>
       <StatusRow label="Sync master">
         {status?.sync_master ? (
           <div>
@@ -270,19 +278,16 @@ export function NowPlaying({ colour, channel_colours, onset, onset_bass = false,
   const [reloadKey, setReloadKey] = useState(0)
   const [couplings, setCouplings] = useState<Coupling[]>([])
   const [analysers, setAnalysers] = useState<Analyser[]>([])
-  const [energyProfiles, setEnergyProfiles] = useState<EnergyProfile[]>([])
   const [players, setPlayers] = useState<VirtualPlayer[]>([])
   useEffect(() => {
     let cancelled = false
     getCouplings().then((items) => { if (!cancelled) setCouplings(items) }).catch(() => {})
     getAnalysers().then((items) => { if (!cancelled) setAnalysers(items) }).catch(() => {})
-    getEnergyProfiles().then((items) => { if (!cancelled) setEnergyProfiles(items) }).catch(() => {})
     getVirtualPlayers().then((items) => { if (!cancelled) setPlayers(items) }).catch(() => {})
     return () => { cancelled = true }
   }, [reloadKey, couplingId, status?.active_energy_profile_id])
   const activeCoupling = couplings.find((item) => item.id === couplingId)
-  const analyserName = analysers.find((item) => item.id === activeCoupling?.analyser_id)?.name
-  const energyProfileName = energyProfiles.find((item) => item.id === status?.active_energy_profile_id)?.name
+  const activeAnalyser = analysers.find((item) => item.id === activeCoupling?.analyser_id)
   const playerType = status?.active_player_type ?? players.find((item) => item.id === activeCoupling?.player_id)?.type
 
 
@@ -433,7 +438,7 @@ export function NowPlaying({ colour, channel_colours, onset, onset_bass = false,
             </div>
             <div className="min-w-0 lg:aspect-square">
               <h3 className="text-xs text-muted-foreground uppercase tracking-wider mb-3">Status</h3>
-              <StatusGrid status={status} analyserName={analyserName} energyProfileName={energyProfileName} />
+              <StatusGrid status={status} analyser={activeAnalyser} />
             </div>
           </div>
           <div className="mt-3">

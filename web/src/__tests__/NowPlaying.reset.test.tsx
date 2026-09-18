@@ -51,7 +51,8 @@ const MOCK_STATUS: SocketStatus = {
   mid_hz: APPLIED_MID,
 }
 
-vi.mock('../lib/api', () => ({
+vi.mock('../lib/api', async importOriginal => ({
+  ...await importOriginal<typeof import('../lib/api')>(),
   restartCouplingCava: vi.fn().mockResolvedValue({ ok: true }),
   getCouplings: vi.fn().mockResolvedValue([]),
   getAnalysers: vi.fn().mockResolvedValue([]),
