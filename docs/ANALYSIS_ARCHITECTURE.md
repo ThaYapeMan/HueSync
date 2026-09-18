@@ -8,7 +8,7 @@ Audio ingress → CanonicalAnalysisPipeline → SharedAnalysisFrame
     → AnalysisProcessor[]
         ├─ SpectrumProcessor → SpectrumEngine → V2 / CAVA Core / future
         ├─ BeatDetector → combined / multiband / Superflux onset algorithm
-        ├─ LoudnessAnalyzer → future algorithm (extension protocol only)
+        ├─ LoudnessAnalyzer → KWeightedLoudnessAnalyzer → BS.1770 meter
         └─ ChromaAnalyzer → future algorithm (extension protocol only)
     → PublicationRecord → AudioFeatures → Effects → Scene → output driver
 ```
@@ -30,8 +30,8 @@ Audio ingress → CanonicalAnalysisPipeline → SharedAnalysisFrame
 
 Multiple processors can coexist. Dispatch is deterministic and sequential on the
 pipeline worker, not concurrent calls to a single processor. `feed`, `flush`,
-`reset` and `close` iterate the processor collection. Loudness/Chroma protocols
-provide extension points; production algorithms for those families are not shipped.
+`reset` and `close` iterate the processor collection. Loudness has a production K-weighted momentary/short-term processor;
+Chroma remains an extension protocol without a shipped algorithm.
 
 ## Shared analysis and Spectrum DSP
 

@@ -27,13 +27,31 @@ state. Settings include onset_method/delta/alpha, superflux_mu/lag and bass/mid 
 Delayed Beat publications retain their audio intervals and can carry historical
 Spectrum bars with explicit provenance. See [publication policy](audio-pipeline.md).
 
+## Loudness family
+
+`KWeightedLoudnessAnalyzer` implements the `LoudnessAnalyzer` protocol alongside
+Spectrum and Beat in every canonical pipeline. Its standalone pure-NumPy meter
+uses the published ITU-R BS.1770-5 48 kHz K-weighting coefficients, stereo channel
+weights and −0.691 offset. Momentary (400 ms) and short-term (3 s) windows retain
+filter/window state across chunks. There is no integrated-programme gating.
+
+Reporting uses the same 480-sample hop intervals as Beat. Each reading includes
+PCM through that shared STFT window's completion; no later PCM is used to compute
+an earlier hop. Remaining PCM is consumed without inventing padded EOS readings.
+Reset clears both filters and windows. Values are `None` during warmup and `-inf`
+at silence/below −70 LUFS; WebSocket JSON maps these to `null`.
+
+Now Playing displays momentary LUFS beside Energy blend. This is observation only:
+`SustainedEnergyTracker` and `LayerMixer` retain their existing blend behavior.
+CAVA can have newer Spectrum intervals than shared-hop loudness; preview reads the
+latest loudness PublicationRecord separately without rewinding the Effects snapshot.
+The legacy external CAVA/FIFO route does not run this canonical processor.
+
 ## Extension status
 
-LoudnessAnalyzer and ChromaAnalyzer are protocol extension points, not implemented
-selectable production algorithms. Their future processors can coexist with Spectrum
-and Beat and consume shared PCM/magnitudes. No family is implicitly mutually exclusive.
-`BeatAlgorithm`, `LoudnessAlgorithm` and `ChromaAlgorithm` in conceptual diagrams name
-family implementations; do not infer that all are concrete shipped classes.
+ChromaAnalyzer remains a protocol extension point without a shipped algorithm.
+Processor families coexist; Loudness does not replace Spectrum, Beat or sustained
+energy. No additional analysis architecture or dependency is introduced.
 
 ## Legacy external CAVA
 

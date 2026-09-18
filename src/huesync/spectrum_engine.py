@@ -113,6 +113,9 @@ class ProcessorUpdate:
     onset_bass_strength: float | None = None
     onset_mid_strength: float | None = None
     onset_treble_strength: float | None = None
+    # None during warmup/not produced; -inf is the explicit silence sentinel.
+    loudness_momentary_lufs: float | None = None
+    loudness_short_term_lufs: float | None = None
 
 
 @dataclass
@@ -170,15 +173,14 @@ class AnalysisProcessor(Protocol):
 
 
 # ---------------------------------------------------------------------------
-# Extension-point protocols (no production DSP; future composition points)
+# Feature-family protocols
 # ---------------------------------------------------------------------------
 
 
 class LoudnessAnalyzer(Protocol):
-    """Extension point for long-term loudness tracking.
+    """Loudness family, implemented by KWeightedLoudnessAnalyzer.
 
-    Not implemented in production; reserved for future RMS/LUFS analysis.
-    Satisfies AnalysisProcessor structurally.
+    Satisfies AnalysisProcessor structurally; independent of Spectrum/Beat DSP.
     """
 
     @property

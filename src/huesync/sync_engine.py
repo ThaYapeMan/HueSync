@@ -38,6 +38,7 @@ from .canonicalizer import (
     TemporarilyNoData,
 )
 from .latency import NoLatencyProbe
+from .loudness_analyzer import KWeightedLoudnessAnalyzer
 from .models import Profile
 from .pcm_source import WINDOW_SIZE, PcmHpss, PcmSource, PcmStft
 from .spectrum_engine import (
@@ -1024,7 +1025,7 @@ class CanonicalAnalysisPipeline:
             mid_hz=mid_hz,
         )
         self._processors: tuple[AnalysisProcessor, ...] = (
-            self._spectrum_processor, self._beat_detector
+            self._spectrum_processor, self._beat_detector, KWeightedLoudnessAnalyzer()
         )
         self._bar_stft = StereoMagStft(_CAP_SAMPLE_RATE)
         self._canonicalizer = AudioCanonicalizer()
@@ -1032,6 +1033,7 @@ class CanonicalAnalysisPipeline:
         # All record state commits under _pub_lock. Sequence/queue track delivery;
         # _latest_pub tracks the freshest audio interval for live Effects.
         self._latest_pub: PublicationRecord | None = None
+        self._latest_loudness_pub: PublicationRecord | None = None
         self._pub_seq: int = 0
         self._pub_lock = threading.Lock()
         self._pub_queue: deque[PublicationRecord] = deque(maxlen=1000)
@@ -1102,6 +1104,20 @@ class CanonicalAnalysisPipeline:
     def v2_bar_smooth(self) -> list[float] | None:
         """V2 per-bar falloff state (None for non-V2 engines or before first frame)."""
         return getattr(self._spectrum_processor._engine, "v2_bar_smooth", None)
+
+    def latest_loudness(self) -> tuple[float | None, float | None]:
+        """Freshest loudness publication, independent of Spectrum latency.
+
+        Keep the authoritative record (not a second mutable feature accumulator).
+        CAVA may publish newer audio intervals while shared-hop loudness/Beat
+        arrives later. Reading this snapshot does not rewind live Effects.
+        """
+        with self._pub_lock:
+            record = self._latest_loudness_pub
+            if record is None:
+                return None, None
+            return (record.features.loudness_momentary_lufs,
+                    record.features.loudness_short_term_lufs)
 
     def rebuild_beat_detector(self, profile: Profile) -> None:
         """Rebuild the BeatDetector onset pipeline from new profile parameters.
@@ -1182,6 +1198,13 @@ class CanonicalAnalysisPipeline:
                 >= (latest.sample_end, latest.sample_pos)
             ):
                 self._latest_pub = record
+            if (features.loudness_momentary_lufs is not None
+                    or features.loudness_short_term_lufs is not None):
+                previous = self._latest_loudness_pub
+                if (previous is None or record.epoch != previous.epoch
+                        or (record.sample_end, record.sample_pos)
+                        >= (previous.sample_end, previous.sample_pos)):
+                    self._latest_loudness_pub = record
             # Bounded queue: count drops rather than blocking DSP.
             maxlen = self._pub_queue.maxlen
             if maxlen is not None and len(self._pub_queue) == maxlen:
@@ -1202,8 +1225,13 @@ class CanonicalAnalysisPipeline:
         onset_strength = 0.0
         onset_bass = onset_mid = onset_treble = False
         onset_bass_str = onset_mid_str = onset_treble_str = 0.0
+        momentary = short_term = None
 
         for pu in onset_batch:
+            if pu.loudness_momentary_lufs is not None:
+                momentary = pu.loudness_momentary_lufs
+            if pu.loudness_short_term_lufs is not None:
+                short_term = pu.loudness_short_term_lufs
             if pu.onset:
                 onset = True
             onset_strength = max(onset_strength, pu.onset_strength or 0.0)
@@ -1242,6 +1270,8 @@ class CanonicalAnalysisPipeline:
             sustained_energy=None,
             hpss_active=False,
             relative_exertion=full,
+            loudness_momentary_lufs=momentary,
+            loudness_short_term_lufs=short_term,
         )
 
     def _process_canonical_frame(self, frame: AnalysisPcmFrame) -> list[PublicationRecord]:
@@ -1268,6 +1298,7 @@ class CanonicalAnalysisPipeline:
                 self._reset_dsp()
             with self._pub_lock:
                 self._latest_pub = None
+                self._latest_loudness_pub = None
             self._current_epoch_id = epoch_id
             self._epoch_start_sample_pos = frame.sample_pos
             self._stft_frame_count = 0
@@ -1529,6 +1560,7 @@ class CanonicalAnalysisPipeline:
                         self._reset_dsp()
                         with self._pub_lock:
                             self._latest_pub = None
+                            self._latest_loudness_pub = None
                     elif isinstance(cresult, EndOfStream):
                         # EOS: flush carry buffer; _latest_pub survives.
                         self._flush_engine()
@@ -1539,6 +1571,7 @@ class CanonicalAnalysisPipeline:
             log.exception("CanonicalAnalysisPipeline worker crashed; clearing stale features")
             with self._pub_lock:
                 self._latest_pub = None
+                self._latest_loudness_pub = None
         finally:
             # If stop() timed out and returned False, it deliberately skipped
             # closing processors — the worker was still touching native
@@ -2720,6 +2753,12 @@ class SyncEngine:
     @property
     def last_bars(self) -> list[float]:
         return self._last_bars
+
+    @property
+    def last_loudness(self) -> tuple[float | None, float | None]:
+        if isinstance(self._analyser, CanonicalAnalysisPipeline):
+            return self._analyser.latest_loudness()
+        return None, None  # external FIFO has no canonical LoudnessAnalyzer
 
     @property
     def last_sustained_energy(self) -> float | None:

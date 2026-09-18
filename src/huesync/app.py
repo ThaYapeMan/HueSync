@@ -5,6 +5,7 @@ import contextlib
 import dataclasses
 import json
 import logging
+import math
 import os
 from pathlib import Path
 
@@ -90,6 +91,7 @@ async def ws_preview(websocket: WebSocket):
                 for c in player_manager.last_colours
                 for r16, g16, b16 in (c.to_16bit(),)
             ]
+            momentary, short_term = player_manager.last_loudness
             await websocket.send_json({
                 "type": "frame",
                 "colour": {"r": r, "g": g, "b": b},
@@ -103,6 +105,13 @@ async def ws_preview(websocket: WebSocket):
                 "energy": player_manager.last_energy,
                 "sustained_energy": player_manager.last_sustained_energy,
                 "relative_exertion": player_manager.last_energy,
+                # JSON has no infinity. Silence (-inf) and warmup are null.
+                "loudness_momentary_lufs": (
+                    momentary if momentary is not None and math.isfinite(momentary) else None
+                ),
+                "loudness_short_term_lufs": (
+                    short_term if short_term is not None and math.isfinite(short_term) else None
+                ),
             })
 
             if tick % 3 == 0:

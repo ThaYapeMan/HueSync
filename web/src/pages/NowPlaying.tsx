@@ -253,10 +253,11 @@ type Props = Pick<PreviewState, 'colour' | 'channel_colours' | 'onset' | 'bars' 
   onset_mid?: boolean
   onset_treble?: boolean
   mix?: number
+  loudness_momentary_lufs?: number | null
   connected?: boolean
 }
 
-export function NowPlaying({ colour, channel_colours, onset, onset_bass = false, onset_mid = false, onset_treble = false, mix = 0, bars, status, connected = true }: Props) {
+export function NowPlaying({ colour, channel_colours, onset, onset_bass = false, onset_mid = false, onset_treble = false, mix = 0, loudness_momentary_lufs = null, bars, status, connected = true }: Props) {
   const couplingId = status?.active_coupling_id ?? null
   const zoneId = status?.active_zone_id ?? null
 
@@ -430,7 +431,14 @@ export function NowPlaying({ colour, channel_colours, onset, onset_bass = false,
           </div>
           <div className="mt-3">
             <div className="flex items-center justify-between mb-1">
-              <span className="text-xs text-muted-foreground">Energy blend</span>
+              <span className="text-xs text-muted-foreground">
+                Energy blend
+                <span className="ml-3 font-mono" title="K-weighted momentary loudness (400 ms); independent of energy blend" data-testid="momentary-loudness">
+                  {connected && loudness_momentary_lufs !== null && Number.isFinite(loudness_momentary_lufs)
+                    ? `${loudness_momentary_lufs.toFixed(1)} LUFS`
+                    : '— LUFS'}
+                </span>
+              </span>
               <span className="text-xs font-mono text-muted-foreground">{Math.round(mix * 100)}%</span>
             </div>
             <div className="relative h-2 w-full overflow-hidden rounded-full bg-secondary">

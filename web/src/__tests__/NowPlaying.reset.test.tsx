@@ -262,3 +262,18 @@ describe('NowPlaying — Reset to saved & Restore factory defaults', () => {
     })
   })
 })
+
+
+describe('Momentary loudness readout', () => {
+  it('shows LUFS alongside the unchanged blend and handles unavailable/disconnected readings', () => {
+    const props = { colour: { r: 0, g: 0, b: 0 }, channel_colours: [], onset: false, bars: [], status: null, mix: .35 }
+    const view = render(<NowPlaying {...props} loudness_momentary_lufs={-18.4} />)
+    expect(screen.getByTestId('momentary-loudness')).toHaveTextContent('-18.4 LUFS')
+    expect(screen.getByText('35%')).toBeInTheDocument()
+    view.rerender(<NowPlaying {...props} loudness_momentary_lufs={null} />)
+    expect(screen.getByTestId('momentary-loudness')).toHaveTextContent('— LUFS')
+    view.rerender(<NowPlaying {...props} loudness_momentary_lufs={-18.4} connected={false} />)
+    expect(screen.getByTestId('momentary-loudness')).toHaveTextContent('— LUFS')
+    expect(screen.getByText('35%')).toBeInTheDocument()
+  })
+})

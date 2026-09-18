@@ -41,6 +41,8 @@ export interface PreviewState {
   onset_treble: boolean
   mix: number
   energy: number
+  loudness_momentary_lufs: number | null
+  loudness_short_term_lufs: number | null
   bars: number[]
   status: SocketStatus | null
   connected: boolean
@@ -56,6 +58,8 @@ const INITIAL_STATE: PreviewState = {
   onset_treble: false,
   mix: 0,
   energy: 0,
+  loudness_momentary_lufs: null,
+  loudness_short_term_lufs: null,
   bars: [],
   status: null,
   connected: false,
@@ -85,7 +89,7 @@ export function usePreviewSocket(): PreviewState {
       }
 
       ws.onclose = () => {
-        setState((s) => ({ ...s, connected: false, reconnectAttempt: attempt }))
+        setState((s) => ({ ...s, connected: false, reconnectAttempt: attempt, loudness_momentary_lufs: null, loudness_short_term_lufs: null }))
         if (!stopped) {
           // Exponential backoff: 250 ms → 500 → 1 s → 2 s → 4 s, cap at 5 s.
           const delay = Math.min(250 * Math.pow(2, attempt), 5000)
@@ -128,6 +132,8 @@ export function usePreviewSocket(): PreviewState {
             onset_treble: onset_treble || s.onset_treble,
             mix,
             energy,
+            loudness_momentary_lufs: (msg.loudness_momentary_lufs as number | null) ?? null,
+            loudness_short_term_lufs: (msg.loudness_short_term_lufs as number | null) ?? null,
           }))
 
           if (onset) {

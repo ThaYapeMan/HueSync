@@ -48,6 +48,8 @@ All fields below are sent on every frame message. RGB values are integers in
 | `onset_treble` | boolean | Latest treble onset flag |
 | `mix` | number | LayerMixer blend: 0 = low-energy Effect, 1 = high-energy Effect |
 | `energy` | number | Latest full-band relative energy/exertion value (`last_energy`); 0 when no session/SyncEngine is available |
+| `loudness_momentary_lufs` | number or null | K-weighted 400 ms loudness; null during warmup, silence or when unavailable |
+| `loudness_short_term_lufs` | number or null | K-weighted 3 s loudness; same null semantics |
 | `sustained_energy` | number or null | Section-level energy tracker value when available; null otherwise |
 | `relative_exertion` | number | The same `last_energy` value as `energy`, not a separate measurement |
 

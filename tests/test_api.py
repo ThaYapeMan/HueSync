@@ -52,6 +52,7 @@ def _make_mock_manager() -> MagicMock:
     type(manager).last_mix = PropertyMock(return_value=0.0)
     type(manager).last_energy = PropertyMock(return_value=0.0)
     type(manager).last_sustained_energy = PropertyMock(return_value=None)
+    type(manager).last_loudness = PropertyMock(return_value=(None, None))
     # WebSocket status properties
     type(manager).active_coupling_id = PropertyMock(return_value=None)
     type(manager).active_coupling_name = PropertyMock(return_value=None)
@@ -1574,3 +1575,23 @@ def test_ws_track_is_generic_and_rebased_for_new_client(client: TestClient):
     assert track['duration_s'] == 225 and track['playing']
     assert 'observed_at' not in track  # no dependency on the server's clock domain
     assert set(track) == {'title', 'artist', 'position_s', 'duration_s', 'playing'}
+
+
+@pytest.mark.parametrize("values, expected", [
+    ((-18.4, -20.1), (-18.4, -20.1)),
+    ((float("-inf"), float("-inf")), (None, None)),
+    ((None, None), (None, None)),
+])
+def test_ws_loudness_is_valid_json(client, values, expected):
+    import json
+
+    type(client._manager).last_loudness = PropertyMock(return_value=values)
+    with client.websocket_connect("/ws/preview") as ws:
+        payload = ws.receive_text()
+        # Reject the non-standard Infinity/NaN tokens accepted by default json.loads.
+        def reject_constant(value):
+            raise AssertionError(value)
+        frame = json.loads(payload, parse_constant=reject_constant)
+    assert frame["type"] == "frame"
+    assert frame["loudness_momentary_lufs"] == expected[0]
+    assert frame["loudness_short_term_lufs"] == expected[1]

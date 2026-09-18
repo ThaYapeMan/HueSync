@@ -89,7 +89,7 @@ def _feed_pipeline(
 ) -> None:
     """Feed stereo samples to pipeline in chunks, bypassing the background thread."""
     n = len(stereo)
-    pos = 0
+    pos = pipeline._source_sample_end if pipeline._current_epoch_id == epoch_id else 0
     offset = 0
     while offset < n:
         end = min(offset + chunk_size, n)

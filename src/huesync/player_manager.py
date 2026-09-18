@@ -399,6 +399,12 @@ class PlayerManager:
         return 0.0
 
     @property
+    def last_loudness(self) -> tuple[float | None, float | None]:
+        if self._active and self._active.sync_engine:
+            return self._active.sync_engine.last_loudness
+        return None, None
+
+    @property
     def last_sustained_energy(self) -> float | None:
         """Section-level sustained energy from SustainedEnergyTracker (None if unavailable)."""
         if self._active and self._active.sync_engine:

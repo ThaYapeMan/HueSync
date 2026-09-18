@@ -74,11 +74,13 @@ def _sine_stereo(freq: float = 440.0, n: int = _CANONICAL_RATE) -> np.ndarray:
     return np.column_stack([sig, sig])
 
 
-def _make_canonical_frame(samples: np.ndarray, epoch_id: str = "ep-1") -> object:
+def _make_canonical_frame(
+    samples: np.ndarray, epoch_id: str = "ep-1", sample_pos: int = 0,
+) -> object:
     from huesync.canonicalizer import AnalysisPcmFrame
     frame = AnalysisPcmFrame(
         samples=samples,
-        sample_pos=0,
+        sample_pos=sample_pos,
         epoch_id=epoch_id,
         source_id="test:src",
         over_range=False,
@@ -89,9 +91,12 @@ def _make_canonical_frame(samples: np.ndarray, epoch_id: str = "ep-1") -> object
 def _feed_frames(pipeline: CanonicalAnalysisPipeline, stereo: np.ndarray,
                  epoch_id: str = "ep-1", chunk: int = 4096) -> None:
     offset = 0
+    base = pipeline._source_sample_end if pipeline._current_epoch_id == epoch_id else 0
     while offset < len(stereo):
         end = min(offset + chunk, len(stereo))
-        frame = _make_canonical_frame(stereo[offset:end], epoch_id=epoch_id)
+        frame = _make_canonical_frame(
+            stereo[offset:end], epoch_id=epoch_id, sample_pos=base + offset,
+        )
         pipeline.feed(frame)
         offset = end
 

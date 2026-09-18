@@ -104,7 +104,7 @@ future player ────┤
         AnalysisProcessor[]
           ├── SpectrumProcessor → SpectrumEngine → V2 / CAVA Core / future
           ├── BeatDetector      → BeatAlgorithm (onset implementation)
-          ├── LoudnessAnalyzer  → extension protocol; future algorithm
+          ├── LoudnessAnalyzer  → K-weighted momentary / short-term LUFS
           └── ChromaAnalyzer    → extension protocol; future algorithm
                   ▼
          PublicationRecord
@@ -127,8 +127,9 @@ positions to the enabled processors. Processors may coexist; the current worker
 dispatches them sequentially. `SpectrumProcessor` wraps a `SpectrumEngine`;
 `BeatDetector` is independent of that engine. V2 and Beat reuse shared STFT work.
 CAVA Core receives canonical stereo PCM and owns its own FFTs and conditioning.
-The algorithm labels describe family responsibilities; Loudness/Chroma are not
-shipped selectable analyzers.
+K-weighted momentary/short-term Loudness runs alongside Spectrum and Beat;
+Chroma remains a future extension. Loudness is displayed for comparison and does
+not replace the existing Energy Profile blend input.
 
 `PublicationRecord` binds features to their actual audio interval, epoch and
 contributors. Delayed results remain in delivery-order publications; the live
@@ -219,10 +220,10 @@ Open **`http://<host>:8420`** after installation. The current UI provides:
 - **Latency:** manage listening-player timing settings.
 - **Backup and restore:** download or restore sensitive configuration with confirmation.
 
-Some settings are API-only: Controller creation/pairing and `spectrum_backend`
-selection are not exposed by the current pages. The Analyser page offers the bars
-source and onset controls, but no CAVA Core engine selector. Loudness/Chroma have no
-shipped configuration UI. Use [API operations](docs/api.md) and
+Controller creation/pairing is API-only. The Analyser page offers source, Spectrum
+engine (V2/CAVA Core) and onset controls. Now Playing displays momentary loudness
+beside Energy blend; Loudness has no configurable DSP settings. Chroma has no
+shipped implementation or configuration UI. Use [API operations](docs/api.md) and
 [configuration](docs/configuration.md) for these boundaries. There is no built-in
 authentication; restrict UI/API access to a trusted network.
 

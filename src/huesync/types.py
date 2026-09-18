@@ -187,6 +187,12 @@ class AudioFeatures:
     # explicit name rather than the ambiguous "full".
     relative_exertion: float = 0.0
 
+    # BS.1770 K-weighted 400 ms / 3 s loudness. None until the window fills
+    # or when unavailable; -inf means silence. HTTP/WS maps silence to null.
+    # Observational only: these do not drive the EnergyProfile blend.
+    loudness_momentary_lufs: float | None = None
+    loudness_short_term_lufs: float | None = None
+
 
 # ---------------------------------------------------------------------------
 # Renderer — contract between the colour engine and the analysis layer
