@@ -86,6 +86,8 @@ class LmsFollower:
     follower is disconnected (reconnecting), or None when healthy.
     """
 
+    _MIRRORS_PLAYBACK = True
+
     def __init__(
         self,
         lms_host: str,
@@ -172,6 +174,17 @@ class LmsFollower:
                 self._follow_mac,
             )
 
+            if self._MIRRORS_PLAYBACK:
+                seed = asyncio.create_task(asyncio.to_thread(self._seed_playback))
+                try:
+                    await asyncio.shield(seed)
+                except asyncio.CancelledError:
+                    # Own the bounded CLI exchanges through teardown; never let a
+                    # startup query send playback after the session has stopped.
+                    self._stop_event.set()
+                    await seed
+                    raise
+
             while not self._stop_event.is_set():
                 line_bytes = await reader.readline()
                 if not line_bytes:
@@ -250,27 +263,50 @@ class LmsFollower:
     # Blocking helpers (run in a thread via asyncio.to_thread)
     # ------------------------------------------------------------------
 
-    def _mirror_track(self) -> None:
+    def _query_mode(self, mac: str) -> str | None:
+        raw = _cli_exchange(self._host, self._port, f"{mac} mode ?\n")
+        parts = [unquote(part) for part in raw.split()]
+        if (len(parts) == 3 and parts[0].lower() == mac.lower()
+                and parts[1] == "mode" and parts[2] in {"play", "pause", "stop"}):
+            return parts[2]
+        return None
+
+    def _seed_playback(self) -> None:
+        """Start an already-playing track on each manual connect/reconnect."""
+        try:
+            if self._query_mode(self._follow_mac) == "play" and not self._stop_event.is_set():
+                self._mirror_track(only_if_needed=True)
+        except OSError:
+            log.warning("LMS follower: initial playback query failed; waiting for events")
+
+    def _mirror_track(self, *, only_if_needed: bool = False) -> None:
         """Query the followed player's current URL and play it on HueSync."""
         url = self._get_current_url()
         if url:
+            if only_if_needed:
+                if (self._query_mode(self._huesync_mac) == "play"
+                        and self._get_current_url(self._huesync_mac) == url):
+                    return
+                if self._stop_event.is_set():
+                    return
             self._send_play(url)
 
-    def _get_current_url(self) -> str | None:
-        """Return the URL of the track currently loaded on *follow_mac*."""
-        command = f"{self._follow_mac} status - 1 tags:u\n"
+    def _get_current_url(self, mac: str | None = None) -> str | None:
+        """Return the current URL for *mac* (defaults to the followed player)."""
+        mac = mac or self._follow_mac
+        command = f"{mac} status - 1 tags:u\n"
         log.info(
             "DIAG FOLLOW -> %s  cmd='%s status - 1 tags:u'  "
-            "(triggered by newsong event, play_count=%d)",
-            self._follow_mac,
-            self._follow_mac,
+            "(play_count=%d)",
+            mac,
+            mac,
             self._play_count,
         )
         try:
             raw = _cli_exchange(self._host, self._port, command)
         except Exception as exc:
             log.warning(
-                "LMS follower: failed to get URL for %s: %s", self._follow_mac, exc
+                "LMS follower: failed to get URL for %s: %s", mac, exc
             )
             return None
 
@@ -280,7 +316,7 @@ class LmsFollower:
                 return unquote(value_raw)
 
         log.warning(
-            "LMS follower: no url tag in status response for %s", self._follow_mac
+            "LMS follower: no url tag in status response for %s", mac
         )
         return None
 
@@ -378,6 +414,8 @@ class LmsSyncGroupObserver(LmsFollower):
     One serialized refresh loop owns target changes. Notifications request an
     early refresh, with a five-second poll covering missed/reconnect events.
     """
+
+    _MIRRORS_PLAYBACK = False
 
     def __init__(
         self, lms_host: str, huesync_mac: str,

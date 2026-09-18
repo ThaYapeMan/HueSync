@@ -13,9 +13,13 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from unittest.mock import AsyncMock
 from urllib.parse import quote as urlquote
+from urllib.parse import unquote
 
-from huesync.lms_follower import LmsFollower
+import pytest
+
+from huesync.lms_follower import LmsFollower, LmsSyncGroupObserver
 
 FOLLOW_MAC = "aa:bb:cc:dd:ee:ff"
 HUESYNC_MAC = "11:22:33:44:55:66"
@@ -34,6 +38,8 @@ class MockLmsServer:
 
     def __init__(self) -> None:
         self.received: list[str] = []
+        self.modes = {FOLLOW_MAC: "stop", HUESYNC_MAC: "stop"}
+        self.urls = {FOLLOW_MAC: MOCK_URL, HUESYNC_MAC: MOCK_URL}
         self._event_writer: asyncio.StreamWriter | None = None
         self._listen_connected = asyncio.Event()
         self._server: asyncio.Server | None = None
@@ -67,11 +73,21 @@ class MockLmsServer:
                 await reader.read()
                 return
 
-            if "tags:u" in cmd:
-                encoded_url = urlquote(MOCK_URL, safe="")
+            mac = cmd.split()[0]
+            if cmd.endswith(" mode ?"):
+                writer.write(f"{mac} mode {self.modes[mac]}\n".encode())
+                await writer.drain()
+            elif cmd.endswith(" sync ?"):
+                writer.write(f"{mac} sync {FOLLOW_MAC}\n".encode())
+                await writer.drain()
+            elif "tags:u" in cmd:
+                encoded_url = urlquote(self.urls[mac], safe="")
                 writer.write(f"dummy status 0 1 url%3A{encoded_url}\n".encode())
                 await writer.drain()
             else:
+                if " playlist play " in cmd:
+                    self.modes[mac] = "play"
+                    self.urls[mac] = unquote(cmd.split(" playlist play ", 1)[1])
                 writer.write(f"{cmd}\n".encode())
                 await writer.drain()
         finally:
@@ -425,3 +441,96 @@ def test_master_pause_sends_pause_to_huesync() -> None:
         await server.stop()
 
     asyncio.run(_test())
+
+
+def test_manual_connect_seeds_playback_before_newsong() -> None:
+    async def run():
+        server = MockLmsServer()
+        server.modes[FOLLOW_MAC] = 'play'
+        port = await server.start()
+        follower = LmsFollower('127.0.0.1', FOLLOW_MAC, HUESYNC_MAC, cli_port=port)
+        task = follower.start()
+        try:
+            assert await _wait_for(lambda: f'{FOLLOW_MAC} sync -' in server.received)
+            assert server.play_commands() == [
+                f'{HUESYNC_MAC} playlist play {urlquote(MOCK_URL, safe="")}']
+            assert f'{HUESYNC_MAC} sync -' in server.received
+            # A subsequent newsong still takes the existing mirroring path once.
+            server.urls[FOLLOW_MAC] = 'http://lms.local/next.flac'
+            await server.send_newsong(FOLLOW_MAC, 1)
+            assert await _wait_for(lambda: len(server.play_commands()) == 2)
+            await asyncio.sleep(0.1)
+            assert len(server.play_commands()) == 2
+            assert server.play_commands()[1].endswith(urlquote(server.urls[FOLLOW_MAC], safe=''))
+        finally:
+            await _stop_follower(follower, task)
+            await server.stop()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('mode', ['stop', 'pause'])
+def test_manual_connect_does_not_start_inactive_target(mode) -> None:
+    async def run():
+        server = MockLmsServer()
+        server.modes[FOLLOW_MAC] = mode
+        port = await server.start()
+        follower = LmsFollower('127.0.0.1', FOLLOW_MAC, HUESYNC_MAC, cli_port=port)
+        task = follower.start()
+        try:
+            assert await _wait_for(lambda: f'{FOLLOW_MAC} mode ?' in server.received)
+            await asyncio.sleep(0.1)
+            assert server.play_commands() == []
+        finally:
+            await _stop_follower(follower, task)
+            await server.stop()
+    asyncio.run(run())
+
+
+def test_sync_group_connect_never_seeds_or_mirrors_playback() -> None:
+    async def run():
+        server = MockLmsServer()
+        server.modes[FOLLOW_MAC] = 'play'
+        port = await server.start()
+        follower = LmsSyncGroupObserver('127.0.0.1', HUESYNC_MAC, lambda: [HUESYNC_MAC],
+                                       AsyncMock(), cli_port=port)
+        task = follower.start()
+        try:
+            assert await _wait_for(lambda: follower.target_mac == FOLLOW_MAC)
+            await server.send_newsong(FOLLOW_MAC)
+            await asyncio.sleep(0.1)
+            assert server.play_commands() == []
+            assert not any(' mode ?' in command for command in server.received)
+            assert not any(command.endswith(' sync -') for command in server.received)
+        finally:
+            await _stop_follower(follower, task)
+            await server.stop()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('own_mode,own_url,expected_plays', [
+    ('play', MOCK_URL, 1), ('stop', MOCK_URL, 2),
+    ('play', 'http://lms.local/wrong.flac', 2),
+])
+def test_manual_reconnect_skips_only_already_playing_same_url(
+    own_mode, own_url, expected_plays,
+) -> None:
+    async def run():
+        server = MockLmsServer()
+        server.modes[FOLLOW_MAC] = 'play'
+        port = await server.start()
+        follower = LmsFollower('127.0.0.1', FOLLOW_MAC, HUESYNC_MAC, cli_port=port)
+        task = follower.start()
+        try:
+            assert await _wait_for(lambda: f'{FOLLOW_MAC} sync -' in server.received)
+            server.modes[HUESYNC_MAC] = own_mode
+            server.urls[HUESYNC_MAC] = own_url
+            server._event_writer.close()
+            assert await _wait_for(lambda: server.received.count(f'{HUESYNC_MAC} mode ?') == 2,
+                                   timeout=4)
+            await asyncio.sleep(0.2)
+            assert len(server.play_commands()) == expected_plays
+            assert server.received.count('listen 1') == 2
+        finally:
+            await _stop_follower(follower, task)
+            await server.stop()
+    asyncio.run(run())
