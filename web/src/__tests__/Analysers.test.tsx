@@ -11,6 +11,7 @@ vi.mock('../lib/api', async (importOriginal) => {
     ...actual,
     getAnalysers: vi.fn(),
     getCouplings: vi.fn(),
+    getVirtualPlayers: vi.fn().mockResolvedValue([]),
     createAnalyser: vi.fn(),
     updateAnalyser: vi.fn(),
     deleteAnalyser: vi.fn(),
@@ -23,6 +24,7 @@ import * as api from '../lib/api'
 const mapi = api as {
   getAnalysers: ReturnType<typeof vi.fn>
   getCouplings: ReturnType<typeof vi.fn>
+  getVirtualPlayers: ReturnType<typeof vi.fn>
   createAnalyser: ReturnType<typeof vi.fn>
   updateAnalyser: ReturnType<typeof vi.fn>
   deleteAnalyser: ReturnType<typeof vi.fn>
@@ -44,6 +46,7 @@ const BASE = {
   higher_cutoff_freq: 12000,
   use_hpss_separation: false,
   bars_source: 'cava',
+  spectrum_backend: 'v2',
 }
 
 // ── Helper ────────────────────────────────────────────────────────────────────
@@ -877,5 +880,86 @@ describe('Dual range frequency slider', () => {
     const pct = hzToPercent(1000)
     expect(pct).toBeGreaterThan(55)
     expect(pct).toBeLessThan(58)
+  })
+})
+
+
+describe('Architecture-aware controls', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mapi.getVirtualPlayers.mockResolvedValue([])
+    mapi.updateAnalyser.mockResolvedValue(BASE)
+    mapi.createAnalyser.mockResolvedValue(BASE)
+  })
+
+  it('creates a canonical analyser with the selected CAVA Core engine', async () => {
+    mapi.getAnalysers.mockResolvedValue([])
+    mapi.getCouplings.mockResolvedValue([])
+    const user = userEvent.setup()
+    render(<Analysers />)
+    await user.click(screen.getByText('New analyser'))
+    expect(screen.getByTestId('opt-spectrum-backend-cavacore')).toBeDisabled()
+    await user.click(screen.getByTestId('opt-bars-source-pcm_pipeline'))
+    await user.click(screen.getByTestId('opt-spectrum-backend-cavacore'))
+    await user.click(screen.getByTestId('analyser-save-btn'))
+    expect(mapi.createAnalyser).toHaveBeenCalledWith(expect.objectContaining({
+      bars_source: 'pcm_pipeline', spectrum_backend: 'cavacore',
+    }))
+  })
+
+  it('loads and preserves an existing CAVA Core choice across editor modes and saves', async () => {
+    const user = await renderAndSelect({ ...BASE, bars_source: 'pcm_pipeline', spectrum_backend: 'cavacore' })
+    expect(screen.getByTestId('opt-spectrum-backend-cavacore')).toHaveAttribute('aria-pressed', 'true')
+    await user.click(screen.getByTestId('mode-expert-btn'))
+    await user.click(screen.getByTestId('analyser-save-btn'))
+    expect(mapi.updateAnalyser).toHaveBeenLastCalledWith('a1', expect.objectContaining({ spectrum_backend: 'cavacore' }))
+    await user.click(screen.getByTestId('opt-spectrum-backend-v2'))
+    await user.click(screen.getByTestId('analyser-save-btn'))
+    expect(mapi.updateAnalyser).toHaveBeenLastCalledWith('a1', expect.objectContaining({ spectrum_backend: 'v2' }))
+  })
+
+  it.each(['opt-bars-source-cava', 'reset-audio-source'])('prevents the invalid FIFO/Core combination via %s', async control => {
+    const user = await renderAndSelect({ ...BASE, bars_source: 'pcm_pipeline', spectrum_backend: 'cavacore' })
+    await user.click(screen.getByTestId(control))
+    expect(screen.getByTestId('opt-spectrum-backend-cavacore')).toBeDisabled()
+    expect(screen.getByTestId('opt-spectrum-backend-v2')).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByText(/external CAVA\/FIFO has no engine choice/)).toBeInTheDocument()
+    await user.click(screen.getByTestId('opt-spectrum-backend-cavacore'))
+    await user.click(screen.getByTestId('analyser-save-btn'))
+    expect(mapi.updateAnalyser).toHaveBeenCalledWith('a1', expect.objectContaining({ bars_source: 'cava', spectrum_backend: 'v2' }))
+  })
+
+  it('disables HPSS in PCM without erasing its saved value, and re-enables it for FIFO', async () => {
+    const user = await renderAndSelect({ ...BASE, bars_source: 'pcm_pipeline', use_hpss_separation: true })
+    const checkbox = screen.getByTestId('field-use-hpss')
+    expect(checkbox).toBeDisabled()
+    expect(checkbox).toBeChecked()
+    expect(screen.getByText(/Only applies to the Cava audio source/)).toBeInTheDocument()
+    expect(screen.queryByTestId('reset-hpss')).toBeNull()
+    await user.click(checkbox)
+    await user.click(screen.getByTestId('analyser-save-btn'))
+    expect(mapi.updateAnalyser).toHaveBeenCalledWith('a1', expect.objectContaining({ use_hpss_separation: true }))
+    await user.click(screen.getByTestId('opt-bars-source-cava'))
+    expect(checkbox).toBeEnabled()
+    await user.click(checkbox)
+    expect(checkbox).not.toBeChecked()
+  })
+
+  it.each(['AirPlay', 'LMS'])('warns only for an AirPlay coupling referencing this analyser (%s)', async type => {
+    mapi.getAnalysers.mockResolvedValue([BASE])
+    mapi.getVirtualPlayers.mockResolvedValue([{ id: 'p1', type }, { id: 'p2', type: 'AirPlay' }])
+    mapi.getCouplings.mockResolvedValue([
+      { id: 'c1', analyser_id: 'a1', player_id: 'p1' },
+      { id: 'c2', analyser_id: 'other', player_id: 'p2' },
+    ])
+    const user = userEvent.setup()
+    render(<Analysers />)
+    await user.click(await screen.findByTestId('analyser-item-a1'))
+    expect(screen.getByText('Used by 1 coupling')).toBeInTheDocument()
+    expect(screen.queryByText(/Also used by an AirPlay coupling/) !== null).toBe(type === 'AirPlay')
+    await user.click(screen.getByTestId('opt-bars-source-pcm_pipeline'))
+    expect(screen.queryByText(/Also used by an AirPlay coupling/)).toBeNull()
+    await user.click(screen.getByTestId('reset-audio-source'))
+    expect(screen.queryByText(/Also used by an AirPlay coupling/) !== null).toBe(type === 'AirPlay')
   })
 })

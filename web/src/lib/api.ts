@@ -22,6 +22,11 @@ export const BARS_SOURCE_OPTIONS = [
   { value: 'pcm_pipeline', label: 'PCM Pipeline',  description: 'Direct read from the squeezelite shared-memory PCM tap — same pipeline as AirPlay. No cava process; lower latency.' },
 ] as const
 
+export const SPECTRUM_BACKEND_OPTIONS = [
+  { value: 'v2', label: 'V2', description: 'Shared 2048/Hamming STFT; logarithmic bands, peak EMA normalization and per-bar falloff.' },
+  { value: 'cavacore', label: 'CAVA Core', description: 'Canonical stereo PCM; native 4096/8192 Hann FFTs and CAVA conditioning at 100 Hz. Requires CAVA + FFTW.' },
+] as const
+
 // Canonical list of colour modes — kept as deprecated alias.
 // New code should use EFFECTS instead.
 
@@ -191,6 +196,7 @@ export interface Analyser {
   higher_cutoff_freq: number
   use_hpss_separation: boolean
   bars_source: string
+  spectrum_backend: string
 }
 
 export interface Effect {

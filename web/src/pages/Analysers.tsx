@@ -6,6 +6,9 @@ import { cn } from '@/lib/utils'
 import {
   ONSET_METHODS,
   BARS_SOURCE_OPTIONS,
+  SPECTRUM_BACKEND_OPTIONS,
+  type VirtualPlayer,
+  getVirtualPlayers,
   type Analyser,
   type Coupling,
   getAnalysers,
@@ -20,6 +23,7 @@ import {
 
 const ANALYSER_DEFAULTS = {
   bars_source: 'cava' as const,
+  spectrum_backend: 'v2' as const,
   onset_method: 'combined' as const,
   bars: 30,
   lower_cutoff_freq: 50,
@@ -50,6 +54,7 @@ export function percentToHz(pct: number): number {
 interface Draft {
   name: string
   bars_source: string
+  spectrum_backend: string
   onset_method: string
   bars: string
   lower_cutoff_freq: string
@@ -65,6 +70,7 @@ function defaultDraft(a?: Analyser | null): Draft {
   return {
     name: a?.name ?? '',
     bars_source: a?.bars_source ?? ANALYSER_DEFAULTS.bars_source,
+    spectrum_backend: a?.spectrum_backend ?? ANALYSER_DEFAULTS.spectrum_backend,
     onset_method: a?.onset_method ?? ANALYSER_DEFAULTS.onset_method,
     bars: String(a?.bars ?? ANALYSER_DEFAULTS.bars),
     lower_cutoff_freq: String(a?.lower_cutoff_freq ?? ANALYSER_DEFAULTS.lower_cutoff_freq),
@@ -332,13 +338,14 @@ function AnalyserListItem({ analyser, isActive, isSelected, onSelect }: {
 interface WorkspaceProps {
   analyser: Analyser | null
   couplings: Coupling[]
+  players: VirtualPlayer[]
   onSaved: (a: Analyser) => void
   onDeleted: (id: string) => void
   onCloned: (id: string) => void
   onCancelCreate: () => void
 }
 
-function AnalyserWorkspace({ analyser, couplings, onSaved, onDeleted, onCloned, onCancelCreate }: WorkspaceProps) {
+function AnalyserWorkspace({ analyser, couplings, players, onSaved, onDeleted, onCloned, onCancelCreate }: WorkspaceProps) {
   const isCreating = analyser === null
 
   const [draft, setDraft] = useState<Draft>(() => defaultDraft(analyser))
@@ -347,6 +354,19 @@ function AnalyserWorkspace({ analyser, couplings, onSaved, onDeleted, onCloned, 
   const [saveError, setSaveError] = useState<string | null>(null)
 
   const usedByCount = analyser ? couplings.filter(c => c.analyser_id === analyser.id).length : 0
+
+  const usedByAirPlay = analyser !== null && couplings.some(c =>
+    c.analyser_id === analyser.id && players.some(p => p.id === c.player_id && p.type === 'AirPlay'),
+  )
+  const isPcm = draft.bars_source === 'pcm_pipeline'
+
+  function selectBarsSource(bars_source: string) {
+    setDraft(d => ({
+      ...d,
+      bars_source,
+      spectrum_backend: bars_source === 'cava' ? ANALYSER_DEFAULTS.spectrum_backend : d.spectrum_backend,
+    }))
+  }
 
   // ── isAtDefault checks ────────────────────────────────────────────────────
 
@@ -368,7 +388,7 @@ function AnalyserWorkspace({ analyser, couplings, onSaved, onDeleted, onCloned, 
   // ── Reset actions — operate on local draft only ───────────────────────────
 
   function resetBarsSource() {
-    setDraft(d => ({ ...d, bars_source: ANALYSER_DEFAULTS.bars_source }))
+    selectBarsSource(ANALYSER_DEFAULTS.bars_source)
   }
   function resetOnsetMethod() {
     setDraft(d => ({ ...d, onset_method: ANALYSER_DEFAULTS.onset_method }))
@@ -407,6 +427,7 @@ function AnalyserWorkspace({ analyser, couplings, onSaved, onDeleted, onCloned, 
       const body = {
         name: draft.name.trim() || 'Unnamed',
         bars_source: draft.bars_source,
+        spectrum_backend: draft.spectrum_backend,
         onset_method: draft.onset_method,
         bars: parseInt(draft.bars, 10) || ANALYSER_DEFAULTS.bars,
         lower_cutoff_freq: parseInt(draft.lower_cutoff_freq, 10) || ANALYSER_DEFAULTS.lower_cutoff_freq,
@@ -513,6 +534,12 @@ function AnalyserWorkspace({ analyser, couplings, onSaved, onDeleted, onCloned, 
             Used by {usedByCount} coupling{usedByCount === 1 ? '' : 's'}
           </p>
         )}
+        {draft.bars_source === 'cava' && usedByAirPlay && (
+          <p role="status" className="text-xs text-amber-500 mt-1.5">
+            ⚠ Also used by an AirPlay coupling — the Cava audio source has no effect there.
+            AirPlay uses canonical PCM analysis; the legacy HPSS tap does not apply.
+          </p>
+        )}
       </div>
 
       {/* Two-column configuration workspace */}
@@ -537,7 +564,7 @@ function AnalyserWorkspace({ analyser, couplings, onSaved, onDeleted, onCloned, 
                       key={opt.value}
                       type="button"
                       data-testid={`opt-bars-source-${opt.value}`}
-                      onClick={() => setDraft(d => ({ ...d, bars_source: opt.value }))}
+                      onClick={() => selectBarsSource(opt.value)}
                       className={cn(
                         'text-left rounded border p-2.5 text-sm transition-colors',
                         draft.bars_source === opt.value
@@ -549,6 +576,35 @@ function AnalyserWorkspace({ analyser, couplings, onSaved, onDeleted, onCloned, 
                       <div className="text-xs text-muted-foreground leading-snug mt-0.5">{opt.description}</div>
                     </button>
                   ))}
+                </div>
+                <div className="space-y-2">
+                  <p className="text-xs font-medium">Spectrum engine</p>
+                  <div className="grid grid-cols-2 gap-1.5">
+                    {SPECTRUM_BACKEND_OPTIONS.map(opt => (
+                      <button
+                        key={opt.value}
+                        type="button"
+                        disabled={!isPcm}
+                        aria-pressed={draft.spectrum_backend === opt.value}
+                        data-testid={`opt-spectrum-backend-${opt.value}`}
+                        onClick={() => setDraft(d => ({ ...d, spectrum_backend: opt.value }))}
+                        className={cn(
+                          'text-left rounded border p-2.5 text-sm transition-colors disabled:opacity-50 disabled:cursor-not-allowed',
+                          draft.spectrum_backend === opt.value
+                            ? 'border-primary bg-primary/10'
+                            : 'border-border hover:border-muted-foreground/60',
+                        )}
+                      >
+                        <div className="font-medium leading-tight">{opt.label}</div>
+                        <div className="text-xs text-muted-foreground leading-snug mt-0.5">{opt.description}</div>
+                      </button>
+                    ))}
+                  </div>
+                  {!isPcm && (
+                    <p className="text-xs text-muted-foreground">
+                      Not applicable — external CAVA/FIFO has no engine choice. Select PCM Pipeline to choose an engine.
+                    </p>
+                  )}
                 </div>
               </ConfigSection>
             </div>
@@ -728,7 +784,7 @@ function AnalyserWorkspace({ analyser, couplings, onSaved, onDeleted, onCloned, 
             <div data-testid="section-advanced-processing">
               <ConfigSection
                 title="Harmonic / Percussive Separation"
-                onReset={resetHpss}
+                onReset={isPcm ? undefined : resetHpss}
                 isAtDefault={isDefaultHpss}
                 resetTestId="reset-hpss"
               >
@@ -736,18 +792,20 @@ function AnalyserWorkspace({ analyser, couplings, onSaved, onDeleted, onCloned, 
                   <input
                     id="hpss-check"
                     type="checkbox"
+                    disabled={isPcm}
                     checked={draft.use_hpss_separation}
                     onChange={e => setDraft(d => ({ ...d, use_hpss_separation: e.target.checked }))}
-                    className="mt-0.5 h-4 w-4 shrink-0 cursor-pointer"
+                    className="mt-0.5 h-4 w-4 shrink-0 cursor-pointer disabled:cursor-not-allowed disabled:opacity-50"
                     data-testid="field-use-hpss"
                   />
                   <div>
-                    <label htmlFor="hpss-check" className="text-sm font-medium cursor-pointer">
+                    <label htmlFor="hpss-check" className={cn("text-sm font-medium", isPcm ? "text-muted-foreground/50 cursor-not-allowed" : "cursor-pointer")}>
                       Enable separation
                     </label>
                     <p className="text-xs text-muted-foreground mt-0.5">
-                      Splits audio into rhythm and melody layers. Beat-driven effects react to percussion;
-                      energy-based effects react to melody and harmony.
+                      {isPcm
+                        ? 'Only applies to the Cava audio source (legacy PCM tap); canonical PCM analysis does not use HPSS.'
+                        : 'Splits audio into rhythm and melody layers. Beat-driven effects react to percussion; energy-based effects react to melody and harmony.'}
                     </p>
                   </div>
                 </div>
@@ -865,6 +923,7 @@ function AnalyserWorkspace({ analyser, couplings, onSaved, onDeleted, onCloned, 
 export function Analysers({ activeCouplingId = null }: { activeCouplingId?: string | null }) {
   const [analysers, setAnalysers] = useState<Analyser[]>([])
   const [couplings, setCouplings] = useState<Coupling[]>([])
+  const [players, setPlayers] = useState<VirtualPlayer[]>([])
   const activeCoupling = couplings.find(c => c.id === activeCouplingId)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -874,9 +933,10 @@ export function Analysers({ activeCouplingId = null }: { activeCouplingId?: stri
 
   async function loadAll() {
     try {
-      const [as, cs] = await Promise.all([getAnalysers(), getCouplings()])
+      const [as, cs, ps] = await Promise.all([getAnalysers(), getCouplings(), getVirtualPlayers()])
       setAnalysers(as)
       setCouplings(cs)
+      setPlayers(ps)
       setError(null)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to load')
@@ -974,6 +1034,7 @@ export function Analysers({ activeCouplingId = null }: { activeCouplingId?: stri
               key={workspaceKey}
               analyser={selectedAnalyser}
               couplings={couplings}
+              players={players}
               onSaved={handleSaved}
               onDeleted={handleDelete}
               onCloned={handleClone}
