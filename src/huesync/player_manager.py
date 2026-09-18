@@ -1271,6 +1271,8 @@ class PlayerManager:
             'general = {\n'
             f'  name = "{name}";\n'
             '  output_backend = "pipe";\n'
+            '  // Analysis-only receiver: full-scale PCM regardless of source volume.\n'
+            '  ignore_volume_control = "yes";\n'
             '}\n'
             'pipe = {\n'
             '  name = "/run/huesync/airplay.pcm";\n'

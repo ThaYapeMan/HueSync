@@ -64,7 +64,7 @@ check_build_requirements() {
         fi
     done
 
-    for spec in "plistutil:libplist-utils" "xxd:xxd"; do
+    for spec in "plistutil:libplist-utils" "xxd:xxd" "python3:python3"; do
         local tool="${spec%%:*}" deb="${spec##*:}"
         if ! command -v "$tool" &>/dev/null; then
             missing+=("  [MISSING] tool ${tool}  →  apt install ${deb}")
@@ -217,6 +217,8 @@ cat > /usr/local/etc/shairport-sync.conf << 'EOF'
 general = {
   name = "HueSync";
   output_backend = "pipe";
+  // Analysis-only receiver: full-scale PCM regardless of source volume.
+  ignore_volume_control = "yes";
 }
 
 pipe = {
@@ -233,6 +235,57 @@ metadata = {
 }
 EOF
 fi
+# Upgrade existing configs too; preserve unrelated operator settings. Parse the
+# general section conservatively and replace atomically only after validation.
+python3 - /usr/local/etc/shairport-sync.conf << 'PY_VOLUME'
+import os
+from pathlib import Path
+import re
+import sys
+import tempfile
+
+path = Path(sys.argv[1])
+original = path.read_text()
+# Mask comments without changing offsets; quoted strings are left intact.
+visible = re.sub(
+    r'"(?:\\.|[^"\\])*"|//[^\n]*|/\*[\s\S]*?\*/|\#[^\n]*',
+    lambda m: m[0] if m[0].startswith('"') else ' ' * len(m[0]),
+    original,
+)
+sections = list(re.finditer(r'\bgeneral\s*=\s*\{([^{}]*)\}', visible))
+if len(sections) != 1:
+    sys.exit('Cannot safely update AirPlay volume: expected one simple general section')
+section = sections[0]
+body = section[1]
+settings = list(re.finditer(r'\bignore_volume_control\s*=\s*"(?:yes|no)"\s*;', body))
+if len(settings) > 1 or body.count('ignore_volume_control') != len(settings):
+    sys.exit('Cannot safely update AirPlay volume: ambiguous ignore_volume_control setting')
+comment = '// Analysis-only receiver: full-scale PCM regardless of source volume.'
+if settings:
+    setting = settings[0]
+    start, end = (section.start(1) + pos for pos in setting.span())
+    replacement = 'ignore_volume_control = "yes";'
+    if comment not in original[section.start():section.end()]:
+        replacement = comment + '\n  ' + replacement
+else:
+    start = end = section.end(1)
+    replacement = '  ' + comment + '\n  ignore_volume_control = "yes";\n'
+updated = original[:start] + replacement + original[end:]
+if updated != original:
+    stat = path.stat()
+    fd, temporary = tempfile.mkstemp(prefix='.shairport-volume-', dir=path.parent)
+    try:
+        with os.fdopen(fd, 'w') as output:
+            output.write(updated)
+            output.flush()
+            os.fsync(output.fileno())
+            os.fchown(output.fileno(), stat.st_uid, stat.st_gid)
+            os.fchmod(output.fileno(), stat.st_mode & 0o777)
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+PY_VOLUME
 # Allow the huesync service to overwrite the name field at activation time.
 chown huesync:huesync /usr/local/etc/shairport-sync.conf
 

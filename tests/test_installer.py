@@ -16,6 +16,8 @@ import tomllib
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 ROOT = Path(__file__).parent.parent
 
 
@@ -96,6 +98,8 @@ def test_shairport_config_pcm_contract(tmp_path: Path) -> None:
     assert f"output_channels = {_EXPECTED_CHANNELS}" in text
     assert _EXPECTED_FIFO in text
     assert 'output_backend = "pipe"' in text
+    assert 'ignore_volume_control = "yes";' in text
+    assert "Analysis-only receiver" in text
 
 
 def test_shairport_config_name_substitution(tmp_path: Path) -> None:
@@ -307,6 +311,52 @@ def test_setup_airplay_sh_pcm_contract() -> None:
     assert _EXPECTED_FIFO in script, (
         "setup-airplay.sh must reference the canonical FIFO path"
     )
+
+
+def test_setup_airplay_config_ignores_source_volume() -> None:
+    """The analysis-only receiver must not attenuate PCM with source volume."""
+    script = (ROOT / "scripts" / "setup-airplay.sh").read_text()
+    config = script.split("cat > /usr/local/etc/shairport-sync.conf << 'EOF'\n", 1)[1]
+    config = config.split("\nEOF", 1)[0]
+    general = config.split("general = {", 1)[1].split("}", 1)[0]
+    assert 'ignore_volume_control = "yes";' in general
+    assert "Analysis-only receiver" in general
+
+
+@pytest.mark.parametrize("setting", ["", '  ignore_volume_control = "no";\n',
+                                     '  ignore_volume_control = "yes";\n'])
+def test_airplay_volume_upgrade_preserves_config(tmp_path: Path, setting: str) -> None:
+    script = (ROOT / "scripts" / "setup-airplay.sh").read_text()
+    updater = script.split("<< 'PY_VOLUME'\n", 1)[1].split("\nPY_VOLUME", 1)[0]
+    config = tmp_path / "shairport-sync.conf"
+    prefix = 'general = {\n  name = "Custom receiver";\n'
+    suffix = '}\npipe = { name = "/run/huesync/airplay.pcm"; }\n'
+    config.write_text(prefix + setting + suffix)
+    config.chmod(0o640)
+    subprocess.run([sys.executable, "-", str(config)], input=updater, text=True, check=True)
+    updated = config.read_text()
+    assert updated.startswith(prefix)
+    assert updated.endswith(suffix)
+    assert updated.count('ignore_volume_control = "yes";') == 1
+    assert "Analysis-only receiver" in updated
+    assert config.stat().st_mode & 0o777 == 0o640
+    before = config.stat().st_mtime_ns
+    subprocess.run([sys.executable, "-", str(config)], input=updater, text=True, check=True)
+    assert config.read_text() == updated
+    assert config.stat().st_mtime_ns == before
+
+
+def test_airplay_volume_upgrade_rejects_ambiguous_config(tmp_path: Path) -> None:
+    script = (ROOT / "scripts" / "setup-airplay.sh").read_text()
+    updater = script.split("<< 'PY_VOLUME'\n", 1)[1].split("\nPY_VOLUME", 1)[0]
+    config = tmp_path / "shairport-sync.conf"
+    original = b'general = { ignore_volume_control = "no"; ignore_volume_control = "yes"; }'
+    config.write_bytes(original)
+    result = subprocess.run([sys.executable, "-", str(config)], input=updater,
+                            text=True, capture_output=True)
+    assert result.returncode != 0
+    assert "ambiguous" in result.stderr
+    assert config.read_bytes() == original
 
 
 def test_setup_airplay_sh_tmpfiles_d_directory_entry() -> None:
