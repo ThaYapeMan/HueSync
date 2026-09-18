@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -22,7 +23,7 @@ from .hue_bridge import list_entertainment_areas
 from .hue_output import ChannelInfo, HueDriver, HueOutputConfig, get_channel_infos
 from .latency import FixedLatencyProbe, NoLatencyProbe
 from .lms_discovery import discover_lms
-from .lms_follower import LmsFollower, LmsSyncGroupObserver
+from .lms_follower import LmsFollower, LmsSyncGroupObserver, TransportAction
 from .lms_status import query_lms_status, query_lms_sync_peers, unsync_player
 from .models import BridgeConfig, Controller, Coupling, Profile, VirtualPlayerType
 from .pcm_source import (
@@ -269,6 +270,48 @@ class PlayerManager:
     @property
     def detected_sync_master_name(self) -> str | None:
         return self._detected_sync_master_name
+
+    @property
+    def follow_target_mac(self) -> str | None:
+        session = self._active
+        if (not session or session.stopping or session.player_type != VirtualPlayerType.LMS
+                or not session.follower):
+            return None
+        target = session.follower.target_mac
+        managed = {p.player_mac.lower() for p in self.storage.list_virtual_players()}
+        managed.add(session.profile.player_mac.lower())
+        if (not target or not re.fullmatch(r"(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}", target)
+                or target.lower() in managed):
+            return None
+        return target
+
+    @property
+    def follow_target_name(self) -> str | None:
+        target = self.follow_target_mac
+        if target and target == self._detected_sync_master:
+            return self._detected_sync_master_name or target
+        return target
+
+    async def control_followed_player(self, coupling_id: str, action: TransportAction) -> str:
+        session = self._active
+        if not session or session.stopping or self.active_coupling_id != coupling_id:
+            raise RuntimeError("Coupling is not active")
+        # AirPlay transport needs Shairport's DACP/MPRIS remote-control path;
+        # it is deliberately outside this LMS-only endpoint.
+        target = self.follow_target_mac
+        if target is None or session.follower is None:
+            raise RuntimeError("No controllable followed LMS player")
+        task = asyncio.create_task(
+            asyncio.to_thread(session.follower.control_target, action, target)
+        )
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            # Keep the API mutation guard until the bounded CLI write finishes,
+            # so teardown/replacement cannot overtake an abandoned command.
+            await task
+            raise
+        return target
 
     @property
     def follower_warning(self) -> str | None:

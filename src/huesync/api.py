@@ -27,6 +27,7 @@ from .backup import (
 )
 from .hue_output import get_channel_infos
 from .lms_discovery import discover_lms
+from .lms_follower import TransportAction
 from .lms_status import list_lms_players
 from .models import (
     EFFECT_IDS,
@@ -1240,6 +1241,24 @@ class RestartCouplingCavaBody(BaseModel):
     higher_cutoff_freq: int | None = None
     bass_hz: int | None = None
     mid_hz: int | None = None
+
+
+class TransportBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    action: TransportAction
+
+
+@router.post("/couplings/{coupling_id}/transport")
+async def control_coupling_transport(coupling_id: str, body: TransportBody, request: Request):
+    if _storage(request).get_coupling(coupling_id) is None:
+        raise HTTPException(status_code=404, detail="Coupling not found")
+    try:
+        target = await _manager(request).control_followed_player(coupling_id, body.action)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(status_code=502, detail="LMS transport command failed") from exc
+    return {"ok": True, "target_mac": target}
 
 
 # Register /couplings/{id}/restart-cava BEFORE /couplings/{id} so FastAPI

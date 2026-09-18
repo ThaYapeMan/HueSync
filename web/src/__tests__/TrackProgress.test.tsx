@@ -1,7 +1,10 @@
-import { act, cleanup, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { TrackProgress } from '@/components/TrackProgress'
 import type { TrackPosition } from '@/hooks/usePreviewSocket'
+
+import { controlCouplingTransport } from '@/lib/api'
+vi.mock('@/lib/api', () => ({ controlCouplingTransport: vi.fn() }))
 
 const track: TrackPosition = {
   title: 'One song', artist: 'One artist', position_s: 83, duration_s: 225, playing: true,
@@ -59,5 +62,34 @@ describe('player-independent track display', () => {
     act(() => vi.advanceTimersByTime(5000))
     expect(screen.getByText('1:23 / 3:45 · Disconnected')).toBeInTheDocument()
     expect(screen.getByRole('progressbar')).toHaveAttribute('aria-valuenow', '83')
+  })
+})
+
+
+describe('followed-player controls', () => {
+  const transport = { couplingId: 'active', targetName: 'Living room' }
+  it('sends all four actions without optimistically changing playback state', async () => {
+    vi.mocked(controlCouplingTransport).mockResolvedValue({ ok: true, target_mac: 'room' })
+    const view = render(<TrackProgress track={track} connected transport={transport} />)
+    expect(screen.getByRole('group')).toHaveAttribute('title', 'Controls the followed player (Living room)')
+    for (const [label, action] of [['Previous', 'previous'], ['Pause', 'pause'], ['Next', 'next'], ['Stop', 'stop']]) {
+      fireEvent.click(screen.getByRole('button', { name: label }))
+      await waitFor(() => expect(controlCouplingTransport).toHaveBeenLastCalledWith('active', action))
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Pause' })).toBeEnabled())
+    }
+    expect(screen.queryByRole('button', { name: 'Play' })).not.toBeInTheDocument()
+    view.rerender(<TrackProgress track={{ ...track, playing: false }} connected transport={transport} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Play' }))
+    await waitFor(() => expect(controlCouplingTransport).toHaveBeenLastCalledWith('active', 'play'))
+  })
+  it('shows command failures and disables controls while disconnected', async () => {
+    vi.mocked(controlCouplingTransport).mockRejectedValue(new Error('No controllable followed LMS player'))
+    const view = render(<TrackProgress track={track} connected transport={transport} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Pause' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('No controllable followed LMS player')
+    view.rerender(<TrackProgress track={track} connected={false} transport={transport} />)
+    for (const button of screen.getAllByRole('button')) expect(button).toBeDisabled()
+    view.rerender(<TrackProgress track={track} connected />)
+    expect(screen.queryByRole('group')).not.toBeInTheDocument()
   })
 })

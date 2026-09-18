@@ -59,9 +59,10 @@ function StatusRow({ label, children }: { label: string; children: React.ReactNo
   )
 }
 
-function StatusGrid({ status, analyser }: {
+function StatusGrid({ status, analyser, playerType }: {
   status: SocketStatus | null
   analyser?: Analyser
+  playerType?: string | null
 }) {
   const unknown = <span className="text-muted-foreground">—</span>
   return (
@@ -80,7 +81,7 @@ function StatusGrid({ status, analyser }: {
         {status?.effect_type ? <code className="text-xs font-mono">{status.effect_type}</code> : unknown}
       </StatusRow>
       <StatusRow label="Sync master">
-        {status?.sync_master ? (
+        {playerType === 'AirPlay' ? <span className="text-muted-foreground">n/a</span> : status?.sync_master ? (
           <div>
             {status.sync_master_name && <div className="font-medium">{status.sync_master_name}</div>}
             <code className="text-xs font-mono text-muted-foreground">{status.sync_master}</code>
@@ -411,7 +412,10 @@ export function NowPlaying({ colour, channel_colours, onset, onset_bass = false,
         onChanged={() => setReloadKey((k) => k + 1)}
       />
 
-      <TrackProgress track={status?.track ?? null} connected={connected} />
+      <TrackProgress track={status?.track ?? null} connected={connected}
+        transport={playerType === 'LMS' && couplingId && status?.follow_target_mac ? {
+          couplingId, targetName: status.follow_target_name || status.follow_target_mac,
+        } : undefined} />
 
       <Card>
         <CardHeader className="pb-3">
@@ -438,7 +442,7 @@ export function NowPlaying({ colour, channel_colours, onset, onset_bass = false,
             </div>
             <div className="min-w-0 lg:aspect-square">
               <h3 className="text-xs text-muted-foreground uppercase tracking-wider mb-3">Status</h3>
-              <StatusGrid status={status} analyser={activeAnalyser} />
+              <StatusGrid status={status} analyser={activeAnalyser} playerType={playerType} />
             </div>
           </div>
           <div className="mt-3">

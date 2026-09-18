@@ -67,6 +67,8 @@ def _make_mock_manager() -> MagicMock:
     type(manager).active_onset_method = PropertyMock(return_value=None)
     type(manager).active_lower_cutoff_freq = PropertyMock(return_value=None)
     type(manager).active_higher_cutoff_freq = PropertyMock(return_value=None)
+    type(manager).follow_target_mac = PropertyMock(return_value=None)
+    type(manager).follow_target_name = PropertyMock(return_value=None)
     type(manager).active_player_type = PropertyMock(return_value=None)
     type(manager).airplay_receiving = PropertyMock(return_value=None)
     # active_bars_source drives cross-mode analyser_id routing in
@@ -1620,3 +1622,110 @@ def test_ws_loudness_is_valid_json(client, values, expected):
 def test_ws_preview_reports_active_bars_source(client, bars_source):
     type(client._manager).active_bars_source = PropertyMock(return_value=bars_source)
     assert _read_ws_status(client)["active_bars_source"] == bars_source
+
+
+@pytest.fixture()
+def transport_session(client, monkeypatch):
+    """Real manager/follower routing; stub only the final CLI socket exchange."""
+    from huesync.lms_follower import LmsFollower
+    from huesync.models import Profile
+    from huesync.player_manager import ActiveSession, PlayerManager
+
+    player = VirtualPlayer(player_mac="02:00:00:00:00:01",
+                           follow_player_mac="33:33:33:33:33:33")
+    client._storage.save_virtual_player(player)
+    coupling = Coupling(player_id=player.id)
+    client._storage.save_coupling(coupling)
+    manager = PlayerManager(client._storage)
+    session = ActiveSession(Profile(player_mac=player.player_mac), coupling)
+    session.follower = LmsFollower("lms.local", "aa:bb:cc:dd:ee:ff", player.player_mac,
+                                   cli_port=19090)
+    manager._active = session
+    app.state.player_manager = manager
+    exchange = MagicMock(return_value="OK")
+    monkeypatch.setattr("huesync.lms_follower._cli_exchange", exchange)
+    return manager, session, exchange, coupling
+
+
+@pytest.mark.parametrize("mode", ["manual", "sync_group"])
+@pytest.mark.parametrize("action,command", [
+    ("play", "play"), ("pause", "pause 1"), ("toggle", "pause"),
+    ("stop", "stop"), ("next", "playlist index +1"), ("previous", "playlist index -1"),
+])
+def test_transport_sends_exact_command_only_to_live_follow_target(
+    client, transport_session, action, command, mode,
+):
+    from huesync.lms_follower import LmsSyncGroupObserver
+
+    manager, session, exchange, coupling = transport_session
+    if mode == "sync_group":
+        session.follower = LmsSyncGroupObserver(
+            "lms.local", session.profile.player_mac, lambda: [], AsyncMock(), cli_port=19090)
+        session.follower._follow_mac = "aa:bb:cc:dd:ee:ff"
+    response = client.post(f"/api/couplings/{coupling.id}/transport", json={"action": action})
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "target_mac": "aa:bb:cc:dd:ee:ff"}
+    exchange.assert_called_once_with("lms.local", 19090, f"aa:bb:cc:dd:ee:ff {command}\n")
+    # The next request uses the newly selected target, not configuration or a cached MAC.
+    session.follower._follow_mac = "aa:bb:cc:dd:ee:00"
+    exchange.reset_mock()
+    assert client.post(f"/api/couplings/{coupling.id}/transport",
+                       json={"action": action}).status_code == 200
+    exchange.assert_called_once_with("lms.local", 19090, f"aa:bb:cc:dd:ee:00 {command}\n")
+
+
+@pytest.mark.parametrize("invalid", ["inactive", "airplay", "missing_target", "self", "managed",
+                                     "stopping", "invalid_mac", "no_follower", "other_coupling"])
+def test_transport_rejects_uncontrollable_session_without_cli(client, transport_session, invalid):
+    from huesync.models import VirtualPlayerType
+
+    manager, session, exchange, coupling = transport_session
+    if invalid == "inactive":
+        manager._active = None
+    elif invalid == "airplay":
+        session.player_type = VirtualPlayerType.AIRPLAY
+    elif invalid == "missing_target":
+        session.follower._follow_mac = ""
+    elif invalid == "self":
+        session.follower._follow_mac = session.profile.player_mac
+    elif invalid == "managed":
+        client._storage.save_virtual_player(VirtualPlayer(player_mac="aa:bb:cc:dd:ee:ff"))
+    elif invalid == "stopping":
+        session.stopping = True
+    elif invalid == "invalid_mac":
+        session.follower._follow_mac = "aa:bb:cc:dd:ee:ff\nstop"
+    elif invalid == "no_follower":
+        session.follower = None
+    elif invalid == "other_coupling":
+        coupling = Coupling()
+        client._storage.save_coupling(coupling)
+    response = client.post(f"/api/couplings/{coupling.id}/transport", json={"action": "stop"})
+    assert response.status_code == 409
+    exchange.assert_not_called()
+
+
+def test_transport_missing_coupling_invalid_action_and_cli_failure(client, transport_session):
+    _, _, exchange, coupling = transport_session
+    response = client.post("/api/couplings/missing/transport", json={"action": "stop"})
+    assert response.status_code == 404
+    assert client.post(f"/api/couplings/{coupling.id}/transport",
+                       json={"action": "arbitrary"}).status_code == 422
+    assert client.post(f"/api/couplings/{coupling.id}/transport",
+                       json={"action": "stop", "mac": "other"}).status_code == 422
+    exchange.assert_not_called()
+    exchange.side_effect = OSError("offline")
+    response = client.post(f"/api/couplings/{coupling.id}/transport", json={"action": "stop"})
+    assert response.status_code == 502
+    assert response.json()["detail"] == "LMS transport command failed"
+
+
+def test_transport_status_uses_current_target_and_matching_name(client, transport_session):
+    manager, session, _, _ = transport_session
+    manager._detected_sync_master = session.follower.target_mac
+    manager._detected_sync_master_name = "Living room"
+    status = _read_ws_status(client)
+    assert status["active_player_type"] == "LMS"
+    assert status["follow_target_mac"] == "aa:bb:cc:dd:ee:ff"
+    assert status["follow_target_name"] == "Living room"
+    session.follower._follow_mac = "aa:bb:cc:dd:ee:00"
+    assert manager.follow_target_name == "aa:bb:cc:dd:ee:00"  # not the stale room name

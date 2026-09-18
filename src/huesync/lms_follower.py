@@ -22,9 +22,16 @@ import logging
 import socket
 import time
 from collections.abc import Awaitable, Callable, Iterable
+from typing import Literal
 from urllib.parse import quote, unquote
 
 from .lms_status import query_lms_status
+
+TransportAction = Literal["play", "pause", "toggle", "stop", "next", "previous"]
+_TRANSPORT_COMMANDS = {
+    "play": "play", "pause": "pause 1", "toggle": "pause", "stop": "stop",
+    "next": "playlist index +1", "previous": "playlist index -1",
+}
 
 log = logging.getLogger(__name__)
 
@@ -272,6 +279,18 @@ class LmsFollower:
     # ------------------------------------------------------------------
     # Blocking helpers (run in a thread via asyncio.to_thread)
     # ------------------------------------------------------------------
+
+    def control_target(self, action: TransportAction, expected_mac: str) -> None:
+        """Explicit user control of the room, separate from automatic mirroring.
+
+        Also usable by the sync-group observer: it remains passive unless the
+        user explicitly requests transport. Never send to our virtual player.
+        """
+        target = self.target_mac
+        if not target or target != expected_mac or target.lower() == self._huesync_mac.lower():
+            raise RuntimeError("Follow target changed or is unavailable")
+        command = _TRANSPORT_COMMANDS[action]
+        _cli_exchange(self._host, self._port, f"{target} {command}\n")
 
     def _query_mode(self, mac: str) -> str | None:
         raw = _cli_exchange(self._host, self._port, f"{mac} mode ?\n")

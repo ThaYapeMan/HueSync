@@ -1,4 +1,6 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { Pause, Play, SkipBack, SkipForward, Square } from 'lucide-react'
+import { controlCouplingTransport, type TransportAction } from '@/lib/api'
 import type { TrackPosition } from '@/hooks/usePreviewSocket'
 
 function clock(seconds: number | null): string {
@@ -8,9 +10,10 @@ function clock(seconds: number | null): string {
 }
 
 /** Generic delivery-time anchor: neither player identity nor server clock is needed. */
-export function TrackProgress({ track, connected }: {
+export function TrackProgress({ track, connected, transport }: {
   track: TrackPosition | null
   connected: boolean
+  transport?: { couplingId: string; targetName: string }
 }) {
   const [elapsed, setElapsed] = useState<number | null>(track?.position_s ?? null)
   useEffect(() => {
@@ -26,6 +29,19 @@ export function TrackProgress({ track, connected }: {
     const timer = setInterval(update, 250)
     return () => clearInterval(timer)
   }, [track, connected])
+  const [busy, setBusy] = useState(false)
+  const pending = useRef(false)
+  const [error, setError] = useState<string | null>(null)
+  useEffect(() => { setError(null) }, [transport?.couplingId, transport?.targetName])
+  async function send(action: TransportAction) {
+    if (!transport || pending.current || !connected) return
+    pending.current = true
+    setBusy(true)
+    setError(null)
+    try { await controlCouplingTransport(transport.couplingId, action) }
+    catch (e) { setError(e instanceof Error ? e.message : 'Transport failed') }
+    finally { pending.current = false; setBusy(false) }
+  }
   const duration = track?.duration_s ?? null
   return (
     <div className="relative flex items-center gap-3 overflow-hidden rounded-md border border-border bg-card px-3 py-2">
@@ -39,6 +55,24 @@ export function TrackProgress({ track, connected }: {
           </>
         )}
       </div>
+      {transport && (
+        <div className="flex shrink-0 items-center gap-1" role="group"
+          aria-label={`Controls the followed player (${transport.targetName})`}
+          title={`Controls the followed player (${transport.targetName})`}>
+          {([
+            ['previous', 'Previous', SkipBack],
+            [track?.playing ? 'pause' : 'play', track?.playing ? 'Pause' : 'Play', track?.playing ? Pause : Play],
+            ['next', 'Next', SkipForward], ['stop', 'Stop', Square],
+          ] as const).map(([action, label, Icon]) => (
+            <button key={label} type="button" aria-label={label} title={label}
+              disabled={busy || !connected} onClick={() => void send(action)}
+              className="rounded p-0.5 text-muted-foreground hover:text-foreground focus-visible:outline focus-visible:outline-2 disabled:opacity-40">
+              <Icon className="h-4 w-4" aria-hidden="true" />
+            </button>
+          ))}
+        </div>
+      )}
+      {error && <span role="alert" className="max-w-32 truncate text-xs text-destructive" title={error}>{error}</span>}
       <div className="shrink-0 whitespace-nowrap text-xs text-muted-foreground font-mono">
         {clock(elapsed)} / {clock(duration)}
         {!connected && ' · Disconnected'}

@@ -9,6 +9,8 @@ export interface TrackPosition {
 }
 
 export interface SocketStatus {
+  follow_target_mac?: string | null
+  follow_target_name?: string | null
   track?: TrackPosition | null
   version: string | null
   active_coupling_id: string | null

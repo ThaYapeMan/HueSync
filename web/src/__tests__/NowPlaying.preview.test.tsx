@@ -107,3 +107,22 @@ it('shows the external cava engine and takes beat detection from the analyser, n
   expect(within(dl).queryByText('Combined')).not.toBeInTheDocument()
   expect(within(dl).queryByText('V2')).not.toBeInTheDocument()
 })
+
+
+it('only exposes transport for LMS with a live follow target; AirPlay sync is n/a', async () => {
+  const view = render(<NowPlaying {...props} status={{ ...status,
+    active_player_type: 'LMS', follow_target_mac: 'aa:bb:cc:dd:ee:ff',
+    follow_target_name: 'Living room',
+  }} />)
+  expect(screen.getByRole('group', { name: 'Controls the followed player (Living room)' })).toBeInTheDocument()
+  view.rerender(<NowPlaying {...props} status={{ ...status, active_player_type: 'LMS', follow_target_mac: null }} />)
+  expect(screen.queryByRole('button', { name: 'Previous' })).not.toBeInTheDocument()
+  view.rerender(<NowPlaying {...props} status={{ ...status,
+    active_player_type: 'AirPlay', follow_target_mac: 'stale',
+  }} />)
+  expect(screen.queryByRole('button', { name: 'Previous' })).not.toBeInTheDocument()
+  const dl = screen.getByLabelText('Session status')
+  expect(within(dl).getByText('n/a')).toHaveClass('text-muted-foreground')
+  expect(within(dl).getByText('1100 ms')).toBeInTheDocument()
+  await within(dl).findByText('PCM Pipeline')
+})
