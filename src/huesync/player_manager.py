@@ -437,6 +437,12 @@ class PlayerManager:
         return bool(self._active and self._active.hue_driver)
 
     @property
+    def preview_spectrum(self) -> tuple[list[float], list[float] | None]:
+        if self._active and self._active.sync_engine:
+            return self._active.sync_engine.preview_spectrum
+        return [], None
+
+    @property
     def last_bars(self) -> list[float]:
         if self._active and self._active.sync_engine:
             return self._active.sync_engine.last_bars

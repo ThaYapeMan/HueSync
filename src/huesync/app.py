@@ -116,9 +116,11 @@ async def ws_preview(websocket: WebSocket):
             })
 
             if tick % 3 == 0:
+                raw_bars, normalised_bars = player_manager.preview_spectrum
                 await websocket.send_json({
                     "type": "spectrum",
-                    "bars": player_manager.last_bars,
+                    "bars": raw_bars,
+                    **({"normalised_bars": normalised_bars} if normalised_bars is not None else {}),
                 })
 
             track = player_manager.track_position

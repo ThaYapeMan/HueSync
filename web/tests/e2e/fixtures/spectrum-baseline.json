@@ -1,0 +1,32 @@
+{
+  "track-block": {
+    "x": 300,
+    "y": 252,
+    "width": 976,
+    "height": 116
+  },
+  "colour-preview-size": {
+    "x": 321,
+    "y": 433,
+    "width": 295.328125,
+    "height": 295.328125
+  },
+  "floorplan-preview-size": {
+    "x": 640.328125,
+    "y": 433,
+    "width": 295.328125,
+    "height": 295.328125
+  },
+  "spectrum-panel": {
+    "x": 300,
+    "y": 909.328125,
+    "width": 976,
+    "height": 451
+  },
+  "status": {
+    "x": 959.65625,
+    "y": 461,
+    "width": 295.34375,
+    "height": 160
+  }
+}

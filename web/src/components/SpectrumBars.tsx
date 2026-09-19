@@ -1,3 +1,6 @@
+import { useLayoutEffect, useRef, useState } from 'react'
+import { outlineColours, type RGB } from '@/lib/spectrumContrast'
+
 const PLACEHOLDER_COUNT = 30
 
 const BAND_COLORS = {
@@ -23,6 +26,7 @@ function bandAvg(bars: number[], lo: number, hi: number): number {
 
 interface Props {
   bars: number[]
+  normalisedBars?: number[]
   colorMode: string | null
   lowerCutoffHz?: number
   higherCutoffHz?: number
@@ -35,6 +39,7 @@ interface Props {
 
 export function SpectrumBars({
   bars,
+  normalisedBars,
   colorMode,
   lowerCutoffHz = 50,
   higherCutoffHz = 12000,
@@ -44,6 +49,21 @@ export function SpectrumBars({
   onsetMid = false,
   onsetTreble = false,
 }: Props) {
+  const surfaceRef = useRef<HTMLDivElement>(null)
+  const [colours, setColours] = useState<{ surface: RGB; accent: RGB }>({ surface: [29, 32, 37], accent: [124, 92, 255] })
+  useLayoutEffect(() => {
+    const read = () => {
+      if (!surfaceRef.current) return
+      const style = getComputedStyle(surfaceRef.current)
+      const rgb = (value: string): RGB => (value.match(/[\d.]+/g)?.slice(0, 3).map(Number) ?? [0, 0, 0]) as RGB
+      setColours({ surface: rgb(style.backgroundColor), accent: rgb(style.color) })
+    }
+    read()
+    const observer = new MutationObserver(read)
+    observer.observe(document.documentElement, { attributes: true })
+    return () => observer.disconnect()
+  }, [])
+  const overlay = normalisedBars?.length === bars.length && bars.length > 0 ? normalisedBars : undefined
   const data = bars.length > 0 ? bars : Array(PLACEHOLDER_COUNT).fill(0)
   const n = data.length
   const isRgb = colorMode === 'spectrum_rgb'
@@ -77,7 +97,8 @@ export function SpectrumBars({
   }
 
   return (
-    <div>
+    <div ref={surfaceRef} className="bg-card" style={{ color: 'hsl(var(--accent))' }}
+      role="img" aria-label={`Spectrum bass ${bandAvg(data, 0, bassHi).toFixed(2)}, mid ${bandAvg(data, bassHi, midHi).toFixed(2)}, treble ${bandAvg(data, midHi, n).toFixed(2)}${overlay ? `; normalised ${bandAvg(overlay, 0, bassHi).toFixed(2)}, ${bandAvg(overlay, bassHi, midHi).toFixed(2)}, ${bandAvg(overlay, midHi, n).toFixed(2)}` : ''}`}>
       <div className="relative h-20 flex items-end gap-px">
         {data.map((v, i) => {
           let bg: string
@@ -88,17 +109,23 @@ export function SpectrumBars({
           } else {
             bg = 'hsl(var(--accent))'
           }
+          const opacity = Math.max(v, 0.18)
+          const band = isRgb ? bg.match(/\d+/g)!.map(Number) as RGB : colours.accent
+          const outline = outlineColours(band, colours.surface, opacity)
           return (
-            <div
-              key={i}
-              className="flex-1 rounded-sm"
-              style={{
-                height: `${Math.max(v * 100, 2)}%`,
-                backgroundColor: bg,
-                opacity: Math.max(v, 0.18),
-                transition: 'height 33ms linear, opacity 33ms linear',
-              }}
-            />
+            <div key={i} className="relative flex-1 h-full">
+              <div data-testid="spectrum-raw" className="absolute bottom-0 w-full rounded-sm"
+                style={{ height: `${Math.max(v * 100, 2)}%`, backgroundColor: bg, opacity,
+                  transition: overlay ? 'none' : 'height 33ms linear, opacity 33ms linear' }} />
+              {overlay && <svg data-testid="spectrum-outline"
+                className="absolute bottom-0 w-full overflow-visible pointer-events-none"
+                style={{ height: `${overlay[i] * 100}%`, backgroundColor: 'transparent' }}>
+                <rect x="0.75" y="0.75" width="calc(100% - 1.5px)" height="calc(100% - 1.5px)"
+                  rx="2" fill="none" stroke={outline.halo} strokeWidth="4.5" />
+                <rect x="0.75" y="0.75" width="calc(100% - 1.5px)" height="calc(100% - 1.5px)"
+                  rx="2" fill="none" stroke={outline.stroke} strokeWidth="1.5" />
+              </svg>}
+            </div>
           )
         })}
 
@@ -139,18 +166,24 @@ export function SpectrumBars({
           </div>
 
           <div className="flex justify-between mt-1 text-xs font-mono">
-            <span style={{ color: BAND_COLORS.bass }} className="flex items-center gap-1">
+            <div className="tabular-nums"><span style={{ color: BAND_COLORS.bass }} className="flex items-center gap-1">
               {onsetBass && <span className="inline-block w-1.5 h-1.5 rounded-full bg-current" />}
               {bassEmpty ? <em className="not-italic opacity-50">Bass (empty)</em> : `Bass ${bassAvg.toFixed(2)}`}
             </span>
-            <span style={{ color: BAND_COLORS.mid }} className="flex items-center gap-1">
+              {overlay && <div className="text-[10px] text-muted-foreground">→ {bandAvg(overlay, 0, bassHi).toFixed(2)}</div>}
+            </div>
+            <div className="tabular-nums"><span style={{ color: BAND_COLORS.mid }} className="flex items-center gap-1">
               {onsetMid && <span className="inline-block w-1.5 h-1.5 rounded-full bg-current" />}
               {midEmpty ? <em className="not-italic opacity-50">Mid (empty)</em> : `Mid ${midAvg.toFixed(2)}`}
             </span>
-            <span style={{ color: BAND_COLORS.treble }} className="flex items-center gap-1">
+              {overlay && <div className="text-[10px] text-muted-foreground">→ {bandAvg(overlay, bassHi, midHi).toFixed(2)}</div>}
+            </div>
+            <div className="tabular-nums"><span style={{ color: BAND_COLORS.treble }} className="flex items-center gap-1">
               {onsetTreble && <span className="inline-block w-1.5 h-1.5 rounded-full bg-current" />}
               {trebleEmpty ? <em className="not-italic opacity-50">Treble (empty)</em> : `Treble ${trebleAvg.toFixed(2)}`}
             </span>
+              {overlay && <div className="text-[10px] text-muted-foreground">→ {bandAvg(overlay, midHi, n).toFixed(2)}</div>}
+            </div>
           </div>
         </>
       )}

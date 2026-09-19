@@ -44,6 +44,7 @@ def _make_mock_manager() -> MagicMock:
     # WebSocket frame properties
     type(manager).last_colours = PropertyMock(return_value=[])
     type(manager).last_bars = PropertyMock(return_value=[])
+    type(manager).preview_spectrum = PropertyMock(return_value=([], None))
     type(manager).last_onset = PropertyMock(return_value=False)
     type(manager).last_pcm_onset = PropertyMock(return_value=False)
     type(manager).last_onset_bass = PropertyMock(return_value=False)
@@ -1787,3 +1788,20 @@ def test_transport_toggle_resolves_explicit_state(client, transport_session, sta
     assert response.status_code == 200
     assert exchange.call_args_list == [call("lms.local", 19090, f"{mac} mode ?\n"),
                                        call("lms.local", 19090, f"{mac} {command}\n")]
+
+
+@pytest.mark.parametrize("normalised", [None, [.33, .33]])
+def test_ws_spectrum_exposes_atomic_preview_pair(client, normalised):
+    manager = app.state.player_manager
+    type(manager).preview_spectrum = PropertyMock(return_value=([.6, .2], normalised))
+    with client.websocket_connect("/ws/preview") as ws:
+        for _ in range(10):
+            message = ws.receive_json()
+            if message["type"] == "spectrum":
+                break
+    assert message["bars"] == [.6, .2]
+    if normalised is None:
+        assert "normalised_bars" not in message
+    else:
+        assert message["normalised_bars"] == normalised
+        assert len(message["bars"]) == len(message["normalised_bars"])

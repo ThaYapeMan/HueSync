@@ -47,6 +47,7 @@ export interface PreviewState {
   last_energy_input?: number
   loudness_momentary_lufs: number | null
   loudness_short_term_lufs: number | null
+  normalised_bars?: number[]
   bars: number[]
   status: SocketStatus | null
   connected: boolean
@@ -171,7 +172,7 @@ export function usePreviewSocket(): PreviewState {
             )
           }
         } else if (msg.type === 'spectrum') {
-          setState((s) => ({ ...s, bars: msg.bars as number[] }))
+          setState((s) => ({ ...s, bars: msg.bars as number[], normalised_bars: msg.normalised_bars as number[] | undefined }))
         } else if (msg.type === 'status') {
           const { type: _ignored, ...fields } = msg
           setState((s) => ({ ...s, status: fields as unknown as SocketStatus }))

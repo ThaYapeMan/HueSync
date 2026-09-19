@@ -1041,6 +1041,8 @@ class CanonicalAnalysisPipeline:
         # All record state commits under _pub_lock. Sequence/queue track delivery;
         # _latest_pub tracks the freshest audio interval for live Effects.
         self._latest_pub: PublicationRecord | None = None
+        self._preview_spectrum: tuple[str | None, list[float], list[float] | None] = (
+            None, [], None)
         self._latest_loudness_pub: PublicationRecord | None = None
         self._pub_seq: int = 0
         self._pub_lock = threading.Lock()
@@ -1128,6 +1130,16 @@ class CanonicalAnalysisPipeline:
                 return None, None
             return (record.features.loudness_momentary_lufs,
                     record.features.loudness_short_term_lufs)
+
+    def preview_spectrum(self) -> tuple[list[float], list[float] | None]:
+        """An atomic raw/normalised display pair from one fresh Spectrum update."""
+        with self._pub_lock:
+            if self._latest_pub is None:
+                return [], None
+            epoch, raw, normalised = self._preview_spectrum
+            if epoch != self._latest_pub.epoch:
+                return [], None
+            return list(raw), list(normalised) if normalised is not None else None
 
     def update_band_normalisation(self, enabled: bool, clip: float) -> None:
         """Live colour-only switch. First fresh Spectrum frame seeds the EMA."""
@@ -1488,10 +1500,14 @@ class CanonicalAnalysisPipeline:
                     setattr(features, name, value)
             if su is not None:
                 # Colour only: preserve every raw-derived scalar, including the
-                # full fallback used by LayerMixer. Never retain a second raw array.
+                # full fallback used by LayerMixer. Raw bars are also retained for display.
                 aggregates = {name: getattr(features, name) for name in
                               ("bass", "mid", "full", "centroid", "relative_exertion")}
                 features.bars = self._normalise_bars(bars, start, pub_end)
+                # Identity distinguishes bypass, without racing a live flag toggle.
+                with self._pub_lock:
+                    self._preview_spectrum = (epoch_id, list(bars), list(features.bars)
+                                              if features.bars is not bars else None)
             record = self._publish(
                 epoch_id=epoch_id,
                 sample_start=start,
@@ -2795,6 +2811,12 @@ class SyncEngine:
     @property
     def last_onset_treble(self) -> bool:
         return self._last_onset_treble
+
+    @property
+    def preview_spectrum(self) -> tuple[list[float], list[float] | None]:
+        if isinstance(self._analyser, CanonicalAnalysisPipeline):
+            return self._analyser.preview_spectrum()
+        return self._last_bars, None
 
     @property
     def last_bars(self) -> list[float]:

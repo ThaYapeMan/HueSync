@@ -69,3 +69,17 @@ def test_cava_stays_unconditionally_normalised():
     cap._reader.latest_frame.return_value = bytes([153]*5+[51]*5)
     assert Analyser().band_normalise is False
     assert cap.latest().bars == pytest.approx([85/255]*10)
+
+
+def test_preview_pair_is_raw_and_effect_input_is_unchanged():
+    cap = pipeline(True)
+    raw = [.6]*5 + [.2]*5
+    record = publish(cap, raw, 0)
+    assert cap.preview_spectrum() == (raw, record.features.bars)
+    assert record.features.bars == pytest.approx([85/255]*10)
+    cap.update_band_normalisation(False, 3)
+    # Toggle only appears with the next Spectrum frame, not mixed across frames.
+    assert cap.preview_spectrum()[1] is not None
+    record = publish(cap, raw, 480)
+    assert cap.preview_spectrum() == (raw, None)
+    assert record.features.bars == raw

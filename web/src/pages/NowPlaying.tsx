@@ -239,6 +239,7 @@ function CouplingSelector({
 }
 
 type Props = Pick<PreviewState, 'colour' | 'channel_colours' | 'onset' | 'bars' | 'status'> & {
+  normalised_bars?: number[]
   onset_bass?: boolean
   onset_mid?: boolean
   onset_treble?: boolean
@@ -247,7 +248,7 @@ type Props = Pick<PreviewState, 'colour' | 'channel_colours' | 'onset' | 'bars' 
   connected?: boolean
 }
 
-export function NowPlaying({ colour, channel_colours, onset, onset_bass = false, onset_mid = false, onset_treble = false, mix = 0, loudness_momentary_lufs = null, bars, status, connected = true }: Props) {
+export function NowPlaying({ colour, channel_colours, onset, onset_bass = false, onset_mid = false, onset_treble = false, mix = 0, loudness_momentary_lufs = null, bars, normalised_bars, status, connected = true }: Props) {
   const couplingId = status?.active_coupling_id ?? null
   const zoneId = status?.active_zone_id ?? null
 
@@ -474,15 +475,22 @@ export function NowPlaying({ colour, channel_colours, onset, onset_bass = false,
         </CardContent>
       </Card>
 
-      <Card>
-        <CardHeader className="pb-3">
+      <Card data-testid="spectrum-panel">
+        <CardHeader className="pb-3 flex-row items-center justify-between">
           <CardTitle className="text-xs text-muted-foreground uppercase tracking-wider">
             Spectrum
           </CardTitle>
+          {normalised_bars?.length === bars.length && bars.length > 0 && (
+            <div className="flex gap-3 text-xs text-muted-foreground" data-testid="spectrum-legend">
+              <span className="flex items-center gap-1"><span className="h-2 w-2 bg-current" />Spectrum</span>
+              <span className="flex items-center gap-1"><span className="h-2 w-2 border border-current" />Normalised</span>
+            </div>
+          )}
         </CardHeader>
         <CardContent className="space-y-4">
           <SpectrumBars
             bars={bars}
+            normalisedBars={normalised_bars}
             colorMode={status?.effect_type ?? null}
             lowerCutoffHz={appliedLower}
             higherCutoffHz={appliedHigher}
