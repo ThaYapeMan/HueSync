@@ -14,6 +14,7 @@ import {
 } from '@/components/ui/table'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
 import { EffectCard } from '@/components/EffectCard'
+import { EnergySourceControls } from '@/components/EnergyBlendEditor'
 import { EffectPreview } from '@/components/EffectPreview'
 import { EditorPageHeader } from '@/components/editor/EditorPageHeader'
 import { SectionLabel } from '@/components/editor/SectionLabel'
@@ -41,6 +42,7 @@ const ENERGY_PROFILE_DEFAULTS = {
   blend_start:    0.3,
   blend_end:      0.7,
   blend_response: 0.1,
+  energy_source: 'sustained', lufs_floor: -30, lufs_ceiling: -8, adaptation_tau_s: 60,
 } as const
 
 // ── Form state ────────────────────────────────────────────────────────────────
@@ -52,11 +54,19 @@ interface FormState {
   blend_start: string
   blend_end: string
   blend_response: string
+  energy_source: string
+  lufs_floor: string
+  lufs_ceiling: string
+  adaptation_tau_s: string
 }
 
 function defaultForm(ep?: EnergyProfile): FormState {
   return {
     name: ep?.name ?? '',
+    energy_source: ep?.energy_source ?? ENERGY_PROFILE_DEFAULTS.energy_source,
+    lufs_floor: String(ep?.lufs_floor ?? ENERGY_PROFILE_DEFAULTS.lufs_floor),
+    lufs_ceiling: String(ep?.lufs_ceiling ?? ENERGY_PROFILE_DEFAULTS.lufs_ceiling),
+    adaptation_tau_s: String(ep?.adaptation_tau_s ?? ENERGY_PROFILE_DEFAULTS.adaptation_tau_s),
     high_energy_effect_id: ep?.high_energy_effect_id ?? '',
     low_energy_effect_id:  ep?.low_energy_effect_id  ?? '',
     blend_start:    String(ep?.blend_start    ?? ENERGY_PROFILE_DEFAULTS.blend_start),
@@ -329,7 +339,7 @@ export function EnergyProfiles({ activeCouplingId = null }: { activeCouplingId?:
   const isLive = editingId !== null && editingId !== 'new'
     && preview.status?.active_energy_profile_id === editingId
 
-  const displayEnergy = isLive ? preview.energy : simulatedEnergy
+  const displayEnergy = isLive ? (preview.last_energy_input ?? 0) : simulatedEnergy
   const instantMix    = calcBlendMix(displayEnergy, blendStart, blendEnd)
   const displayMix    = isLive ? preview.mix : instantMix
 
@@ -396,6 +406,10 @@ export function EnergyProfiles({ activeCouplingId = null }: { activeCouplingId?:
     try {
       const body = {
         name: form.name,
+        energy_source: form.energy_source,
+        lufs_floor: parseFloat(form.lufs_floor),
+        lufs_ceiling: parseFloat(form.lufs_ceiling),
+        adaptation_tau_s: parseFloat(form.adaptation_tau_s),
         high_energy_effect_id: form.high_energy_effect_id,
         low_energy_effect_id:  form.low_energy_effect_id,
         blend_start:    parseFloat(form.blend_start),
@@ -572,6 +586,9 @@ export function EnergyProfiles({ activeCouplingId = null }: { activeCouplingId?:
                     )}
                   >
                     {isLive ? `● live ${Math.round(displayEnergy * 100)}%` : `${Math.round(displayEnergy * 100)}%`}
+                    {isLive && form.energy_source !== 'sustained' && (
+                      <span> · {preview.loudness_momentary_lufs == null ? '—' : preview.loudness_momentary_lufs.toFixed(1)} LUFS</span>
+                    )}
                   </span>
                 </div>
               </div>
@@ -587,6 +604,9 @@ export function EnergyProfiles({ activeCouplingId = null }: { activeCouplingId?:
                 </div>
               )}
             </SectionWithReset>
+
+            <EnergySourceControls source={form.energy_source} floor={form.lufs_floor}
+              ceiling={form.lufs_ceiling} tau={form.adaptation_tau_s} onChange={set} />
 
             {/* ── Current blend ── */}
             <section>

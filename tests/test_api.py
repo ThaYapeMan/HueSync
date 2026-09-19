@@ -51,6 +51,7 @@ def _make_mock_manager() -> MagicMock:
     type(manager).last_onset_treble = PropertyMock(return_value=False)
     type(manager).last_mix = PropertyMock(return_value=0.0)
     type(manager).last_energy = PropertyMock(return_value=0.0)
+    type(manager).last_energy_input = PropertyMock(return_value=0.0)
     type(manager).last_sustained_energy = PropertyMock(return_value=None)
     type(manager).last_loudness = PropertyMock(return_value=(None, None))
     # WebSocket status properties
@@ -1750,3 +1751,26 @@ def test_active_band_normalise_patch_is_live_and_round_trips(client):
     client._manager.deactivate.assert_not_awaited()
     client._manager.restart_cava.assert_not_awaited()
     client._manager.replace_pcm_analyser.assert_not_called()
+
+
+def test_energy_source_api_validates_atomically_and_updates_live(client):
+    coupling = _make_full_coupling(client._storage)
+    client._storage.set_active_coupling_id(coupling.id)
+    ep = client._storage.get_energy_profile(coupling.energy_profile_id)
+    endpoint = f"/api/energy-profiles/{ep.id}"
+    original = ep.to_dict()
+    for invalid in ({"lufs_floor": 0}, {"adaptation_tau_s": 0}, {"energy_source": "invalid"}):
+        assert client.patch(endpoint, json=invalid).status_code in (400, 422)
+        assert client._storage.get_energy_profile(ep.id).to_dict() == original
+    response = client.patch(endpoint, json={
+        "energy_source": "loudness_fixed", "lufs_floor": -30, "lufs_ceiling": -8,
+        "adaptation_tau_s": 60,
+    })
+    assert response.status_code == 200
+    assert response.json()["energy_source"] == "loudness_fixed"
+    assert client._manager.update_render.call_args.args[0].energy_source == "loudness_fixed"
+    client._manager.deactivate.assert_not_awaited()
+    type(client._manager).last_energy_input = PropertyMock(return_value=19/22)
+    with client.websocket_connect("/ws/preview") as ws:
+        frame = ws.receive_json()
+    assert frame["last_energy_input"] == pytest.approx(19/22)

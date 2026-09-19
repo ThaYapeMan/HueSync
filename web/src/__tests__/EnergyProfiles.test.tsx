@@ -484,3 +484,33 @@ describe('Missing/edge data', () => {
     expect(responseInput.value).toBe('0.1')
   })
 })
+
+it('selects energy sources, exposes only relevant settings and saves the current mode', async () => {
+  const user = await renderAndOpen()
+  expect(screen.queryByLabelText('Floor (LUFS)')).not.toBeInTheDocument()
+  expect(screen.queryByLabelText('Adaptation time (seconds)')).not.toBeInTheDocument()
+  await user.click(screen.getByRole('button', { name: /Fixed loudness/ }))
+  expect(screen.getByLabelText('Floor (LUFS)')).toHaveValue(-30)
+  expect(screen.getByLabelText('Ceiling (LUFS)')).toHaveValue(-8)
+  await user.click(screen.getByRole('button', { name: /Adaptive loudness/ }))
+  expect(screen.queryByLabelText('Floor (LUFS)')).not.toBeInTheDocument()
+  expect(screen.getByLabelText('Adaptation time (seconds)')).toHaveValue(60)
+  await user.click(screen.getByRole('button', { name: /^Save$/ }))
+  expect(mapi.updateEnergyProfile).toHaveBeenCalledWith('ep1', expect.objectContaining({
+    energy_source: 'loudness_adaptive', adaptation_tau_s: 60, lufs_floor: -30, lufs_ceiling: -8,
+  }))
+})
+
+it('shows the generalised live input and raw LUFS rather than full-band energy', async () => {
+  mockUsePreviewSocket.mockReturnValue({
+    ...DEFAULT_PREVIEW, energy: .1, last_energy_input: .86, loudness_momentary_lufs: -11,
+    status: { active_energy_profile_id: 'ep1' },
+  })
+  mapi.getEnergyProfiles.mockResolvedValue([{ ...BASE_EP, energy_source: 'loudness_fixed' }])
+  mapi.getEffects.mockResolvedValue([BASE_EFFECT])
+  const user = userEvent.setup()
+  render(<EnergyProfiles />)
+  await user.click(await screen.findByRole('button', { name: /Edit/i }))
+  expect(screen.getByText(/● live 86%/)).toBeInTheDocument()
+  expect(screen.getByText(/−?\-11.0 LUFS/)).toBeInTheDocument()
+})

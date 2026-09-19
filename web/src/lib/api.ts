@@ -222,6 +222,10 @@ export interface EnergyProfile {
   blend_start: number
   blend_end: number
   blend_response: number
+  energy_source?: string
+  lufs_floor?: number
+  lufs_ceiling?: number
+  adaptation_tau_s?: number
 }
 
 export interface Coupling {
@@ -310,3 +314,10 @@ export const cloneEnergyProfile = (id: string) =>
 export type TransportAction = 'play' | 'pause' | 'toggle' | 'stop' | 'next' | 'previous' | 'seek_forward' | 'seek_backward'
 export const controlCouplingTransport = (id: string, action: TransportAction) =>
   request<{ ok: boolean; target_mac: string }>(`/api/couplings/${id}/transport`, json('POST', { action }))
+
+
+export const ENERGY_SOURCE_OPTIONS = [
+  { value: 'sustained', label: 'Sustained', description: 'Existing sustained energy, or full-band fallback when unavailable.' },
+  { value: 'loudness_fixed', label: 'Fixed loudness', description: 'Absolute LUFS inside a fixed window; steady loud music stays high.' },
+  { value: 'loudness_adaptive', label: 'Adaptive loudness', description: 'Slow programme-relative window; steady material becomes ordinary.' },
+] as const

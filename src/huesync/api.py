@@ -258,6 +258,10 @@ class EnergyProfileCreateBody(BaseModel):
     low_energy_effect_id: str = ""
     blend_start: float = 0.3
     blend_end: float = 0.7
+    energy_source: Literal["sustained", "loudness_fixed", "loudness_adaptive"] = "sustained"
+    lufs_floor: float = -30.0
+    lufs_ceiling: float = -8.0
+    adaptation_tau_s: float = 60.0
     blend_response: float = 0.1
 
 
@@ -268,6 +272,10 @@ class EnergyProfilePatchBody(BaseModel):
     low_energy_effect_id: str | None = None
     blend_start: float | None = None
     blend_end: float | None = None
+    energy_source: Literal["sustained", "loudness_fixed", "loudness_adaptive"] | None = None
+    lufs_floor: float | None = None
+    lufs_ceiling: float | None = None
+    adaptation_tau_s: float | None = None
     blend_response: float | None = None
 
 
@@ -366,6 +374,7 @@ _C_RENDER_FIELDS: frozenset[str] = frozenset({
     # EnergyProfile patch fields that propagate render changes:
     "high_energy_effect_id", "low_energy_effect_id",
     "blend_start", "blend_end", "blend_response",
+    "energy_source", "lufs_floor", "lufs_ceiling", "adaptation_tau_s",
 })
 
 # Which sub-entity owns each inline field in CouplingPatchBody
@@ -1119,14 +1128,10 @@ async def create_energy_profile_route(request: Request, body: EnergyProfileCreat
     _assert_name_unique(
         body.name, [(x.id, x.name) for x in storage.list_energy_profiles()], "EnergyProfile"
     )
-    ep = EnergyProfile(
-        name=body.name,
-        high_energy_effect_id=body.high_energy_effect_id,
-        low_energy_effect_id=body.low_energy_effect_id,
-        blend_start=body.blend_start,
-        blend_end=body.blend_end,
-        blend_response=body.blend_response,
-    )
+    try:
+        ep = EnergyProfile(**body.model_dump())
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     storage.save_energy_profile(ep)
     return JSONResponse(content=ep.to_dict(), status_code=201)
 
@@ -1154,8 +1159,10 @@ async def patch_energy_profile_route(ep_id: str, request: Request, body: EnergyP
             "EnergyProfile",
             exclude_id=ep_id,
         )
-    for field, value in updates.items():
-        setattr(ep, field, value)
+    try:
+        ep = replace(ep, **updates)
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     storage.save_energy_profile(ep)
     # If the active coupling uses this EnergyProfile, trigger update_render.
     active_id = storage.get_active_coupling_id()

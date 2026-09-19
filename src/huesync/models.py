@@ -6,6 +6,7 @@ whole config can live in one human-readable, git-diffable file.
 
 from __future__ import annotations
 
+import math
 import uuid
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -17,6 +18,22 @@ from .spectrum_engine import VALID_ENGINE_IDS as _VALID_ENGINE_IDS
 # these exact strings; any other value silently falls through to cava-based
 # detection.  Keep in sync with ONSET_METHODS in web/src/lib/api.ts.
 ONSET_METHODS: frozenset[str] = frozenset({"combined", "multiband", "superflux"})
+
+ENERGY_SOURCES: frozenset[str] = frozenset({
+    "sustained", "loudness_fixed", "loudness_adaptive",
+})
+
+
+def _validate_energy_source(source: str, floor: float, ceiling: float, tau: float) -> None:
+    if source not in ENERGY_SOURCES:
+        raise ValueError("Invalid energy_source")
+    if not all(math.isfinite(v) for v in (floor, ceiling, tau)):
+        raise ValueError("Energy source settings must be finite")
+    if floor >= ceiling:
+        raise ValueError("lufs_floor must be below lufs_ceiling")
+    if tau <= 0:
+        raise ValueError("adaptation_tau_s must be positive")
+
 
 # Virtual-player source type.  Keep in sync with PLAYER_TYPES in web/src/lib/api.ts.
 # Adding a new type: add the enum value here, implement the canonical ingress contract,
@@ -138,6 +155,10 @@ class Profile:
     effect_decay: float = 0.3
     blend_start: float = 0.3
     blend_end: float = 0.7
+    energy_source: str = "sustained"
+    lufs_floor: float = -30.0
+    lufs_ceiling: float = -8.0
+    adaptation_tau_s: float = 60.0
     blend_response: float = 0.1
     sensitivity: float = 1.0  # multiplier applied to bar values before mapping
     brightness_floor: float = 0.15  # minimum brightness so lights never go fully dark
@@ -198,6 +219,9 @@ class Profile:
     enabled: bool = True
 
     def __post_init__(self) -> None:
+        _validate_energy_source(
+            self.energy_source, self.lufs_floor, self.lufs_ceiling, self.adaptation_tau_s)
+
         if self.bars_source not in _VALID_BARS_SOURCES:
             raise ValueError(
                 f"Invalid bars_source {self.bars_source!r}; "
@@ -502,7 +526,15 @@ class EnergyProfile:
     low_energy_effect_id: str = ""    # Effect used in quiet passages (empty = same as high)
     blend_start: float = 0.3  # energy below this → pure low-energy (mix=0)
     blend_end: float = 0.7    # energy above this → pure high-energy (mix=1)
+    energy_source: str = "sustained"
+    lufs_floor: float = -30.0
+    lufs_ceiling: float = -8.0
+    adaptation_tau_s: float = 60.0
     blend_response: float = 0.1  # EMA alpha for mix smoothing
+
+    def __post_init__(self) -> None:
+        _validate_energy_source(
+            self.energy_source, self.lufs_floor, self.lufs_ceiling, self.adaptation_tau_s)
 
     def to_dict(self) -> dict:
         return {
@@ -513,6 +545,10 @@ class EnergyProfile:
             "blend_start": self.blend_start,
             "blend_end": self.blend_end,
             "blend_response": self.blend_response,
+            "energy_source": self.energy_source,
+            "lufs_floor": self.lufs_floor,
+            "lufs_ceiling": self.lufs_ceiling,
+            "adaptation_tau_s": self.adaptation_tau_s,
         }
 
     @classmethod

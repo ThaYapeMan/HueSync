@@ -276,3 +276,32 @@ replacement for the saved manual MAC.
 Local tests cover selection, notifications, polling, reconnect, teardown, and
 absence of playback/group mutations. Live LMS/plugin and audio delivery behavior
 still requires target-LXC verification.
+
+### Energy Profile source selection
+
+`energy_source` defaults to `sustained`, preserving the existing input and blend
+response. With a PCM tap this uses SustainedEnergyTracker; **canonical sessions
+currently publish `sustained_energy=None` and therefore use raw `full`**. A low
+canonical blend on steady music is not evidence that the dual-timescale tracker
+decayed: that tracker is not its input. Optional colour band normalisation does
+not change this fallback or any raw-derived aggregate.
+
+- `loudness_fixed`: map momentary LUFS linearly between `lufs_floor=-30` and
+  `lufs_ceiling=-8`, clamped to 0..1. At −11 LUFS the input is about 86%, even
+  on a constant-level track. Bounds must be finite and strictly ordered.
+- `loudness_adaptive`: start with a −30..−8 LUFS window. Its floor/ceiling expand
+  outward with a 1-second time constant and recover inward using
+  `adaptation_tau_s=60` (finite and positive). The window is at least 6 LU wide.
+  Constant material gradually becomes ordinary again; use fixed mode to retain
+  an absolute level reference. The fixed-mode bounds do not configure adaptation.
+
+Silence/non-finite or unavailable loudness yields zero and does not train the
+adaptive window. External FIFO currently has no canonical loudness meter, so its
+loudness modes receive zero. Switching source or editing settings applies live;
+the mixer is rebuilt and the adaptive window starts afresh. Existing blend
+thresholds, cubic smoothstep and Response smoothing follow source selection
+unchanged. The editor's marker uses the actual selected input and shows LUFS
+alongside it in loudness modes. Save changes to compare their live effect.
+
+These behaviours are code/test-verified; musical A/B judgement remains a live
+deployment check.

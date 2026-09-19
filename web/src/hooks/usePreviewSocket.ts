@@ -44,6 +44,7 @@ export interface PreviewState {
   onset_treble: boolean
   mix: number
   energy: number
+  last_energy_input?: number
   loudness_momentary_lufs: number | null
   loudness_short_term_lufs: number | null
   bars: number[]
@@ -61,6 +62,7 @@ const INITIAL_STATE: PreviewState = {
   onset_treble: false,
   mix: 0,
   energy: 0,
+  last_energy_input: 0,
   loudness_momentary_lufs: null,
   loudness_short_term_lufs: null,
   bars: [],
@@ -135,6 +137,7 @@ export function usePreviewSocket(): PreviewState {
             onset_treble: onset_treble || s.onset_treble,
             mix,
             energy,
+            last_energy_input: (msg.last_energy_input as number) ?? 0,
             loudness_momentary_lufs: (msg.loudness_momentary_lufs as number | null) ?? null,
             loudness_short_term_lufs: (msg.loudness_short_term_lufs as number | null) ?? null,
           }))

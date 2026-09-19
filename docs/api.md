@@ -246,3 +246,10 @@ sent on change, not every preview tick. Metadata anchors update on player events
 and periodic corrections; browsers interpolate between them. On disconnect,
 freeze the display. Pause stops interpolation; a seek replaces the anchor.
 See [metadata ownership and adapters](audio-pipeline.md#independent-track-metadata-channel).
+
+The WebSocket `frame` message also includes `last_energy_input`: the selected
+0..1 input immediately before LayerMixer's smoothstep/response smoothing.
+`energy` remains the raw full-band aggregate and `mix` remains the final smoothed
+blend. The Energy Profile editor uses `last_energy_input` for its live marker.
+Energy Profile REST schemas expose `energy_source`, `lufs_floor`,
+`lufs_ceiling`, and `adaptation_tau_s`; see [configuration](configuration.md).

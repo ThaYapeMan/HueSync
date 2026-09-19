@@ -121,6 +121,10 @@ def _build_engine_profile(coupling: Coupling, storage: Storage) -> Profile | Non
         blend_start=cf.blend_start,
         blend_end=cf.blend_end,
         blend_response=cf.blend_response,
+        energy_source=cf.energy_source,
+        lufs_floor=cf.lufs_floor,
+        lufs_ceiling=cf.lufs_ceiling,
+        adaptation_tau_s=cf.adaptation_tau_s,
         sensitivity=effect.sensitivity,
         brightness_floor=effect.brightness_floor,
         bass_hz=effect.bass_hz,
@@ -183,6 +187,10 @@ def _build_mellow_profile(coupling: Coupling, storage: Storage) -> Profile | Non
         blend_start=cf.blend_start,
         blend_end=cf.blend_end,
         blend_response=cf.blend_response,
+        energy_source=cf.energy_source,
+        lufs_floor=cf.lufs_floor,
+        lufs_ceiling=cf.lufs_ceiling,
+        adaptation_tau_s=cf.adaptation_tau_s,
         sensitivity=mellow_effect.sensitivity,
         brightness_floor=mellow_effect.brightness_floor,
         bass_hz=mellow_effect.bass_hz,
@@ -449,6 +457,12 @@ class PlayerManager:
         return 0.0
 
     @property
+    def last_energy_input(self) -> float:
+        if self._active and self._active.sync_engine:
+            return self._active.sync_engine.last_energy_input
+        return 0.0
+
+    @property
     def last_loudness(self) -> tuple[float | None, float | None]:
         if self._active and self._active.sync_engine:
             return self._active.sync_engine.last_loudness
@@ -587,6 +601,10 @@ class PlayerManager:
             blend_start=cf.blend_start,
             blend_end=cf.blend_end,
             blend_response=cf.blend_response,
+            energy_source=cf.energy_source,
+            lufs_floor=cf.lufs_floor,
+            lufs_ceiling=cf.lufs_ceiling,
+            adaptation_tau_s=cf.adaptation_tau_s,
             sensitivity=effect.sensitivity,
             brightness_floor=effect.brightness_floor,
             bass_hz=effect.bass_hz,

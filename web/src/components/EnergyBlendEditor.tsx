@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { Slider } from '@/components/ui/slider'
 import { Input } from '@/components/ui/input'
+import { ENERGY_SOURCE_OPTIONS } from '@/lib/api'
 import { Label } from '@/components/ui/label'
 
 interface Props {
@@ -210,4 +211,34 @@ export function EnergyBlendEditor({
       </div>
     </div>
   )
+}
+
+
+// Shared by the current Energy Profile workspace; follows the existing mode cards.
+export function EnergySourceControls({ source, floor, ceiling, tau, onChange }: {
+  source: string; floor: string; ceiling: string; tau: string
+  onChange: (field: 'energy_source' | 'lufs_floor' | 'lufs_ceiling' | 'adaptation_tau_s', value: string) => void
+}) {
+  return <section className="space-y-3" aria-label="Energy source">
+    <Label>Energy source</Label>
+    <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-3">
+      {ENERGY_SOURCE_OPTIONS.map(opt => <button key={opt.value} type="button"
+        aria-pressed={source === opt.value} onClick={() => onChange('energy_source', opt.value)}
+        className={`rounded border p-2.5 text-left text-sm ${source === opt.value ? 'border-primary bg-primary/10' : 'border-border hover:border-muted-foreground/60'}`}>
+        <div className="font-medium">{opt.label}</div>
+        <div className="mt-0.5 text-xs text-muted-foreground">{opt.description}</div>
+      </button>)}
+    </div>
+    {source === 'loudness_fixed' && <div className="grid grid-cols-2 gap-3">
+      <label className="space-y-1 text-xs">Floor (LUFS)
+        <Input type="number" step="0.1" value={floor} onChange={e => onChange('lufs_floor', e.target.value)} />
+      </label>
+      <label className="space-y-1 text-xs">Ceiling (LUFS)
+        <Input type="number" step="0.1" value={ceiling} onChange={e => onChange('lufs_ceiling', e.target.value)} />
+      </label>
+    </div>}
+    {source === 'loudness_adaptive' && <label className="block space-y-1 text-xs">Adaptation time (seconds)
+      <Input type="number" min="0.1" step="0.1" value={tau} onChange={e => onChange('adaptation_tau_s', e.target.value)} />
+    </label>}
+  </section>
 }

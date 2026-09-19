@@ -25,7 +25,7 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 
@@ -37,6 +37,7 @@ from .canonicalizer import (
     StreamInvalidated,
     TemporarilyNoData,
 )
+from .energy_input import EnergyInput
 from .latency import NoLatencyProbe
 from .loudness_analyzer import KWeightedLoudnessAnalyzer
 from .models import Profile
@@ -2355,7 +2356,10 @@ class LayerMixer:
     mix=0.0 → pure mellow layer (mellow_profile.color_mode).
     mix=1.0 → pure active layer (active_profile.color_mode).
 
-    Blend input (primary): features.sustained_energy — section-level loudness
+    EnergyInput selects sustained (default), fixed LUFS, or adaptive LUFS
+    before the unchanged smoothstep and EMA below.
+
+    Default blend input (primary): features.sustained_energy — section-level loudness
     from SustainedEnergyTracker, available when a PCM source is attached.
     Fallback (degraded): features.full (= relative exertion, a transient
     detector).  The fallback is intentionally explicit below — do NOT replace
@@ -2368,6 +2372,8 @@ class LayerMixer:
     """
 
     def __init__(self, active_profile: Profile, mellow_profile: Profile) -> None:
+        self._energy_input = EnergyInput(active_profile)
+        self.last_energy_input = 0.0
         self._mellow = ColourModeEffect(mellow_profile)
         self._active = ColourModeEffect(active_profile)
         self._mix: float = 0.0
@@ -2381,13 +2387,8 @@ class LayerMixer:
         return self._mix
 
     def render(self, features: AudioFeatures, t: float) -> Scene:
-        if features.sustained_energy is not None:
-            blend_input = features.sustained_energy
-        else:
-            # Degraded path: no PCM source attached (cava-only).
-            # features.full is relative exertion (transient), not sustained
-            # energy — blend will react to beats rather than song sections.
-            blend_input = features.full
+        blend_input = self._energy_input.select(features, t)
+        self.last_energy_input = blend_input
         target = _smoothstep(blend_input, self._low, self._high)
         self._mix += self._ema_alpha * (target - self._mix)
         mellow_scene = self._mellow.render(features, t)
@@ -2800,6 +2801,10 @@ class SyncEngine:
         return self._last_bars
 
     @property
+    def last_energy_input(self) -> float:
+        return self._effect.last_energy_input
+
+    @property
     def last_loudness(self) -> tuple[float | None, float | None]:
         if isinstance(self._analyser, CanonicalAnalysisPipeline):
             return self._analyser.latest_loudness()
@@ -2946,6 +2951,12 @@ class SyncEngine:
             if features is not None:
                 self._last_onset = features.onset
                 self._last_bars = features.bars
+                # The freshest Spectrum record may omit delayed loudness.
+                # Copy only for rendering: PublicationRecord remains authoritative.
+                if isinstance(self._analyser, CanonicalAnalysisPipeline):
+                    momentary, short_term = self._analyser.latest_loudness()
+                    features = replace(features, loudness_momentary_lufs=momentary,
+                                       loudness_short_term_lufs=short_term)
                 scene: Scene = self._effect.render(features, t)
                 self._last_mix = self._effect.mix
                 self._last_energy = features.full
