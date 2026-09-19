@@ -117,13 +117,13 @@ export function SpectrumBars({
               <div data-testid="spectrum-raw" className="absolute bottom-0 w-full rounded-sm"
                 style={{ height: `${Math.max(v * 100, 2)}%`, backgroundColor: bg, opacity,
                   transition: overlay ? 'none' : 'height 33ms linear, opacity 33ms linear' }} />
-              {overlay && <svg data-testid="spectrum-outline"
-                className="absolute bottom-0 w-full overflow-visible pointer-events-none"
-                style={{ height: `${overlay[i] * 100}%`, backgroundColor: 'transparent' }}>
-                <rect x="0.75" y="0.75" width="calc(100% - 1.5px)" height="calc(100% - 1.5px)"
-                  rx="2" fill="none" stroke={outline.halo} strokeWidth="4.5" />
-                <rect x="0.75" y="0.75" width="calc(100% - 1.5px)" height="calc(100% - 1.5px)"
-                  rx="2" fill="none" stroke={outline.stroke} strokeWidth="1.5" />
+              {overlay && <svg data-testid="spectrum-tick"
+                className="absolute inset-0 h-full w-full overflow-visible pointer-events-none"
+                style={{ backgroundColor: 'transparent' }}>
+                <line x1="2" x2="calc(100% - 2px)" y1={`${(1 - overlay[i]) * 100}%`} y2={`${(1 - overlay[i]) * 100}%`}
+                  stroke={outline.halo} strokeWidth="5" strokeLinecap="round" />
+                <line x1="2" x2="calc(100% - 2px)" y1={`${(1 - overlay[i]) * 100}%`} y2={`${(1 - overlay[i]) * 100}%`}
+                  stroke={outline.stroke} strokeWidth="2" strokeLinecap="round" />
               </svg>}
             </div>
           )
@@ -166,23 +166,23 @@ export function SpectrumBars({
           </div>
 
           <div className="flex justify-between mt-1 text-xs font-mono">
-            <div className="tabular-nums"><span style={{ color: BAND_COLORS.bass }} className="flex items-center gap-1">
+            <div className="flex items-center gap-1 tabular-nums"><span style={{ color: BAND_COLORS.bass }} className="flex items-center gap-1">
               {onsetBass && <span className="inline-block w-1.5 h-1.5 rounded-full bg-current" />}
               {bassEmpty ? <em className="not-italic opacity-50">Bass (empty)</em> : `Bass ${bassAvg.toFixed(2)}`}
             </span>
-              {overlay && <div className="text-[10px] text-muted-foreground">→ {bandAvg(overlay, 0, bassHi).toFixed(2)}</div>}
+              {overlay && <span className="text-muted-foreground">· {bandAvg(overlay, 0, bassHi).toFixed(2)}</span>}
             </div>
-            <div className="tabular-nums"><span style={{ color: BAND_COLORS.mid }} className="flex items-center gap-1">
+            <div className="flex items-center gap-1 tabular-nums"><span style={{ color: BAND_COLORS.mid }} className="flex items-center gap-1">
               {onsetMid && <span className="inline-block w-1.5 h-1.5 rounded-full bg-current" />}
               {midEmpty ? <em className="not-italic opacity-50">Mid (empty)</em> : `Mid ${midAvg.toFixed(2)}`}
             </span>
-              {overlay && <div className="text-[10px] text-muted-foreground">→ {bandAvg(overlay, bassHi, midHi).toFixed(2)}</div>}
+              {overlay && <span className="text-muted-foreground">· {bandAvg(overlay, bassHi, midHi).toFixed(2)}</span>}
             </div>
-            <div className="tabular-nums"><span style={{ color: BAND_COLORS.treble }} className="flex items-center gap-1">
+            <div className="flex items-center gap-1 tabular-nums"><span style={{ color: BAND_COLORS.treble }} className="flex items-center gap-1">
               {onsetTreble && <span className="inline-block w-1.5 h-1.5 rounded-full bg-current" />}
               {trebleEmpty ? <em className="not-italic opacity-50">Treble (empty)</em> : `Treble ${trebleAvg.toFixed(2)}`}
             </span>
-              {overlay && <div className="text-[10px] text-muted-foreground">→ {bandAvg(overlay, midHi, n).toFixed(2)}</div>}
+              {overlay && <span className="text-muted-foreground">· {bandAvg(overlay, midHi, n).toFixed(2)}</span>}
             </div>
           </div>
         </>

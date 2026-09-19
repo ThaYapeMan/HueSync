@@ -494,7 +494,7 @@ export function NowPlaying({ colour, channel_colours, onset, onset_bass = false,
           {normalised_bars?.length === bars.length && bars.length > 0 && (
             <div className="flex gap-3 text-xs text-muted-foreground" data-testid="spectrum-legend">
               <span className="flex items-center gap-1"><span className="h-2 w-2 bg-current" />Spectrum</span>
-              <span className="flex items-center gap-1"><span className="h-2 w-2 border border-current" />Normalised</span>
+              <span className="flex items-center gap-1"><span className="h-0.5 w-3 rounded-full bg-current" />Normalised</span>
             </div>
           )}
         </CardHeader>

@@ -128,18 +128,18 @@ it('only exposes transport for LMS with a live follow target; AirPlay sync is n/
 })
 
 
-it('shows raw spectrum, outlined comparison, readouts and description from one pair', async () => {
+it('shows raw spectrum, tick comparison, readouts and description from one pair', async () => {
   const bars = [.6,.6,.2,.2,.2,.2,.4,.4,.4,.4]
   const view = render(<NowPlaying {...props} bars={bars} normalised_bars={Array(10).fill(.33)} status={status} />)
   expect(screen.getByTestId('spectrum-legend')).toHaveTextContent('SpectrumNormalised')
-  expect(screen.getAllByTestId('spectrum-outline')).toHaveLength(10)
+  expect(screen.getAllByTestId('spectrum-tick')).toHaveLength(10)
   expect(screen.getAllByTestId('spectrum-raw')[0]).toHaveStyle({ height: '60%' })
-  expect(screen.getAllByTestId('spectrum-outline')[0]).toHaveStyle({ height: '33%' })
-  expect(screen.getAllByTestId('spectrum-outline')[0].querySelector('rect')).toHaveAttribute('fill', 'none')
+  expect(screen.getAllByTestId('spectrum-tick')[0].querySelector('line')).toHaveAttribute('y1', '67%')
+  expect(screen.getAllByTestId('spectrum-tick')[0].querySelector('line')).toHaveAttribute('stroke-width', '5')
   expect(screen.getByRole('img', { name: /Spectrum bass 0.60.*normalised 0.33, 0.33, 0.33/ })).toBeInTheDocument()
-  expect(screen.getAllByText('→ 0.33')).toHaveLength(3)
+  expect(screen.getAllByText('· 0.33')).toHaveLength(3)
   view.rerender(<NowPlaying {...props} bars={bars} status={status} />)
   expect(screen.queryByTestId('spectrum-legend')).not.toBeInTheDocument()
-  expect(screen.queryByTestId('spectrum-outline')).not.toBeInTheDocument()
+  expect(screen.queryByTestId('spectrum-tick')).not.toBeInTheDocument()
   await screen.findByText('PCM Pipeline')
 })
