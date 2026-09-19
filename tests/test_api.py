@@ -1650,7 +1650,7 @@ def transport_session(client, monkeypatch):
 
 @pytest.mark.parametrize("mode", ["manual", "sync_group"])
 @pytest.mark.parametrize("action,command", [
-    ("play", "play"), ("pause", "pause 1"), ("toggle", "pause"),
+    ("play", "play"), ("pause", "pause 1"),
     ("stop", "stop"), ("next", "playlist index +1"), ("previous", "playlist index -1"),
     ("seek_forward", "time +5"), ("seek_backward", "time -5"),
 ])
@@ -1774,3 +1774,16 @@ def test_energy_source_api_validates_atomically_and_updates_live(client):
     with client.websocket_connect("/ws/preview") as ws:
         frame = ws.receive_json()
     assert frame["last_energy_input"] == pytest.approx(19/22)
+
+
+@pytest.mark.parametrize("state,command", [("play", "pause 1"), ("pause", "pause 0"),
+                                           ("stop", "play")])
+def test_transport_toggle_resolves_explicit_state(client, transport_session, state, command):
+    from unittest.mock import call
+    _, _, exchange, coupling = transport_session
+    mac = "aa:bb:cc:dd:ee:ff"
+    exchange.side_effect = [f"{mac} mode {state}", "OK"]
+    response = client.post(f"/api/couplings/{coupling.id}/transport", json={"action": "toggle"})
+    assert response.status_code == 200
+    assert exchange.call_args_list == [call("lms.local", 19090, f"{mac} mode ?\n"),
+                                       call("lms.local", 19090, f"{mac} {command}\n")]

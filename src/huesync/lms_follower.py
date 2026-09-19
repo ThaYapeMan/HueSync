@@ -31,7 +31,7 @@ TransportAction = Literal[
     "play", "pause", "toggle", "stop", "next", "previous", "seek_forward", "seek_backward",
 ]
 _TRANSPORT_COMMANDS = {
-    "play": "play", "pause": "pause 1", "toggle": "pause", "stop": "stop",
+    "play": "play", "pause": "pause 1", "stop": "stop",
     "next": "playlist index +1", "previous": "playlist index -1",
     "seek_forward": "time +5", "seek_backward": "time -5",
 }
@@ -115,6 +115,8 @@ class LmsFollower:
         self._stop_event = asyncio.Event()
         self._play_count: int = 0  # diagnostic: total play commands sent this session
         self._connected: bool = False
+        self._transport_mode: str | None = None
+        self._pause_confirmation: asyncio.Task | None = None
 
     @property
     def target_mac(self) -> str | None:
@@ -141,6 +143,8 @@ class LmsFollower:
     def stop(self) -> None:
         """Signal the follower to stop after the current iteration."""
         self._stop_event.set()
+        if self._pause_confirmation is not None:
+            self._pause_confirmation.cancel()
 
     # ------------------------------------------------------------------
     # Internal coroutines
@@ -207,6 +211,8 @@ class LmsFollower:
                 )
         finally:
             self._connected = False
+            await self._cancel_pause_confirmation()
+            self._transport_mode = None
             writer.close()
             try:
                 await writer.wait_closed()
@@ -256,6 +262,8 @@ class LmsFollower:
         if not self._MIRRORS_PLAYBACK:
             return
         if command == "playlist" and sub.startswith("newsong"):
+            await self._cancel_pause_confirmation()
+            self._transport_mode = "play"
             await asyncio.to_thread(self._mirror_track)
             return
 
@@ -264,20 +272,67 @@ class LmsFollower:
         event = sub.split() if command == "playlist" else [command, *sub.split()]
         if not event or event[0] not in {"pause", "stop", "play"}:
             return
+        await self._cancel_pause_confirmation()
         log.info("LMS follower transport: player=%s event=%s", player_id, " ".join(event))
         if event[0] == "stop":
+            self._transport_mode = "stop"
             await asyncio.to_thread(self._send_stop)
         elif event[0] == "play":
+            self._transport_mode = "play"
             await asyncio.to_thread(self._send_pause, 0)
         elif len(event) > 1 and event[1] in {"0", "1"}:
             # Additional fade/suppressShowBriefly parameters are not the state.
+            self._transport_mode = "pause" if event[1] == "1" else "play"
             await asyncio.to_thread(self._send_pause, int(event[1]))
         elif len(event) == 1:
-            # Bare pause toggles the source, not necessarily our independent
-            # player. Resolve its resulting state; never blindly toggle ours.
-            mode = await asyncio.to_thread(self._query_mode, self._follow_mac)
-            if mode in {"play", "pause"}:
-                await asyncio.to_thread(self._send_pause, int(mode == "pause"))
+            # A bridge may still report its PRE-toggle mode. Predict from the
+            # connect-time seed and ordered events; query only after settling.
+            if self._transport_mode is not None:
+                self._transport_mode = "pause" if self._transport_mode == "play" else "play"
+                await asyncio.to_thread(self._send_pause, int(self._transport_mode == "pause"))
+            self._pause_confirmation = asyncio.create_task(
+                self._confirm_pause(self._follow_mac), name="lms-pause-confirmation")
+
+    async def _cancel_pause_confirmation(self) -> None:
+        task, self._pause_confirmation = self._pause_confirmation, None
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+    async def _owned_transport_call(self, function, *args):
+        # Cancellation cannot abandon a CLI worker that might still send a
+        # command. Teardown/new events wait for that bounded exchange to finish.
+        task = asyncio.create_task(asyncio.to_thread(function, *args))
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            try:
+                await task
+            except OSError:
+                pass
+            raise
+
+    async def _confirm_pause(self, target: str) -> None:
+        try:
+            await asyncio.sleep(1.0)
+            if self._stop_event.is_set() or self.target_mac != target:
+                return
+            mode = await self._owned_transport_call(self._query_mode, target)
+            if self._stop_event.is_set() or self.target_mac != target or mode is None:
+                return
+            if mode != self._transport_mode:
+                log.info("LMS follower pause correction: player=%s predicted=%s confirmed=%s",
+                         target, self._transport_mode, mode)
+                if mode == "stop":
+                    await self._owned_transport_call(self._send_stop)
+                else:
+                    await self._owned_transport_call(self._send_pause, int(mode == "pause"))
+                self._transport_mode = mode
+        except OSError:
+            log.warning("LMS follower: deferred pause confirmation failed")
 
     # ------------------------------------------------------------------
     # Blocking helpers (run in a thread via asyncio.to_thread)
@@ -292,7 +347,15 @@ class LmsFollower:
         target = self.target_mac
         if not target or target != expected_mac or target.lower() == self._huesync_mac.lower():
             raise RuntimeError("Follow target changed or is unavailable")
-        command = _TRANSPORT_COMMANDS[action]
+        if action == "toggle":
+            mode = self._query_mode(target)
+            if mode is None:
+                raise RuntimeError("Follow target transport state is unavailable")
+            command = "pause 1" if mode == "play" else "pause 0" if mode == "pause" else "play"
+            if self.target_mac != target:
+                raise RuntimeError("Follow target changed or is unavailable")
+        else:
+            command = _TRANSPORT_COMMANDS[action]
         _cli_exchange(self._host, self._port, f"{target} {command}\n")
 
     def _query_mode(self, mac: str) -> str | None:
@@ -306,7 +369,8 @@ class LmsFollower:
     def _seed_playback(self) -> None:
         """Start an already-playing track on each manual connect/reconnect."""
         try:
-            if self._query_mode(self._follow_mac) == "play" and not self._stop_event.is_set():
+            self._transport_mode = self._query_mode(self._follow_mac)
+            if self._transport_mode == "play" and not self._stop_event.is_set():
                 if url := self._mirror_track(only_if_needed=True):
                     self._align_seed_position(url)
         except OSError:

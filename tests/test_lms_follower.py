@@ -708,3 +708,90 @@ def test_seed_alignment_does_not_seek_invalid_or_changed_source(monkeypatch, rea
     monkeypatch.setattr('huesync.lms_follower._cli_exchange', exchange)
     follower._align_seed_position(MOCK_URL)
     exchange.assert_not_called()
+
+
+@pytest.mark.parametrize("initial,confirmed,commands", [
+    ("play", "pause", [1]), ("pause", "play", [0]),
+    ("play", "play", [1, 0]), ("pause", "pause", [0, 1]),
+])
+def test_bare_pause_predicts_before_delayed_bridge_confirmation(initial, confirmed, commands,
+                                                               monkeypatch, caplog):
+    import logging
+    from unittest.mock import Mock, call
+
+    async def run():
+        follower = LmsFollower("host", FOLLOW_MAC, HUESYNC_MAC)
+        follower._transport_mode = initial
+        send = Mock()
+        query = Mock(return_value=confirmed)
+        monkeypatch.setattr(follower, "_send_pause", send)
+        monkeypatch.setattr(follower, "_query_mode", query)
+        started = asyncio.get_running_loop().time()
+        await follower._handle_line(f"{FOLLOW_MAC} pause")
+        send.assert_called_once_with(commands[0])
+        query.assert_not_called()  # bridge still reports the old mode here
+        await asyncio.sleep(.8)
+        query.assert_not_called()
+        await follower._pause_confirmation
+        assert asyncio.get_running_loop().time() - started >= 1.0
+        query.assert_called_once_with(FOLLOW_MAC)
+        assert send.call_args_list == [call(state) for state in commands]
+        assert follower._transport_mode == confirmed
+
+    with caplog.at_level(logging.INFO):
+        asyncio.run(run())
+    assert ("pause correction" in caplog.text) == (len(commands) == 2)
+
+
+@pytest.mark.parametrize("event", ["pause 1", "play", "stop", "shutdown"])
+def test_pending_pause_confirmation_is_cancelled_by_new_state_or_shutdown(event, monkeypatch):
+    from unittest.mock import Mock
+
+    async def run():
+        follower = LmsFollower("host", FOLLOW_MAC, HUESYNC_MAC)
+        follower._transport_mode = "play"
+        query = Mock(return_value="play")
+        monkeypatch.setattr(follower, "_query_mode", query)
+        monkeypatch.setattr(follower, "_send_pause", Mock())
+        monkeypatch.setattr(follower, "_send_stop", Mock())
+        await follower._handle_line(f"{FOLLOW_MAC} pause")
+        pending = follower._pause_confirmation
+        if event == "shutdown":
+            follower.stop()
+            await follower._cancel_pause_confirmation()
+        else:
+            await follower._handle_line(f"{FOLLOW_MAC} {event}")
+        assert pending.done()
+        query.assert_not_called()
+
+    asyncio.run(run())
+
+
+def test_new_event_waits_for_confirmation_query_and_discards_stale_result(monkeypatch):
+    import threading
+    from unittest.mock import Mock
+
+    async def run():
+        follower = LmsFollower('host', FOLLOW_MAC, HUESYNC_MAC)
+        follower._transport_mode = 'play'
+        entered, release = threading.Event(), threading.Event()
+
+        def query(mac):
+            entered.set()
+            assert release.wait(3)
+            return 'play'  # stale result must not resume after the explicit pause
+
+        send = Mock()
+        monkeypatch.setattr(follower, '_query_mode', query)
+        monkeypatch.setattr(follower, '_send_pause', send)
+        await follower._handle_line(f'{FOLLOW_MAC} pause')
+        assert await _wait_for(entered.is_set)
+        explicit = asyncio.create_task(follower._handle_line(f'{FOLLOW_MAC} pause 1'))
+        await asyncio.sleep(.05)
+        assert not explicit.done()  # owns the in-flight CLI worker
+        release.set()
+        await explicit
+        assert [c.args for c in send.call_args_list] == [(1,), (1,)]
+        assert follower._transport_mode == 'pause'
+
+    asyncio.run(run())
