@@ -1733,3 +1733,20 @@ def test_transport_status_uses_current_target_and_matching_name(client, transpor
     assert status["follow_target_name"] == "Living room"
     session.follower._follow_mac = "aa:bb:cc:dd:ee:00"
     assert manager.follow_target_name == "aa:bb:cc:dd:ee:00"  # not the stale room name
+
+
+def test_active_band_normalise_patch_is_live_and_round_trips(client):
+    coupling = _make_full_coupling(client._storage)
+    analyser = client._storage.get_analyser(coupling.analyser_id)
+    analyser.bars_source = "pcm_pipeline"
+    client._storage.save_analyser(analyser)
+    client._storage.set_active_coupling_id(coupling.id)
+    type(client._manager).active_bars_source = PropertyMock(return_value="pcm_pipeline")
+    response = client.patch(f"/api/analysers/{analyser.id}", json={"band_normalise": True})
+    assert response.status_code == 200
+    assert response.json()["band_normalise"] is True
+    assert client._storage.get_analyser(analyser.id).band_normalise is True
+    assert client._manager.update_render.call_args.args[0].band_normalise is True
+    client._manager.deactivate.assert_not_awaited()
+    client._manager.restart_cava.assert_not_awaited()
+    client._manager.replace_pcm_analyser.assert_not_called()

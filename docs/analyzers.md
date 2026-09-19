@@ -60,3 +60,17 @@ PCM/onset/HPSS tap; those controls do not imply a canonical HPSS/Loudness proces
 `use_hpss_separation` is a legacy tap setting, not implementation of the future
 canonical families. External FIFO is outside ENGINES and incompatible with an
 embedded `cavacore` request.
+
+### Optional canonical colour normalisation
+
+`band_normalise` defaults to false. Enable it to compare each canonical Spectrum
+bar with its own rolling average, using the same BandNormaliser as external FIFO.
+It applies after either V2 (including pink compensation) or CAVA Core. The existing
+Effect `exertion_clip` remains the single clip control; steady bands at clip 3
+produce about 0.33 before sensitivity. FIFO always normalises, regardless of this flag.
+
+Switching live does not restart the session. The next fresh spectrum seeds the
+EMA; carried historical bars are not processed again. Preview and Effects receive
+the same normalised `bars`. Raw-derived scalar aggregates remain unchanged,
+including `full`: canonical assembly currently supplies `sustained_energy=None`,
+so the default blend uses that raw `full` fallback, not SustainedEnergyTracker.

@@ -1010,7 +1010,14 @@ class CanonicalAnalysisPipeline:
         superflux_lag: int,
         bass_hz: int,
         mid_hz: int,
+        band_normalise: bool = False,
+        exertion_clip: float = BandNormaliser.DEFAULT_EXERTION_CLIP,
     ) -> None:
+        self._normalise_lock = threading.Lock()
+        self._band_normalise = band_normalise
+        self._band_clip = exertion_clip
+        self._band_normaliser = BandNormaliser(exertion_clip=exertion_clip)
+        self._normalise_end: int | None = None
         self._source = source
         # Composition layer: SpectrumProcessor wraps the engine; BeatDetector
         # wraps the onset pipeline.  Both satisfy AnalysisProcessor structurally.
@@ -1055,7 +1062,9 @@ class CanonicalAnalysisPipeline:
         # Bounded event-time history for delayed processors. Publication sequence
         # orders delivery; sample intervals may go backwards when results arrive
         # later. Missing/evicted history means empty bars, never future bars.
-        self._bar_history: deque[tuple[int, int, list[float]]] = deque(maxlen=1000)
+        self._bar_history: deque[
+            tuple[int, int, list[float], dict[str, float]]
+        ] = deque(maxlen=1000)
         # Guards double-close on the processor list: stop() closes only if the
         # worker thread has terminated within the join timeout; if it hasn't,
         # the worker's finally block picks up the responsibility once it
@@ -1119,6 +1128,26 @@ class CanonicalAnalysisPipeline:
             return (record.features.loudness_momentary_lufs,
                     record.features.loudness_short_term_lufs)
 
+    def update_band_normalisation(self, enabled: bool, clip: float) -> None:
+        """Live colour-only switch. First fresh Spectrum frame seeds the EMA."""
+        with self._normalise_lock:
+            if enabled != self._band_normalise:
+                self._band_normaliser = BandNormaliser(exertion_clip=clip)
+                self._normalise_end = None
+            self._band_normalise = enabled
+            self._band_clip = clip
+            self._band_normaliser.update_exertion_clip(clip)
+
+    def _normalise_bars(self, bars: list[float], start: int, end: int) -> list[float]:
+        with self._normalise_lock:
+            if not self._band_normalise or not bars:
+                return bars
+            previous = self._normalise_end
+            dt = max(0, end - (previous if previous is not None else start)) / 48000
+            self._normalise_end = end
+            raw = bytes(int(max(0.0, min(1.0, v)) * 255) for v in bars)
+            return [v / 255.0 for v in self._band_normaliser.normalise(raw, dt)]
+
     def rebuild_beat_detector(self, profile: Profile) -> None:
         """Rebuild the BeatDetector onset pipeline from new profile parameters.
 
@@ -1159,6 +1188,9 @@ class CanonicalAnalysisPipeline:
         self._last_bars = None
         self._last_bars_end = 0
         self._bar_history.clear()
+        with self._normalise_lock:
+            self._band_normaliser = BandNormaliser(exertion_clip=self._band_clip)
+            self._normalise_end = None
 
     def _publish(
         self,
@@ -1435,6 +1467,7 @@ class CanonicalAnalysisPipeline:
             su = spectrum_by_key.get(key)
             these_others = others_by_key.get(key, [])
             carry_interval = None
+            aggregates = None
             if su is not None:
                 bars = list(su.bars or [])
             else:
@@ -1446,8 +1479,18 @@ class CanonicalAnalysisPipeline:
                 bars = list(previous[2]) if previous is not None else []
                 if previous is not None:
                     carry_interval = (previous[0], previous[1])
+                    aggregates = previous[3]
 
             features = self._build_features(bars, these_others)
+            if aggregates is not None:
+                for name, value in aggregates.items():
+                    setattr(features, name, value)
+            if su is not None:
+                # Colour only: preserve every raw-derived scalar, including the
+                # full fallback used by LayerMixer. Never retain a second raw array.
+                aggregates = {name: getattr(features, name) for name in
+                              ("bass", "mid", "full", "centroid", "relative_exertion")}
+                features.bars = self._normalise_bars(bars, start, pub_end)
             record = self._publish(
                 epoch_id=epoch_id,
                 sample_start=start,
@@ -1459,9 +1502,9 @@ class CanonicalAnalysisPipeline:
             )
             records.append(record)
             if su is not None:
-                self._last_bars = list(su.bars or [])
+                self._last_bars = list(features.bars)
                 self._last_bars_end = pub_end
-                self._bar_history.append((start, pub_end, list(su.bars or [])))
+                self._bar_history.append((start, pub_end, list(features.bars), aggregates or {}))
         return records
 
     def _flush_engine(self) -> list[PublicationRecord]:
@@ -2564,6 +2607,8 @@ class SyncEngine:
         self.profile = profile
         effective_mellow = mellow_profile if mellow_profile is not None else profile
         self._effect = LayerMixer(profile, effective_mellow)
+        if isinstance(self._analyser, CanonicalAnalysisPipeline):
+            self._analyser.update_band_normalisation(profile.band_normalise, profile.exertion_clip)
         normaliser = getattr(self._analyser, "normaliser", None)
         if normaliser is not None:
             normaliser.update_exertion_clip(profile.exertion_clip)

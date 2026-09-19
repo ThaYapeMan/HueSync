@@ -174,6 +174,7 @@ class Profile:
     # HPSS: separate PCM signal into harmonic and percussive streams.
     # CPU cost ~1 ms/frame at 100 Hz on a Proxmox LXC (2 vCPU) — opt-in only.
     use_hpss_separation: bool = False
+    band_normalise: bool = False
     bars_source: str = "cava"
     # Spectrum backend for the PCM pipeline path (AirPlay / native PCM).
     # "v2"      — HueSync V2SpectrumEngine (Hamming STFT, np.max aggregation)
@@ -389,6 +390,7 @@ class Analyser:
     # HPSS: parallel harmonic/percussive separation on the PCM tap.
     # CPU cost ~1 ms/frame at 100 Hz on a 2-vCPU LXC — disabled by default.
     use_hpss_separation: bool = False
+    band_normalise: bool = False
     # "cava": existing cava/FIFO path (default for LMS players).
     # "pcm_pipeline": canonical stereo SHM v1 → shared analysis/selected engine.
     #   Same analysis pipeline as AirPlay; no external CAVA FIFO.
@@ -429,6 +431,7 @@ class Analyser:
             "lower_cutoff_freq": self.lower_cutoff_freq,
             "higher_cutoff_freq": self.higher_cutoff_freq,
             "use_hpss_separation": self.use_hpss_separation,
+            "band_normalise": self.band_normalise,
             "bars_source": self.bars_source,
             "spectrum_backend": self.spectrum_backend,
         }

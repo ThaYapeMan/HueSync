@@ -72,6 +72,8 @@ def _make_canonical_pipeline(
         superflux_lag=profile.superflux_lag,
         bass_hz=profile.bass_hz,
         mid_hz=profile.mid_hz,
+        band_normalise=profile.band_normalise,
+        exertion_clip=profile.exertion_clip,
     )
 
 
@@ -131,6 +133,7 @@ def _build_engine_profile(coupling: Coupling, storage: Storage) -> Profile | Non
         superflux_mu=ac.superflux_mu,
         superflux_lag=ac.superflux_lag,
         use_hpss_separation=ac.use_hpss_separation,
+        band_normalise=ac.band_normalise,
         bars_source=ac.bars_source,
         spectrum_backend=ac.spectrum_backend,
         bars=ac.bars,
@@ -192,6 +195,7 @@ def _build_mellow_profile(coupling: Coupling, storage: Storage) -> Profile | Non
         superflux_mu=ac.superflux_mu,
         superflux_lag=ac.superflux_lag,
         use_hpss_separation=ac.use_hpss_separation,
+        band_normalise=ac.band_normalise,
         bars_source=ac.bars_source,
         spectrum_backend=ac.spectrum_backend,
         bars=ac.bars,
@@ -595,6 +599,7 @@ class PlayerManager:
             superflux_mu=ac.superflux_mu,
             superflux_lag=ac.superflux_lag,
             use_hpss_separation=ac.use_hpss_separation,
+            band_normalise=ac.band_normalise,
             bars_source=ac.bars_source,
             spectrum_backend=ac.spectrum_backend,
             bars=ac.bars,

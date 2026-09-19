@@ -199,6 +199,7 @@ class AnalyserCreateBody(BaseModel):
     lower_cutoff_freq: int = 50
     higher_cutoff_freq: int = 12000
     use_hpss_separation: bool = False
+    band_normalise: bool = False
     bars_source: str = "cava"
     spectrum_backend: str = "v2"
 
@@ -215,6 +216,7 @@ class AnalyserPatchBody(BaseModel):
     lower_cutoff_freq: int | None = None
     higher_cutoff_freq: int | None = None
     use_hpss_separation: bool | None = None
+    band_normalise: bool | None = None
     bars_source: str | None = None
     spectrum_backend: str | None = None
 
@@ -318,6 +320,7 @@ class CouplingPatchBody(BaseModel):
     superflux_mu: int | None = None
     superflux_lag: int | None = None
     use_hpss_separation: bool | None = None
+    band_normalise: bool | None = None
     # bass_hz/mid_hz: stored in Effect but pcm-category for restart
     bass_hz: int | None = None
     mid_hz: int | None = None
@@ -372,7 +375,7 @@ _C_PLAYER_INLINE: frozenset[str] = frozenset({
 _C_ANALYSER_INLINE: frozenset[str] = frozenset({
     "bars", "lower_cutoff_freq", "higher_cutoff_freq",
     "onset_method", "onset_delta", "onset_alpha", "superflux_mu", "superflux_lag",
-    "use_hpss_separation",
+    "use_hpss_separation", "band_normalise",
 })
 _C_EFFECT_INLINE: frozenset[str] = frozenset({
     "bass_hz", "mid_hz",
@@ -922,6 +925,7 @@ async def create_analyser(request: Request, body: AnalyserCreateBody):
             lower_cutoff_freq=body.lower_cutoff_freq,
             higher_cutoff_freq=body.higher_cutoff_freq,
             use_hpss_separation=body.use_hpss_separation,
+            band_normalise=body.band_normalise,
             bars_source=body.bars_source,
             spectrum_backend=body.spectrum_backend,
         )

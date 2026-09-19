@@ -30,6 +30,7 @@ const ANALYSER_DEFAULTS = {
   higher_cutoff_freq: 12000,
   onset_delta: 0.1,
   use_hpss_separation: false,
+  band_normalise: false,
   onset_alpha: 0.9,
   superflux_mu: 3,
   superflux_lag: 2,
@@ -64,10 +65,12 @@ interface Draft {
   superflux_mu: string
   superflux_lag: string
   use_hpss_separation: boolean
+  band_normalise: boolean
 }
 
 function defaultDraft(a?: Analyser | null): Draft {
   return {
+    band_normalise: a?.band_normalise ?? ANALYSER_DEFAULTS.band_normalise,
     name: a?.name ?? '',
     bars_source: a?.bars_source ?? ANALYSER_DEFAULTS.bars_source,
     spectrum_backend: a?.spectrum_backend ?? ANALYSER_DEFAULTS.spectrum_backend,
@@ -437,6 +440,7 @@ function AnalyserWorkspace({ analyser, couplings, players, onSaved, onDeleted, o
         superflux_mu: parseInt(draft.superflux_mu, 10) || ANALYSER_DEFAULTS.superflux_mu,
         superflux_lag: parseInt(draft.superflux_lag, 10) || ANALYSER_DEFAULTS.superflux_lag,
         use_hpss_separation: draft.use_hpss_separation,
+        band_normalise: draft.band_normalise,
       }
       const result = isCreating
         ? await createAnalyser(body)
@@ -576,6 +580,17 @@ function AnalyserWorkspace({ analyser, couplings, players, onSaved, onDeleted, o
                       <div className="text-xs text-muted-foreground leading-snug mt-0.5">{opt.description}</div>
                     </button>
                   ))}
+                </div>
+                <div className="space-y-1">
+                  <label className={cn('flex items-center gap-2 text-xs', !isPcm && 'text-muted-foreground opacity-50')}>
+                    <input type="checkbox" checked={isPcm ? draft.band_normalise : true}
+                      disabled={!isPcm} onChange={e => setDraft(d => ({ ...d, band_normalise: e.target.checked }))} />
+                    Normalise bands
+                  </label>
+                  <p className="text-xs text-muted-foreground">
+                    {isPcm ? 'Compare each colour band with its own rolling average. Raw energy values stay unchanged.'
+                      : 'Always active on the external CAVA/FIFO source.'}
+                  </p>
                 </div>
                 <div className="space-y-2">
                   <p className="text-xs font-medium">Spectrum engine</p>

@@ -963,3 +963,17 @@ describe('Architecture-aware controls', () => {
     expect(screen.queryByText(/Also used by an AirPlay coupling/) !== null).toBe(type === 'AirPlay')
   })
 })
+
+it('round-trips canonical band normalisation and shows FIFO as always active', async () => {
+  mapi.updateAnalyser.mockResolvedValue(BASE)
+  const user = await renderAndSelect({ ...BASE, bars_source: 'pcm_pipeline' })
+  const toggle = screen.getByLabelText('Normalise bands')
+  expect(toggle).not.toBeChecked()
+  await user.click(toggle)
+  await user.click(screen.getByTestId('analyser-save-btn'))
+  expect(mapi.updateAnalyser).toHaveBeenLastCalledWith('a1', expect.objectContaining({ band_normalise: true }))
+  await user.click(screen.getByTestId('opt-bars-source-cava'))
+  expect(toggle).toBeDisabled()
+  expect(toggle).toBeChecked()
+  expect(screen.getByText('Always active on the external CAVA/FIFO source.')).toBeInTheDocument()
+})

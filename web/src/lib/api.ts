@@ -195,6 +195,7 @@ export interface Analyser {
   lower_cutoff_freq: number
   higher_cutoff_freq: number
   use_hpss_separation: boolean
+  band_normalise?: boolean
   bars_source: string
   spectrum_backend: string
 }
