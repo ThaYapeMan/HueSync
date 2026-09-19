@@ -14,7 +14,7 @@ import {
 } from '@/components/ui/table'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
 import { EffectCard } from '@/components/EffectCard'
-import { EnergySourceControls } from '@/components/EnergyBlendEditor'
+import { EnergySourceControls, validateEnergySettings } from '@/components/EnergyBlendEditor'
 import { EffectPreview } from '@/components/EffectPreview'
 import { EditorPageHeader } from '@/components/editor/EditorPageHeader'
 import { SectionLabel } from '@/components/editor/SectionLabel'
@@ -308,7 +308,8 @@ function ModeToggle({ expertMode, onToggle }: { expertMode: boolean; onToggle: (
 
 // ── Main component ────────────────────────────────────────────────────────────
 
-export function EnergyProfiles({ activeCouplingId = null }: { activeCouplingId?: string | null }) {
+export function EnergyProfiles({ activeCouplingId = null, initialProfileId }: { activeCouplingId?: string | null; initialProfileId?: string | null }) {
+  const openedInitialProfile = useRef(false)
   const [couplings, setCouplings] = useState<Coupling[]>([])
   const activeCoupling = couplings.find(c => c.id === activeCouplingId)
   const [energyProfiles, setEnergyProfiles] = useState<EnergyProfile[]>([])
@@ -357,6 +358,11 @@ export function EnergyProfiles({ activeCouplingId = null }: { activeCouplingId?:
       const [eps, effs, cs] = await Promise.all([getEnergyProfiles(), getEffects(), getCouplings()])
       setCouplings(cs)
       setEnergyProfiles(eps)
+      const requested = eps.find(ep => ep.id === initialProfileId)
+      if (requested && !openedInitialProfile.current) {
+        openedInitialProfile.current = true
+        openEdit(requested)
+      }
       setEffects(effs)
       setError(null)
     } catch (e) {
@@ -404,6 +410,8 @@ export function EnergyProfiles({ activeCouplingId = null }: { activeCouplingId?:
     setSaving(true)
     setSaveError(null)
     try {
+      const validation = validateEnergySettings(form.lufs_floor, form.lufs_ceiling, form.adaptation_tau_s)
+      if (validation) throw new Error(validation)
       const body = {
         name: form.name,
         energy_source: form.energy_source,

@@ -6,7 +6,7 @@ import { getAnalysers, getCouplings, getVirtualPlayers } from '../lib/api'
 
 vi.mock('../lib/api', async importOriginal => ({
   ...await importOriginal<typeof import('../lib/api')>(),
-  getCouplings: vi.fn(), getAnalysers: vi.fn(), getVirtualPlayers: vi.fn(),
+  getEnergyProfiles: vi.fn().mockResolvedValue([]), getCouplings: vi.fn(), getAnalysers: vi.fn(), getVirtualPlayers: vi.fn(),
   getZoneChannels: vi.fn().mockResolvedValue([{ channel_id: 1, x: .5, y: 0, z: .5 }]),
   activateCoupling: vi.fn(), deactivateCoupling: vi.fn(), restartCouplingCava: vi.fn(),
 }))

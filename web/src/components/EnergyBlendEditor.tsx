@@ -214,31 +214,64 @@ export function EnergyBlendEditor({
 }
 
 
-// Shared by the current Energy Profile workspace; follows the existing mode cards.
-export function EnergySourceControls({ source, floor, ceiling, tau, onChange }: {
+export type EnergySetting = 'energy_source' | 'lufs_floor' | 'lufs_ceiling' | 'adaptation_tau_s'
+
+export function validateEnergySettings(floor: string, ceiling: string, tau: string): string | null {
+  if ([floor, ceiling, tau].some(v => !v.trim() || !Number.isFinite(Number(v)))) return 'Energy source settings must be finite'
+  if (Number(floor) >= Number(ceiling)) return 'lufs_floor must be below lufs_ceiling'
+  if (Number(tau) <= 0) return 'adaptation_tau_s must be positive'
+  return null
+}
+
+// Shared labels, fields and validation; the profile workspace retains its cards.
+export function EnergySourceControls({ source, floor, ceiling, tau, onChange, compact = false, disabled = false, pending = false, onCommit }: {
   source: string; floor: string; ceiling: string; tau: string
-  onChange: (field: 'energy_source' | 'lufs_floor' | 'lufs_ceiling' | 'adaptation_tau_s', value: string) => void
+  onChange: (field: EnergySetting, value: string) => void
+  compact?: boolean; disabled?: boolean; pending?: boolean; onCommit?: () => void
 }) {
-  return <section className="space-y-3" aria-label="Energy source">
-    <Label>Energy source</Label>
-    <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-3">
-      {ENERGY_SOURCE_OPTIONS.map(opt => <button key={opt.value} type="button"
-        aria-pressed={source === opt.value} onClick={() => onChange('energy_source', opt.value)}
-        className={`rounded border p-2.5 text-left text-sm ${source === opt.value ? 'border-primary bg-primary/10' : 'border-border hover:border-muted-foreground/60'}`}>
+  const error = validateEnergySettings(floor, ceiling, tau)
+  const fields = source === 'loudness_fixed'
+    ? [{ field: 'lufs_floor' as const, label: 'Floor', unit: 'LUFS', value: floor },
+       { field: 'lufs_ceiling' as const, label: 'Ceiling', unit: 'LUFS', value: ceiling }]
+    : source === 'loudness_adaptive'
+      ? [{ field: 'adaptation_tau_s' as const, label: 'Adaptation', unit: 's', value: tau }] : []
+  return <section className={compact ? 'space-y-2' : 'space-y-3'} aria-label="Energy source settings">
+    {!compact && <Label>Energy source</Label>}
+    <div role={compact ? 'radiogroup' : undefined} aria-label={compact ? 'Energy source' : undefined}
+      className={compact ? 'grid grid-cols-3 rounded-md bg-secondary p-1' : 'grid grid-cols-1 gap-1.5 sm:grid-cols-3'}>
+      {ENERGY_SOURCE_OPTIONS.map((opt, index) => <button key={opt.value} type="button"
+        role={compact ? 'radio' : undefined} aria-checked={compact ? source === opt.value : undefined}
+        tabIndex={compact ? (source === opt.value ? 0 : -1) : undefined}
+        aria-pressed={compact ? undefined : source === opt.value} disabled={disabled} aria-disabled={disabled || pending}
+        onClick={() => { if (!pending) onChange('energy_source', opt.value) }}
+        onKeyDown={event => {
+          if (pending || !compact || !['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return
+          event.preventDefault()
+          const next = event.key === 'Home' ? 0 : event.key === 'End' ? 2
+            : (index + (['ArrowLeft', 'ArrowUp'].includes(event.key) ? 2 : 1)) % 3
+          ;(event.currentTarget.parentElement!.children[next] as HTMLButtonElement).focus()
+          onChange('energy_source', ENERGY_SOURCE_OPTIONS[next].value)
+        }}
+        className={compact
+          ? `min-w-0 rounded px-2 py-1.5 text-xs font-medium disabled:opacity-50 ${source === opt.value ? 'bg-primary text-primary-foreground' : 'text-muted-foreground'}`
+          : `rounded border p-2.5 text-left text-sm ${source === opt.value ? 'border-primary bg-primary/10' : 'border-border hover:border-muted-foreground/60'}`}>
         <div className="font-medium">{opt.label}</div>
-        <div className="mt-0.5 text-xs text-muted-foreground">{opt.description}</div>
+        {!compact && <div className="mt-0.5 text-xs text-muted-foreground">{opt.description}</div>}
       </button>)}
     </div>
-    {source === 'loudness_fixed' && <div className="grid grid-cols-2 gap-3">
-      <label className="space-y-1 text-xs">Floor (LUFS)
-        <Input type="number" step="0.1" value={floor} onChange={e => onChange('lufs_floor', e.target.value)} />
-      </label>
-      <label className="space-y-1 text-xs">Ceiling (LUFS)
-        <Input type="number" step="0.1" value={ceiling} onChange={e => onChange('lufs_ceiling', e.target.value)} />
-      </label>
+    {fields.length > 0 && <div className={compact ? 'flex flex-wrap gap-3' : fields.length === 1 ? 'block' : 'grid grid-cols-2 gap-3'}>
+      {fields.map(({field, label, unit, value}) => <label key={field} className="space-y-1 text-xs">
+        {compact ? label : field === 'adaptation_tau_s' ? 'Adaptation time (seconds)' : `${label} (LUFS)`}
+        <span className={compact ? 'flex items-center gap-1.5' : 'block'}>
+          <Input type="number" step="0.1" min={field === 'adaptation_tau_s' ? '0.1' : undefined}
+            disabled={disabled || pending} value={value} aria-invalid={!!error}
+            className={compact ? 'h-7 w-24 text-xs tabular-nums' : 'tabular-nums'}
+            onChange={e => onChange(field, e.target.value)} onBlur={onCommit}
+            onKeyDown={e => { if (e.key === 'Enter' && onCommit) { e.preventDefault(); e.currentTarget.blur() } }} />
+          {compact && <span aria-hidden="true" className="text-muted-foreground">{unit}</span>}
+        </span>
+      </label>)}
     </div>}
-    {source === 'loudness_adaptive' && <label className="block space-y-1 text-xs">Adaptation time (seconds)
-      <Input type="number" min="0.1" step="0.1" value={tau} onChange={e => onChange('adaptation_tau_s', e.target.value)} />
-    </label>}
+    {error && <p role="alert" className="text-xs text-destructive">{error}</p>}
   </section>
 }

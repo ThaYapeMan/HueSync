@@ -1,3 +1,4 @@
+import { LiveEnergySource } from '@/components/LiveEnergySource'
 import { TrackProgress } from '@/components/TrackProgress'
 import { useEffect, useRef, useState } from 'react'
 import { ColourSwatch } from '@/components/ColourSwatch'
@@ -11,6 +12,8 @@ import { Separator } from '@/components/ui/separator'
 import type { PreviewState, SocketStatus } from '@/hooks/usePreviewSocket'
 import {
   type Analyser,
+  type EnergyProfile,
+  getEnergyProfiles,
   BARS_SOURCE_OPTIONS,
   SPECTRUM_BACKEND_OPTIONS,
   ONSET_METHODS,
@@ -99,7 +102,7 @@ function SessionDiagnostics({ status, playerType }: {
 }) {
   if (!status) return null
   return (
-    <div className="mt-3 border-t pt-3 space-y-2">
+    <div className="mt-3 border-t pt-3 space-y-2" data-testid="session-diagnostics">
       <div className="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
         <span className="uppercase tracking-wider">Session</span>
         <dl className="flex flex-wrap items-center gap-x-3 gap-y-2">
@@ -239,6 +242,8 @@ function CouplingSelector({
 }
 
 type Props = Pick<PreviewState, 'colour' | 'channel_colours' | 'onset' | 'bars' | 'status'> & {
+  onOpenEnergyProfile?: (id: string) => void
+  last_energy_input?: number
   normalised_bars?: number[]
   onset_bass?: boolean
   onset_mid?: boolean
@@ -248,7 +253,7 @@ type Props = Pick<PreviewState, 'colour' | 'channel_colours' | 'onset' | 'bars' 
   connected?: boolean
 }
 
-export function NowPlaying({ colour, channel_colours, onset, onset_bass = false, onset_mid = false, onset_treble = false, mix = 0, loudness_momentary_lufs = null, bars, normalised_bars, status, connected = true }: Props) {
+export function NowPlaying({ colour, channel_colours, onset, onset_bass = false, onset_mid = false, onset_treble = false, mix = 0, loudness_momentary_lufs = null, bars, normalised_bars, status, connected = true, onOpenEnergyProfile, last_energy_input = 0 }: Props) {
   const couplingId = status?.active_coupling_id ?? null
   const zoneId = status?.active_zone_id ?? null
 
@@ -280,15 +285,18 @@ export function NowPlaying({ colour, channel_colours, onset, onset_bass = false,
   const [reloadKey, setReloadKey] = useState(0)
   const [couplings, setCouplings] = useState<Coupling[]>([])
   const [analysers, setAnalysers] = useState<Analyser[]>([])
+  const [energyProfiles, setEnergyProfiles] = useState<EnergyProfile[]>([])
   const [players, setPlayers] = useState<VirtualPlayer[]>([])
   useEffect(() => {
     let cancelled = false
     getCouplings().then((items) => { if (!cancelled) setCouplings(items) }).catch(() => {})
     getAnalysers().then((items) => { if (!cancelled) setAnalysers(items) }).catch(() => {})
+    getEnergyProfiles().then((items) => { if (!cancelled) setEnergyProfiles(items) }).catch(() => {})
     getVirtualPlayers().then((items) => { if (!cancelled) setPlayers(items) }).catch(() => {})
     return () => { cancelled = true }
   }, [reloadKey, couplingId, status?.active_energy_profile_id])
   const activeCoupling = couplings.find((item) => item.id === couplingId)
+  const activeEnergyProfile = couplingId ? energyProfiles.find(item => item.id === status?.active_energy_profile_id) : undefined
   const activeAnalyser = analysers.find((item) => item.id === activeCoupling?.analyser_id)
   const playerType = status?.active_player_type ?? players.find((item) => item.id === activeCoupling?.player_id)?.type
 
@@ -447,7 +455,7 @@ export function NowPlaying({ colour, channel_colours, onset, onset_bass = false,
               <StatusGrid status={status} analyser={activeAnalyser} playerType={playerType} />
             </div>
           </div>
-          <div className="mt-3">
+          <div className="mt-3" data-testid="energy-blend">
             <div className="flex items-center justify-between mb-1">
               <span className="text-xs text-muted-foreground">
                 Energy blend
@@ -460,6 +468,7 @@ export function NowPlaying({ colour, channel_colours, onset, onset_bass = false,
               <span className="text-xs font-mono text-muted-foreground">{Math.round(mix * 100)}%</span>
             </div>
             <div className="relative h-2 w-full overflow-hidden rounded-full bg-secondary">
+              <div data-testid="energy-input-marker" title={`Energy input: ${Math.round(last_energy_input * 100)}%`} className="absolute z-10 h-full w-0.5 bg-foreground" style={{ left: `${Math.max(0, Math.min(1, last_energy_input)) * 100}%` }} />
               <div
                 className="h-full bg-primary transition-none"
                 style={{ width: `${mix * 100}%` }}
@@ -471,6 +480,8 @@ export function NowPlaying({ colour, channel_colours, onset, onset_bass = false,
               <span className="text-[10px] text-muted-foreground">High energy</span>
             </div>
           </div>
+          <LiveEnergySource key={activeEnergyProfile?.id ?? 'none'} profile={activeEnergyProfile} active={!!couplingId}
+            onOpen={onOpenEnergyProfile} onUpdated={updated => setEnergyProfiles(items => items.map(item => item.id === updated.id ? updated : item))} />
           <SessionDiagnostics status={status} playerType={playerType} />
         </CardContent>
       </Card>
