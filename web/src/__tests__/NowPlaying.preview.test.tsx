@@ -116,7 +116,7 @@ it('only exposes transport for LMS with a live follow target; AirPlay sync is n/
   }} />)
   expect(screen.getByRole('group', { name: 'Controls the followed player (Living room)' })).toBeInTheDocument()
   view.rerender(<NowPlaying {...props} status={{ ...status, active_player_type: 'LMS', follow_target_mac: null }} />)
-  expect(screen.queryByRole('button', { name: 'Previous' })).not.toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'Previous' })).toBeDisabled()
   view.rerender(<NowPlaying {...props} status={{ ...status,
     active_player_type: 'AirPlay', follow_target_mac: 'stale',
   }} />)

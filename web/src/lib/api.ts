@@ -306,6 +306,6 @@ export const cloneEffect = (id: string) =>
 export const cloneEnergyProfile = (id: string) =>
   request<EnergyProfile>(`/api/energy-profiles/${id}/clone`, { method: 'POST' })
 
-export type TransportAction = 'play' | 'pause' | 'toggle' | 'stop' | 'next' | 'previous'
+export type TransportAction = 'play' | 'pause' | 'toggle' | 'stop' | 'next' | 'previous' | 'seek_forward' | 'seek_backward'
 export const controlCouplingTransport = (id: string, action: TransportAction) =>
   request<{ ok: boolean; target_mac: string }>(`/api/couplings/${id}/transport`, json('POST', { action }))

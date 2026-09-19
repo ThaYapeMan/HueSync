@@ -27,10 +27,13 @@ from urllib.parse import quote, unquote
 
 from .lms_status import query_lms_status
 
-TransportAction = Literal["play", "pause", "toggle", "stop", "next", "previous"]
+TransportAction = Literal[
+    "play", "pause", "toggle", "stop", "next", "previous", "seek_forward", "seek_backward",
+]
 _TRANSPORT_COMMANDS = {
     "play": "play", "pause": "pause 1", "toggle": "pause", "stop": "stop",
     "next": "playlist index +1", "previous": "playlist index -1",
+    "seek_forward": "time +5", "seek_backward": "time -5",
 }
 
 log = logging.getLogger(__name__)

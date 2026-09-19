@@ -413,8 +413,9 @@ export function NowPlaying({ colour, channel_colours, onset, onset_bass = false,
       />
 
       <TrackProgress track={status?.track ?? null} connected={connected}
+        showControls={playerType !== 'AirPlay'}
         transport={playerType === 'LMS' && couplingId && status?.follow_target_mac ? {
-          couplingId, targetName: status.follow_target_name || status.follow_target_mac,
+          couplingId, targetMac: status.follow_target_mac, targetName: status.follow_target_name || status.follow_target_mac,
         } : undefined} />
 
       <Card>

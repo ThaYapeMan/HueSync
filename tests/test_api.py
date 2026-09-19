@@ -1651,6 +1651,7 @@ def transport_session(client, monkeypatch):
 @pytest.mark.parametrize("action,command", [
     ("play", "play"), ("pause", "pause 1"), ("toggle", "pause"),
     ("stop", "stop"), ("next", "playlist index +1"), ("previous", "playlist index -1"),
+    ("seek_forward", "time +5"), ("seek_backward", "time -5"),
 ])
 def test_transport_sends_exact_command_only_to_live_follow_target(
     client, transport_session, action, command, mode,
@@ -1676,7 +1677,10 @@ def test_transport_sends_exact_command_only_to_live_follow_target(
 
 @pytest.mark.parametrize("invalid", ["inactive", "airplay", "missing_target", "self", "managed",
                                      "stopping", "invalid_mac", "no_follower", "other_coupling"])
-def test_transport_rejects_uncontrollable_session_without_cli(client, transport_session, invalid):
+@pytest.mark.parametrize("action", ["stop", "seek_forward", "seek_backward"])
+def test_transport_rejects_uncontrollable_session_without_cli(
+    client, transport_session, invalid, action,
+):
     from huesync.models import VirtualPlayerType
 
     manager, session, exchange, coupling = transport_session
@@ -1699,7 +1703,7 @@ def test_transport_rejects_uncontrollable_session_without_cli(client, transport_
     elif invalid == "other_coupling":
         coupling = Coupling()
         client._storage.save_coupling(coupling)
-    response = client.post(f"/api/couplings/{coupling.id}/transport", json={"action": "stop"})
+    response = client.post(f"/api/couplings/{coupling.id}/transport", json={"action": action})
     assert response.status_code == 409
     exchange.assert_not_called()
 

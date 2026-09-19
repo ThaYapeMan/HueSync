@@ -59,6 +59,11 @@ current locked test dependencies. In particular, jsdom 30.0.1 requires
 `^22.22.2 || ^24.15.0 || >=26.0.0`; installer and CI pin the same compatible
 patch release. See [testing](testing.md).
 
+The player bar vendors four solid media glyphs from Framework7 Icons 5.0.5 (MIT)
+in `MediaIcons.tsx`; its license ships in `web/public/licenses/framework7-icons.txt`.
+No additional package is required: installer, CI and development use the existing
+`npm ci`/build path, and wheel packaging includes the built assets and license.
+
 ## Boundaries
 
 New Spectrum engines implement SpectrumEngine and receive a static registry entry
