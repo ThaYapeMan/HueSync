@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useId, type ReactNode } from 'react'
 import { Slider } from '@/components/ui/slider'
 import { Input } from '@/components/ui/input'
 import { ENERGY_SOURCE_OPTIONS } from '@/lib/api'
@@ -224,10 +224,11 @@ export function validateEnergySettings(floor: string, ceiling: string, tau: stri
 }
 
 // Shared labels, fields and validation; the profile workspace retains its cards.
-export function EnergySourceControls({ source, floor, ceiling, tau, onChange, compact = false, disabled = false, pending = false, onCommit }: {
+export function EnergySourceControls({ source, floor, ceiling, tau, onChange, compact = false, disabled = false, pending = false, onCommit, onStep, header }: {
   source: string; floor: string; ceiling: string; tau: string
   onChange: (field: EnergySetting, value: string) => void
   compact?: boolean; disabled?: boolean; pending?: boolean; onCommit?: () => void
+  onStep?: (field: EnergySetting, value: string) => void; header?: ReactNode
 }) {
   const error = validateEnergySettings(floor, ceiling, tau)
   const fields = source === 'loudness_fixed'
@@ -237,8 +238,10 @@ export function EnergySourceControls({ source, floor, ceiling, tau, onChange, co
       ? [{ field: 'adaptation_tau_s' as const, label: 'Adaptation', unit: 's', value: tau }] : []
   return <section className={compact ? 'space-y-2' : 'space-y-3'} aria-label="Energy source settings">
     {!compact && <Label>Energy source</Label>}
+    <div className={compact ? 'flex flex-wrap items-center justify-between gap-2' : undefined}>
+    {compact && header}
     <div role={compact ? 'radiogroup' : undefined} aria-label={compact ? 'Energy source' : undefined}
-      className={compact ? 'grid grid-cols-3 rounded-md bg-secondary p-1' : 'grid grid-cols-1 gap-1.5 sm:grid-cols-3'}>
+      className={compact ? 'inline-grid w-max grid-cols-3 rounded-md border-[0.5px] border-border bg-background/40 p-0.5' : 'grid grid-cols-1 gap-1.5 sm:grid-cols-3'}>
       {ENERGY_SOURCE_OPTIONS.map((opt, index) => <button key={opt.value} type="button"
         role={compact ? 'radio' : undefined} aria-checked={compact ? source === opt.value : undefined}
         tabIndex={compact ? (source === opt.value ? 0 : -1) : undefined}
@@ -253,25 +256,64 @@ export function EnergySourceControls({ source, floor, ceiling, tau, onChange, co
           onChange('energy_source', ENERGY_SOURCE_OPTIONS[next].value)
         }}
         className={compact
-          ? `min-w-0 rounded px-2 py-1.5 text-xs font-medium disabled:opacity-50 ${source === opt.value ? 'bg-primary text-primary-foreground' : 'text-muted-foreground'}`
+          ? `h-5 whitespace-nowrap rounded px-3 text-xs disabled:opacity-50 ${source === opt.value ? 'bg-secondary text-foreground font-medium shadow-sm ring-[0.5px] ring-border' : 'text-muted-foreground'}`
           : `rounded border p-2.5 text-left text-sm ${source === opt.value ? 'border-primary bg-primary/10' : 'border-border hover:border-muted-foreground/60'}`}>
-        <div className="font-medium">{opt.label}</div>
+        <div className={compact ? undefined : "font-medium"}>{opt.label}</div>
         {!compact && <div className="mt-0.5 text-xs text-muted-foreground">{opt.description}</div>}
       </button>)}
     </div>
-    {fields.length > 0 && <div className={compact ? 'flex flex-wrap gap-3' : fields.length === 1 ? 'block' : 'grid grid-cols-2 gap-3'}>
-      {fields.map(({field, label, unit, value}) => <label key={field} className="space-y-1 text-xs">
-        {compact ? label : field === 'adaptation_tau_s' ? 'Adaptation time (seconds)' : `${label} (LUFS)`}
-        <span className={compact ? 'flex items-center gap-1.5' : 'block'}>
+    </div>
+    {(compact || fields.length > 0) && <div data-testid={compact ? 'energy-parameters' : undefined}
+      className={compact ? 'flex h-7 items-center gap-5' : fields.length === 1 ? 'block' : 'grid grid-cols-2 gap-3'}>
+      {compact && (disabled || fields.length === 0) ? <span className="text-xs text-muted-foreground">
+        {disabled ? 'No active coupling' : 'No parameters for this source'}
+      </span> : fields.map(({field, label, unit, value}) => compact ? <CompactEnergyNumber key={field}
+        label={label} unit={unit} value={value} step={field === 'adaptation_tau_s' ? 5 : 1}
+        disabled={disabled || pending} invalid={!!error} onChange={v => onChange(field, v)}
+        onCommit={onCommit} onStep={v => onStep?.(field, v)} /> : <label key={field} className="space-y-1 text-xs">
+        {field === 'adaptation_tau_s' ? 'Adaptation time (seconds)' : `${label} (LUFS)`}
+        <span className="block">
           <Input type="number" step="0.1" min={field === 'adaptation_tau_s' ? '0.1' : undefined}
-            disabled={disabled || pending} value={value} aria-invalid={!!error}
-            className={compact ? 'h-7 w-24 text-xs tabular-nums' : 'tabular-nums'}
+            disabled={disabled || pending} value={value} aria-invalid={!!error} className="tabular-nums"
             onChange={e => onChange(field, e.target.value)} onBlur={onCommit}
             onKeyDown={e => { if (e.key === 'Enter' && onCommit) { e.preventDefault(); e.currentTarget.blur() } }} />
-          {compact && <span aria-hidden="true" className="text-muted-foreground">{unit}</span>}
         </span>
       </label>)}
     </div>}
     {error && <p role="alert" className="text-xs text-destructive">{error}</p>}
   </section>
+}
+
+// The text field and attached arrow pair share a single border. Keyboard edits
+// commit on blur/Enter; pointer steps use the parent's short PATCH debounce.
+function CompactEnergyNumber({ label, unit, value, step, disabled, invalid, onChange, onCommit, onStep }: {
+  label: string; unit: string; value: string; step: number; disabled: boolean; invalid: boolean
+  onChange: (value: string) => void; onCommit?: () => void; onStep: (value: string) => void
+}) {
+  const id = useId()
+  function stepped(direction: number, multiplier = 1) {
+    return String((Number.isFinite(Number(value)) ? Number(value) : 0) + direction * step * multiplier)
+  }
+  return <div className="flex items-center gap-1.5 text-xs">
+    <label htmlFor={id}>{label}</label>
+      <span className="flex h-6 overflow-hidden rounded border border-input bg-background focus-within:ring-1 focus-within:ring-ring">
+        <input id={id} type="number" value={value} step={step} disabled={disabled} aria-invalid={invalid}
+          className="h-full w-11 min-w-0 appearance-none bg-transparent px-1 text-right tabular-nums outline-none disabled:opacity-50 [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+          onChange={e => onChange(e.target.value)} onBlur={onCommit}
+          onKeyDown={e => {
+            if (e.key === 'Enter') { e.preventDefault(); e.currentTarget.blur() }
+            if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+              e.preventDefault(); onChange(stepped(e.key === 'ArrowUp' ? 1 : -1, e.shiftKey ? 5 : 1))
+            }
+          }} />
+        <span className="grid w-4 grid-rows-2 border-l border-input">
+          {[1, -1].map(direction => <button key={direction} type="button" disabled={disabled}
+            aria-label={`${direction === 1 ? 'Increase' : 'Decrease'} ${label}`}
+            className="flex items-center justify-center bg-secondary text-[8px] leading-none hover:bg-muted disabled:opacity-50 first:border-b first:border-input"
+            onMouseDown={e => e.preventDefault()}
+            onClick={() => onStep(stepped(direction))}>{direction === 1 ? '▴' : '▾'}</button>)}
+        </span>
+      </span>
+    <span aria-hidden="true" className="text-muted-foreground">{unit}</span>
+  </div>
 }
